@@ -47,8 +47,9 @@ static int run_source(SeaVM *vm, const char *source, const char *name) {
     SeaNode *program = sea_parser_parse(&parser);
 
     if (!program) {
-        fprintf(stderr, "sea parse error: %s\n",
-                parser.err_msg ? parser.err_msg : "unknown error");
+        char perr[640];
+        sea_parser_error_string(&parser, name, perr, sizeof(perr));
+        fprintf(stderr, "%s\n", perr);
         sea_parser_free(&parser);
         return SEA_ERR;
     }
@@ -58,8 +59,8 @@ static int run_source(SeaVM *vm, const char *source, const char *name) {
     sea_node_free(program);
 
     if (!chunk) {
-        fprintf(stderr, "sea compile error: %s\n",
-                sea_compile_error() ? sea_compile_error() : "unknown error");
+        fprintf(stderr, "%s:%d: %s\n", name, sea_compile_error_line(),
+                sea_compile_error() ? sea_compile_error() : "compile error");
         return SEA_ERR;
     }
 
@@ -162,8 +163,9 @@ static void cmd_compile(const char *path, const char *outpath) {
     SeaNode *program = sea_parser_parse(&parser);
 
     if (!program) {
-        fprintf(stderr, "sea parse error: %s\n",
-                parser.err_msg ? parser.err_msg : "unknown error");
+        char perr[640];
+        sea_parser_error_string(&parser, path, perr, sizeof(perr));
+        fprintf(stderr, "%s\n", perr);
         sea_parser_free(&parser);
         sea_free(source, strlen(source)+1);
         sea_string_intern_free();
@@ -178,8 +180,8 @@ static void cmd_compile(const char *path, const char *outpath) {
     sea_free(source, strlen(source)+1);
 
     if (!chunk) {
-        fprintf(stderr, "sea compile error: %s\n",
-                sea_compile_error() ? sea_compile_error() : "unknown error");
+        fprintf(stderr, "%s:%d: %s\n", path, sea_compile_error_line(),
+                sea_compile_error() ? sea_compile_error() : "compile error");
         sea_string_intern_free();
     sea_string_int_cache_free();
     sea_string_cache_free();
@@ -223,8 +225,9 @@ static void cmd_bytecode(const char *path) {
     SeaNode *program = sea_parser_parse(&parser);
 
     if (!program) {
-        fprintf(stderr, "sea parse error: %s\n",
-                parser.err_msg ? parser.err_msg : "unknown error");
+        char perr[640];
+        sea_parser_error_string(&parser, path, perr, sizeof(perr));
+        fprintf(stderr, "%s\n", perr);
         sea_parser_free(&parser);
         sea_free(source, strlen(source)+1);
         sea_string_intern_free();
@@ -239,8 +242,8 @@ static void cmd_bytecode(const char *path) {
     sea_free(source, strlen(source)+1);
 
     if (!chunk) {
-        fprintf(stderr, "sea compile error: %s\n",
-                sea_compile_error() ? sea_compile_error() : "unknown error");
+        fprintf(stderr, "%s:%d: %s\n", path, sea_compile_error_line(),
+                sea_compile_error() ? sea_compile_error() : "compile error");
         sea_string_intern_free();
     sea_string_int_cache_free();
     sea_string_cache_free();

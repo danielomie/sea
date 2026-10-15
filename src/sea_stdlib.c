@@ -334,8 +334,9 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     sea_free(src, (size_t)sz + 1);
 
     if (!program) {
-        fprintf(stderr, "sea: parse error in '%s': %s\n", abspath,
-                parser.err_msg ? parser.err_msg : "unknown");
+        char perr[PATH_MAX + 600];
+        sea_parser_error_string(&parser, abspath, perr, sizeof(perr));
+        fprintf(stderr, "sea: %s\n", perr);
         sea_parser_free(&parser);
         sea_obj_release(&key->obj);
         return SEA_NIL_VAL;
@@ -347,8 +348,8 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     sea_node_free(program);
 
     if (!chunk) {
-        fprintf(stderr, "sea: compile error in '%s': %s\n", abspath,
-                sea_compile_error() ? sea_compile_error() : "unknown");
+        fprintf(stderr, "sea: %s:%d: %s\n", abspath, sea_compile_error_line(),
+                sea_compile_error() ? sea_compile_error() : "compile error");
         sea_obj_release(&key->obj);
         return SEA_NIL_VAL;
     }
@@ -425,4 +426,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_time_register(vm);
     sea_lib_gc_register(vm);
     sea_lib_net_register(vm);
+    sea_lib_parser_register(vm);
 }

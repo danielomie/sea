@@ -307,7 +307,7 @@ An initial newline immediately after the opening bracket is ignored. The number 
 | `string.rep` | `rep(s, n [, sep]) → string` | Repeat `s` `n` times, optionally joined by `sep` |
 | `string.byte` | `byte(s [, i]) → int` | Byte value at position `i` (1-based, default 1) |
 | `string.char` | `char(...) → string` | Build a string from byte values |
-| `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%` |
+| `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%`, with flags, width and precision (`%-8s`, `%05.1f`). No length limit; a plain `%s` copies any bytes. An unknown conversion is written as is |
 | `string.find` | `find(s, pattern [, init]) → int\|nil` | Return 1-based start position of first occurrence of `pattern`, or `nil` |
 | `string.split` | `split(s, sep) → array` | Split `s` by separator string; returns an array of strings |
 | `string.contains` | `contains(s, sub) → bool` | True if `sub` is present in `s` |
@@ -541,6 +541,106 @@ print(gc.collect())        -- 2
 Environment: `SEA_GC=0` turns the cycle collector off (cycles leak, but no
 candidates are tracked); `SEA_GC_THRESHOLD=n` sets the minimum number of
 candidates before a collection runs (default 10000).
+
+---
+
+## Module: `sea/parser`
+
+The Sea lexer and parser as a library, built into the VM — the same parser the
+compiler uses, so its trees always match the language. For linters,
+formatters, code generators and editor tooling (`examples/seafmt` is a small
+formatter/checker built on it).
+
+```sea
+local parser = require("sea/parser")
+
+local ast = parser.parse("local x = 1 + 2")
+print(ast.stmts[0].values[0].op)          -- +
+
+local d = parser.check(src, {name = "app.sea"})
+if d ~= nil then print(d.text) end        -- app.sea:3:9: expected 'then' but got 'end'
+
+print(parser.format("local   t={a=1}"))   -- local t = {a = 1}
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `parse` | `parse(src [, opts]) → node \| error` | The tree of `src` (a `"block"` node). A syntax error is an error value `"name:line:col: message"` |
+| `parse_file` | `parse_file(path [, opts]) → node \| error` | The same, reading a file (`name` defaults to the path) |
+| `tokenize` | `tokenize(src [, opts]) → array \| error` | The tokens: `{kind, text, line, col, value}` — `kind` is `"name"`, `"keyword"`, `"number"`, `"string"`, `"op"` or `"comment"`; `value` is the number or the decoded string |
+| `check` | `check(src [, opts]) → nil \| table` | Parse and compile without running: `nil`, or the first error as `{phase, message, line, col, text}` — `phase` is `"syntax"` or `"compile"` (compile errors have no `col`); `text` is `"name:line[:col]: message"` |
+| `children` | `children(node) → array` | The child nodes, in source order |
+| `walk` | `walk(node, fn)` | Calls `fn(node, parent)` on every node, parents first; returning `false` skips that node's children. The children are read after `fn` returns, so `fn` may change them. A panic in `fn` propagates |
+| `format` | `format(src_or_node [, opts]) → string \| error` | Source code printed in the canonical layout (below) |
+
+Options: `name` (used in error messages, default `"<input>"`); for `parse` and
+`parse_file`, `comments = true` adds the comments to the root as
+`comments: [{text, line, col, inline}]` (`inline`: code precedes it on its
+line); for `tokenize`, `comments = true` includes comment tokens; for `format`,
+`indent` (number of spaces, or a string; default 4).
+
+**Nodes** are tables with `type`, `line` and `col` (1-based; columns count
+bytes). A statement's position is its first token; an operator's, call's or
+access's is the operator token (`+`, `(`, `[`, `.`, `:`). Blocks, tables and
+calls also have `end_line`, the line of the token that closes them (`end`,
+`else`, `elseif`, `case`, `}`, `)`). A node written in parentheses has
+`paren = true`.
+
+| `type` | Fields |
+|--------|--------|
+| `"nil"`, `"break"`, `"continue"`, `"vararg"`, `"map_lit"` | — |
+| `"bool"` | `value` |
+| `"number"` | `value` (int or float), `is_float`, `raw` (the source text, e.g. `0x1F`) |
+| `"string"` | `value` (decoded), `raw` (the literal as written, with its quotes) |
+| `"ident"` | `name` |
+| `"unop"` | `op` (`-`, `not`, `~`), `operand` |
+| `"binop"` | `op`, `left`, `right` |
+| `"index"` | `object`, `index` (`nil` in `t[] = v`) |
+| `"field"` | `object`, `field` (string) |
+| `"call"` | `callee`, `args`, `end_line` |
+| `"method_call"` | `object`, `method` (string), `args`, `end_line` |
+| `"func"` | `params: [{name, is_vararg}]`, `body`, `name` (string or `nil`), `is_method` |
+| `"table"` | `fields: [{key, value}]` (`key` is `nil` for positional fields; `x = 1` has a `"string"` key), `end_line` |
+| `"array_lit"` | `cap` (node or `nil`) |
+| `"chan_recv"` | `channel` |
+| `"chan_send"` | `channel`, `value` |
+| `"propagate"` | `expr` (`expr?`) |
+| `"block"`, `"do"` | `stmts`, `end_line` |
+| `"local"` | `names` (strings), `values`, `is_const` |
+| `"assign"` | `targets`, `values` |
+| `"if"` | `cond`, `then_body`, `else_body` (`nil`, a block, or an `"if"` node for `elseif`) |
+| `"while"` | `cond`, `body` |
+| `"for_num"` | `var` (string), `start`, `limit`, `step` (or `nil`), `body` |
+| `"for_in"` | `vars` (strings), `iter`, `body` |
+| `"return"` | `values` |
+| `"go"`, `"defer"` | `call` |
+| `"select"` | `cases: [{stmt, body, is_default}]` |
+| `"panic"` | `value` |
+| `"del"` | `target` |
+| `"expr_stmt"` | `expr` |
+
+Binary operators: `or and == ~= < <= > >= | ~ & << >> .. + - * / // % ^` (`!=`
+in the source is `~=` in the tree). Some syntax is sugar in the tree:
+`local function f` is a `"local"` whose value is a `"func"` named `f`;
+`function a.b:m(x)` is an `"assign"` to `a.b.m` of a `"func"` with `name = "a"`,
+`is_method = true` and `self` added as its first parameter; `f"s"` is a call.
+Names declared by `local`, `for` and parameters are strings, not `"ident"`
+nodes, so `walk` does not visit them.
+
+**`format`** takes source text or a node (a tree from `parse`, or one built by
+hand — nodes may be tables or structs, lists must be arrays). It prints one
+statement per line, indents blocks, spaces operators and adds parentheses only
+where precedence needs them, keeping the ones written in the source. From
+source text (or a tree parsed with `comments = true`) it keeps the comments,
+single blank lines, one-line blocks (`if x then return end`), line breaks
+inside long expressions and argument lists, and literals as written (`raw`,
+when it still matches `value`); trailing comments on consecutive lines are
+aligned. Formatting is idempotent, and the formatted code parses to the same
+tree.
+
+Limits: the parser rejects code nested more than 1000 levels (expressions and
+blocks) or with more than 100 nested functions, with an error rather than a
+stack overflow; these limits apply to every program, not just this library.
 
 ---
 
@@ -795,6 +895,14 @@ end
 - A deferred call takes at most **8 arguments** (for `obj:m(...)`, `self`
   counts as one); more is a compile error.
 
+### Syntax and compile errors
+
+Code that does not parse or compile stops before running, with the position:
+`file:line:col: message` for syntax errors (`app.sea:3:9: expected 'then' but
+got 'end'`) and `file:line: message` for compile errors (`app.sea:7: cannot
+assign to const 'a'`). `require` reports a module's errors the same way.
+`sea/parser`'s `check` returns them as data.
+
 ---
 
 ## Concurrency
@@ -871,7 +979,8 @@ local json = require("./libs/json/json")   -- relative to the requiring file
 local http = require("./libs/http/http")
 ```
 
-Search order:
+Built-in modules (`math`, `string`, `io`, `os`, `sync`, `net`, `time`, `gc`,
+`sea/parser`) are found first. Then the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)
 2. Current working directory + path
 3. Each directory in `SEA_PATH` (colon-separated environment variable)

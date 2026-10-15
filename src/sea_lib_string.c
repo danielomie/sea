@@ -5,6 +5,7 @@
 #include "sea_table.h"
 #include "sea_memory.h"
 #include <ctype.h>
+#include <stdarg.h>
 #include <string.h>
 
 /* Convention (docs/memory.md): natives borrow their arguments and return an
@@ -135,104 +136,123 @@ static SeaValue str_char(SeaVM *vm, int argc, SeaValue *args) {
 }
 
 // string.format(fmt, ...)
+/* Growable output of string.format */
+typedef struct { char *p; size_t len, cap; } FmtBuf;
+
+static void fmt_put(FmtBuf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (b->len + n + 1 > cap) cap *= 2;
+        b->p = (char*)realloc(b->p, cap);
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+}
+
+/* snprintf one conversion straight into the buffer */
+static void fmt_printf(FmtBuf *b, const char *spec, ...) {
+    va_list ap, ap2;
+    va_start(ap, spec);
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, spec, ap);
+    va_end(ap);
+    if (n > 0) {
+        if (b->len + (size_t)n + 1 > b->cap) {
+            size_t cap = b->cap ? b->cap : 256;
+            while (b->len + (size_t)n + 1 > cap) cap *= 2;
+            b->p = (char*)realloc(b->p, cap);
+            b->cap = cap;
+        }
+        vsnprintf(b->p + b->len, (size_t)n + 1, spec, ap2);
+        b->len += (size_t)n;
+    }
+    va_end(ap2);
+}
+
 SeaValue sea_str_format(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1) return SEA_NIL_VAL;
     SeaString *fmt_s = sea_value_get_flat_string(args[0]);
     if (!fmt_s) return SEA_NIL_VAL;
-    const char *fmt = fmt_s->data;
+    const char *p = fmt_s->data, *end = fmt_s->data + fmt_s->len;
 
-    char buf[4096];
-    char *out = buf;
-    size_t out_left = sizeof(buf) - 1;
+    FmtBuf out = {0};
     int arg_idx = 1;
 
-    for (const char *p = fmt; *p && out_left > 0; ) {
-        if (*p != '%') {
-            *out++ = *p++;
-            out_left--;
-            continue;
-        }
-        p++;
-        if (*p == '%') { *out++ = '%'; p++; out_left--; continue; }
+    while (p < end) {
+        const char *lit = p;
+        while (p < end && *p != '%') p++;
+        fmt_put(&out, lit, (size_t)(p - lit));
+        if (p >= end) break;
+        p++;                                       /* '%' */
+        if (p >= end) { fmt_put(&out, "%", 1); break; }
+        if (*p == '%') { fmt_put(&out, "%", 1); p++; continue; }
 
-        // Parse format spec
-        char spec[32];
+        /* the spec: flags, width and precision (at most 9 digits each) */
+        char spec[48];
         int si = 0;
         spec[si++] = '%';
-        // Flags
-        while (*p == '-' || *p == '+' || *p == ' ' || *p == '0' || *p == '#') {
+        while (p < end && strchr("-+ 0#", *p) && si < 8) spec[si++] = *p++;
+        while (p < end && strchr("-+ 0#", *p)) p++;
+        for (int d = 0; p < end && isdigit((unsigned char)*p); p++)
+            if (d++ < 9) spec[si++] = *p;
+        if (p < end && *p == '.') {
             spec[si++] = *p++;
+            for (int d = 0; p < end && isdigit((unsigned char)*p); p++)
+                if (d++ < 9) spec[si++] = *p;
         }
-        // Width
-        while (isdigit((unsigned char)*p)) spec[si++] = *p++;
-        // Precision
-        if (*p == '.') { spec[si++] = *p++; while (isdigit((unsigned char)*p)) spec[si++] = *p++; }
-
-        char conv = *p++;
-        spec[si++] = conv;
+        bool plain = si == 1;                      /* no flags, width or precision */
+        char conv = p < end ? *p++ : '\0';
         spec[si] = '\0';
 
         SeaValue arg = (arg_idx < argc) ? args[arg_idx++] : SEA_NIL_VAL;
-        char tmp[256];
+        char full[64];
 
         switch (conv) {
-            case 'd': case 'i': {
+            case 'd': case 'i': case 'u': case 'x': case 'X': {
                 int64_t v = sea_is_int(arg) ? sea_as_int(arg) : (int64_t)sea_as_number(arg);
-                /* Replace conv char with "ll<conv>" in spec */
-                spec[si-1] = '\0';  /* null out conv */
-                char new_spec[40];
-                snprintf(new_spec, sizeof(new_spec), "%sll%c", spec, conv);
-                snprintf(tmp, sizeof(tmp), new_spec, v);
+                snprintf(full, sizeof full, "%sll%c", spec, conv);
+                if (conv == 'd' || conv == 'i') fmt_printf(&out, full, (long long)v);
+                else fmt_printf(&out, full, (unsigned long long)v);
                 break;
             }
-            case 'u': {
-                uint64_t v = sea_is_int(arg) ? (uint64_t)sea_as_int(arg) : (uint64_t)sea_as_number(arg);
-                spec[si-1] = '\0';
-                char new_spec[40];
-                snprintf(new_spec, sizeof(new_spec), "%sllu", spec);
-                snprintf(tmp, sizeof(tmp), new_spec, v);
-                break;
-            }
-            case 'f': case 'e': case 'E': case 'g': case 'G': {
+            case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
                 double v = sea_is_number(arg) ? sea_as_number(arg) :
                            sea_is_int(arg) ? (double)sea_as_int(arg) : 0.0;
-                snprintf(tmp, sizeof(tmp), spec, v);
+                snprintf(full, sizeof full, "%s%c", spec, conv);
+                fmt_printf(&out, full, v);
                 break;
             }
             case 's': {
-                SeaString *s = sea_vm_tostring(vm, arg);
-                snprintf(tmp, sizeof(tmp), spec, s->data);
-                sea_obj_release(&s->obj);  /* tostring returns rc=1; we release after use */
+                SeaString *str = sea_vm_tostring(vm, arg);
+                if (plain) {
+                    fmt_put(&out, str->data, str->len);   /* any length, any bytes */
+                } else {
+                    snprintf(full, sizeof full, "%ss", spec);
+                    fmt_printf(&out, full, str->data);
+                }
+                sea_obj_release(&str->obj);  /* tostring returns rc=1 */
                 break;
             }
             case 'c': {
                 int64_t v = sea_is_int(arg) ? sea_as_int(arg) : (int64_t)sea_as_number(arg);
-                snprintf(tmp, sizeof(tmp), spec, (int)v);
+                snprintf(full, sizeof full, "%sc", spec);
+                fmt_printf(&out, full, (int)v);
                 break;
             }
-            case 'x': case 'X': {
-                uint64_t v = sea_is_int(arg) ? (uint64_t)sea_as_int(arg) : (uint64_t)sea_as_number(arg);
-                spec[si-1] = '\0';
-                char new_spec[40];
-                snprintf(new_spec, sizeof(new_spec), "%sll%c", spec, conv);
-                snprintf(tmp, sizeof(tmp), new_spec, v);
+            default: {
+                /* unknown conversion: written as is */
+                char u[2] = { '%', conv };
+                fmt_put(&out, u, conv ? 2 : 1);
                 break;
             }
-            default:
-                snprintf(tmp, sizeof(tmp), "%%%c", conv);
-                break;
         }
-
-        size_t tlen = strlen(tmp);
-        size_t copy = tlen < out_left ? tlen : out_left;
-        memcpy(out, tmp, copy);
-        out += copy;
-        out_left -= copy;
     }
-    *out = '\0';
 
     sea_obj_release(&fmt_s->obj);
-    return sea_obj_val(&sea_string_new(buf, (size_t)(out - buf))->obj);
+    SeaString *r = sea_string_new(out.p ? out.p : "", out.len);
+    free(out.p);
+    return sea_obj_val(&r->obj);
 }
 
 // string.find(s, pattern, init?)

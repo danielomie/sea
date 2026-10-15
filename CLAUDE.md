@@ -11,7 +11,7 @@ make asan             # AddressSanitizer build
 make clean            # Remove bin/ and obj/
 make sea-jit          # Build bin/sea-jit (optional JIT, needs libgccjit headers)
 
-# Native libraries under libs/ (e.g. json, xml, console, http, ssl, jwt, parser)
+# Native libraries under libs/ (e.g. json, xml, console, http, ssl, jwt)
 make -C libs/json     # Build a library's .so
 ```
 
@@ -24,6 +24,7 @@ make test-dwe                    # Unit tests with dead-write-elimination checks
 make test-seac                   # Unit tests run as compiled .seac bytecode
 make test-jit                    # Unit tests with every chunk JIT-compiled (bin/sea-jit)
 make test-asan                   # Run under AddressSanitizer
+make test-format                 # sea/parser format round trip over every .sea file
 bash tests/run_tests.sh 24       # Run only tests matching pattern "24"
 bin/sea tests/run_tests.sea      # Run test runner directly
 bash tests/arm64/run.sh          # Build + test on aarch64 in Docker (needs qemu binfmt; see the script)
@@ -79,8 +80,12 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
 2. Current working directory + path
 3. Each directory in `SEA_PATH` (colon-separated env var)
 
-Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `xml`, `parser` (native `.so`), `http`, `ssl`, `jwt` (Sea + native) and `flags` (pure Sea) — see `docs/libs.md`.
+Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `xml` (native `.so`), `http`, `ssl`, `jwt` (Sea + native) and `flags` (pure Sea) — see `docs/libs.md`.
 TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.
+The parser is also exposed to Sea code as the built-in `sea/parser` module (`src/sea_lib_parser.c`:
+parse, tokenize, check, walk, format). Changing the AST (`sea_ast.h`) or the parser means updating
+its conversion there, then `make test-format` (format every `.sea` file, reparse, compare the
+trees, format again).
 
 **Require paths are relative to the requiring file**: a lib's own examples use `"../libname"`; files under `examples/<name>/` reach a library as `"../../libs/json/json"`.
 

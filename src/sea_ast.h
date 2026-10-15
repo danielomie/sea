@@ -97,7 +97,9 @@ typedef struct {
 struct SeaNode {
     SeaNodeType type;
     int         line;
+    int         col;           /* column of the node's first token (operators: of the operator) */
     bool        num_is_float;  /* for NODE_NUMBER: true when source had '.', 'e', or 'E' */
+    bool        paren;         /* written in parentheses (kept by sea/parser's format) */
     union {
         // Literals
         double  number;
@@ -117,11 +119,11 @@ struct SeaNode {
         // Field: expr.name
         struct { SeaNode *obj; char *field; } field;
 
-        // Function call: expr(args...)
-        struct { SeaNode *fn; SeaNode **args; int argc; } call;
+        // Function call: expr(args...)   (end_line: line of the ')')
+        struct { SeaNode *fn; SeaNode **args; int argc; int end_line; } call;
 
         // Method call: expr:name(args...)
-        struct { SeaNode *obj; char *method; SeaNode **args; int argc; } method;
+        struct { SeaNode *obj; char *method; SeaNode **args; int argc; int end_line; } method;
 
         // Function definition
         struct {
@@ -129,6 +131,7 @@ struct SeaNode {
             int       paramc;
             SeaNode  *body;
             char     *name;   // optional name
+            bool      is_method;  // function a:b() — `self` was added as params[0]
         } func;
 
         // Table literal: {key=val, ...}
@@ -136,13 +139,15 @@ struct SeaNode {
             SeaNode **keys;    // NULL entry = array-style (sequential int key)
             SeaNode **vals;
             int       count;
+            int       end_line;  // line of the '}'
         } table;
 
         // Array literal: [] or [cap_expr]
         struct { SeaNode *cap; } array_lit;   // cap=NULL for [], cap=expr for [n]
 
-        // Block of statements
-        struct { SeaNode **stmts; int count; } block;
+        // Block of statements (end_line: line of the token that ends it:
+        // end, else, elseif, case or the end of the input)
+        struct { SeaNode **stmts; int count; int end_line; } block;
 
         // Local: local x, y = expr, expr  (or const x = expr)
         struct {

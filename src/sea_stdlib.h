@@ -21,6 +21,7 @@ void sea_lib_sync_register(SeaVM *vm);
 void sea_lib_map_register(SeaVM *vm);
 void sea_lib_time_register(SeaVM *vm);
 void sea_lib_net_register(SeaVM *vm);
+void sea_lib_parser_register(SeaVM *vm);   /* require("sea/parser") */
 
 // Internal helper used by stdlib lib files
 void mod_set(SeaVM *vm, SeaTable *mod, const char *name,

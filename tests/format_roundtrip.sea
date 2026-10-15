@@ -1,0 +1,74 @@
+-- Round trip of sea/parser's format over the files given as arguments:
+-- format(src) must parse to the same tree as src (positions, raw literal
+-- text and parentheses aside), and formatting it again must not change it.
+--   make test-format      (every .sea file in the repository)
+local parser = require("sea/parser")
+
+local skip = [=]
+skip["line"] = true
+skip["col"] = true
+skip["raw"] = true
+skip["comments"] = true
+skip["paren"] = true
+skip["end_line"] = true
+
+local function same(a, b, path)
+    local ta, tb = type(a), type(b)
+    if ta != tb then return path .. ": type " .. ta .. " vs " .. tb end
+    if ta == "array" then
+        if len(a) != len(b) then return path .. ": len " .. len(a) .. " vs " .. len(b) end
+        for i, v in a do
+            local d = same(v, b[i], path .. "[" .. i .. "]")
+            if d then return d end
+        end
+        return nil
+    end
+    if ta == "table" then
+        for k, v in a do
+            if not skip[k] then
+                local d = same(v, b[k], path .. "." .. k)
+                if d then return d end
+            end
+        end
+        for k, v in b do
+            if not skip[k] and a[k] == nil and v != nil then return path .. "." .. k .. ": missing" end
+        end
+        return nil
+    end
+    if a != b then return path .. ": " .. tostring(a) .. " vs " .. tostring(b) end
+    return nil
+end
+
+local bad = 0
+for i = 1, len(os.args) - 1 do
+    local f = os.args[i]
+    local src = os.readfile(f)
+    local a1 = parser.parse(src)
+    if is_error(a1) then
+        print("SKIP " .. f .. ": " .. a1.message)
+    else
+        local out = parser.format(src)
+        if is_error(out) then
+            print("FAIL " .. f .. ": format: " .. out.message)
+            bad = bad + 1
+        else
+            local a2 = parser.parse(out)
+            if is_error(a2) then
+                print("FAIL " .. f .. ": reparse: " .. a2.message)
+                bad = bad + 1
+            else
+                local d = same(a1, a2, "ast")
+                local out2 = parser.format(out)
+                if d then
+                    print("FAIL " .. f .. ": ast differs at " .. d)
+                    bad = bad + 1
+                elseif out2 != out then
+                    print("FAIL " .. f .. ": not idempotent")
+                    bad = bad + 1
+                end
+            end
+        end
+    end
+end
+print(string.format("format round trip: %d files, %d failed", len(os.args) - 1, bad))
+if bad > 0 then os.exit(1) end

@@ -16,7 +16,6 @@ pure-Sea libraries work out of the box.
 | `ssl` | `libs/ssl/ssl` | Sea + native | `make -C libs/ssl` |
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
 | `flags` | `libs/flags/flags` | pure Sea | — |
-| `parser` | `libs/parser/parser` | native `.so` | `make -C libs/parser` |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
 
@@ -690,86 +689,5 @@ print(flags.narg())   -- number of positional args
 
 ## `parser`
 
-Expõe o parser interno do Sea para código Sea. Ideal para linters, formatadores e ferramentas de análise estática.
-
-**Require:** `require("./libs/parser/parser")`
-**Build:** `make -C libs/parser`
-
-### Functions
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `parse` | `parse(source: string) -> result` | Faz o parse de um string de código Sea |
-| `parse_file` | `parse_file(path: string) -> result` | Lê um arquivo e faz o parse |
-
-O objeto `result` retornado tem os campos:
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `ok` | bool | `true` em caso de sucesso |
-| `ast` | node\|nil | Nó raiz da AST (sempre `"block"`) |
-| `error` | string\|nil | Mensagem de erro (apenas quando `ok == false`) |
-| `line` | int\|nil | Linha do erro (apenas quando `ok == false`) |
-
-### AST Node Format
-
-Cada nó é uma tabela com campos obrigatórios `type` (string) e `line` (int), mais campos específicos por tipo:
-
-| `type` | Campos extras |
-|--------|--------------|
-| `"nil"`, `"break"`, `"continue"`, `"vararg"`, `"map_lit"` | — |
-| `"bool"` | `value: bool` |
-| `"number"` | `value: int\|number`, `is_float: bool` |
-| `"string"` | `value: string` |
-| `"ident"` | `name: string` |
-| `"unop"` | `op: string`, `operand: node` |
-| `"binop"` | `op: string`, `left: node`, `right: node` |
-| `"index"` | `object: node`, `index: node` |
-| `"field"` | `object: node`, `field: string` |
-| `"call"` | `callee: node`, `args: [node]` |
-| `"method_call"` | `object: node`, `method: string`, `args: [node]` |
-| `"func"` | `name: string\|nil`, `params: [{name, is_vararg}]`, `body: node` |
-| `"table"` | `fields: [{key: node\|nil, value: node}]` |
-| `"array_lit"` | `cap: node\|nil` |
-| `"chan_recv"` | `channel: node` |
-| `"chan_send"` | `channel: node`, `value: node` |
-| `"propagate"` | `expr: node` |
-| `"block"` | `stmts: [node]` |
-| `"do"` | `stmts: [node]` |
-| `"local"` | `names: [string]`, `values: [node]` |
-| `"assign"` | `targets: [node]`, `values: [node]` |
-| `"if"` | `cond: node`, `then_body: node`, `else_body: node\|nil` |
-| `"while"` | `cond: node`, `body: node` |
-| `"for_num"` | `var: string`, `start: node`, `limit: node`, `step: node\|nil`, `body: node` |
-| `"for_in"` | `vars: [string]`, `iter: node`, `body: node` |
-| `"return"` | `values: [node]` |
-| `"go"` | `call: node` |
-| `"select"` | `cases: [{stmt: node\|nil, body: node, is_default: bool}]` |
-| `"defer"` | `call: node` |
-| `"panic"` | `value: node` |
-| `"del"` | `target: node` |
-| `"expr_stmt"` | `expr: node` |
-
-Strings de `op` para `"binop"`: `+`, `-`, `*`, `/`, `//`, `%`, `^`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `and`, `or`, `..`, `&`, `|`, `~`, `<<`, `>>`, `<-`
-
-Strings de `op` para `"unop"`: `-`, `not`, `~`, `<-`
-
-Nota: `function name() ... end` na raiz é representado como `"assign"` com `values[0].type == "func"`.
-
-### Example
-
-```sea
-local parser = require("./libs/parser/parser")
-
-local r = parser.parse_file("mycode.sea")
-if not r.ok then
-    print("Erro na linha " .. r.line .. ": " .. r.error)
-    return
-end
-
--- percorre todos os statements do bloco raiz
-for i = 0, len(r.ast.stmts) - 1 do
-    local stmt = r.ast.stmts[i]
-    print(stmt.line .. ": " .. stmt.type)
-end
-```
+The Sea parser is a built-in module now: `require("sea/parser")`, with no
+build step. See [reference.md](reference.md#module-seaparser).

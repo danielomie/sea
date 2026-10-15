@@ -1,0 +1,44 @@
+block	3	6
+local	1	1	false	x
+binop	+	16	31	0x1F	false
+true	true	'a\n'
+assign	true	obj	self	true	5
+true	*
+true	bad.sea:2:1: unexpected token '<eof>' in expression
+<input>:1:5: unterminated string
+<input>:1:1: 'break' outside of loop
+1	1	false	-- top
+2	13	true	-- trailing
+keyword	if	1	1	nil
+name	a	1	4	nil
+op	~=	1	6	nil
+number	1.5	1	9	1.5
+keyword	then	1	13	nil
+name	f	1	18	nil
+string	'x'	1	19	x
+keyword	end	1	23	nil
+comment	-- c	1	27	nil
+<input>:1:5: unexpected character '@'
+nil
+syntax	2	5	unexpected token '<eof>' in expression
+compile	2	nil	c.sea:2: cannot assign to const 'a'
+0	number
+1	number
+1	2	1	nil
+local x = 0x1F + 2
+const k = 'a\n'
+function Obj:m(a, ...)
+    return (a * 2)
+end
+local t = {a = 1, b = {2, 3}} -- t
+if t then print(t.a) end
+
+while x > 0 do
+    x = x - 1 -- dec
+    y = y + 1 -- inc
+end
+(a + 1) * -(-2)
+parser.format: invalid variable name 'end'
+code nested too deeply (limit 1000)
+block	true
+parser.parse_file: cannot read 'tests/unit/no_such_file.sea': No such file or directory

@@ -1,0 +1,70 @@
+-- sea/parser: the built-in parser library
+local parser = require("sea/parser")
+
+-- parse: positions, literals and flags
+local src = "local x = 0x1F + 2\nconst k = 'a\\n'\nfunction obj:m(a, ...)\n    return (a * 2)\nend\n"
+local ast = parser.parse(src)
+print(ast.type, len(ast.stmts), ast.end_line)
+local s0 = ast.stmts[0]
+print(s0.type, s0.line, s0.col, s0.is_const, s0.names[0])
+local add = s0.values[0]
+print(add.type, add.op, add.col, add.left.value, add.left.raw, add.left.is_float)
+local s1 = ast.stmts[1]
+print(s1.is_const, s1.values[0].value == "a\n", s1.values[0].raw)
+local fn = ast.stmts[2].values[0]
+print(ast.stmts[2].type, fn.is_method, fn.name, fn.params[0].name, fn.params[2].is_vararg, fn.body.end_line)
+print(fn.body.stmts[0].values[0].paren, fn.body.stmts[0].values[0].op)
+
+-- errors are values: "name:line:col: message"
+local e = parser.parse("local x = (1 +\n", {name = "bad.sea"})
+print(is_error(e), e.message)
+print(parser.parse("x = 'unterminated").message)
+print(parser.parse("break").message)
+
+-- comments
+local c = parser.parse("-- top\nlocal a = 1 -- trailing\n", {comments = true})
+for i, cm in c.comments do print(cm.line, cm.col, cm.inline, cm.text) end
+
+-- tokenize
+for i, t in parser.tokenize("if a ~= 1.5 then f'x' end -- c", {comments = true}) do
+    print(t.kind, t.text, t.line, t.col, t.value)
+end
+print(parser.tokenize("a = @").message)
+
+-- check: syntax and compile errors, without running
+print(parser.check("print(1)"))
+local d = parser.check("local a = 1\na = ", {name = "c.sea"})
+print(d.phase, d.line, d.col, d.message)
+d = parser.check("const a = 1\na = 2\n", {name = "c.sea"})
+print(d.phase, d.line, d.col, d.text)
+
+-- children and walk
+for i, ch in parser.children(add) do print(i, ch.type) end
+local count = [=]
+parser.walk(ast, function(node, parent)
+    count[node.type] = (count[node.type] or 0) + 1
+    if node.type == "func" then return false end    -- skip function bodies
+end)
+print(count["binop"], count["number"], count["func"], count["return"])
+
+-- walk can rewrite the tree, and format prints it back
+parser.walk(ast, function(node)
+    if node.type == "ident" and node.name == "obj" then node.name = "Obj" end
+end)
+printf("%s", parser.format(ast))
+
+-- format source: comments, one-line blocks, aligned trailing comments
+printf("%s", parser.format("local   t={a=1,b={2,3}} -- t\nif t then print( t.a ) end\n\n\nwhile x>0 do\n  x=x-1   -- dec\n  y = y+1 -- inc\nend\n"))
+
+-- format a tree built by hand: parentheses come from precedence
+print(parser.format({type = "binop", op = "*",
+    left = {type = "binop", op = "+", left = {type = "ident", name = "a"}, right = {type = "number", value = 1}},
+    right = {type = "unop", op = "-", operand = {type = "number", value = -2}}}))
+print(parser.format({type = "ident", name = "end"}).message)
+
+-- deep input is an error, not a crash
+print(parser.check(string.rep("(", 2000) .. "1" .. string.rep(")", 2000)).message)
+
+local self_ast = parser.parse_file("tests/unit/112_parser.sea")
+print(self_ast.type, len(self_ast.stmts) > 10)
+print(parser.parse_file("tests/unit/no_such_file.sea").message)

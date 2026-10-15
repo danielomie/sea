@@ -5,10 +5,17 @@
 #include <math.h>
 #include <stdarg.h>
 
-static char g_compile_error[512] = {0};
+/* The first error of the last compilation on this thread (goroutines can
+ * require modules concurrently): message without position, and its line. */
+static _Thread_local char g_compile_error[512];
+static _Thread_local int  g_compile_error_line;
 
 const char* sea_compile_error(void) {
     return g_compile_error[0] ? g_compile_error : NULL;
+}
+
+int sea_compile_error_line(void) {
+    return g_compile_error_line;
 }
 
 // ---- Register metadata helpers (Etapa 2: constant folding) ----
@@ -370,7 +377,10 @@ static void compiler_error(SeaCompiler *c, int line, const char *fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, args);
     va_end(args);
     snprintf(c->err_msg, sizeof(c->err_msg), "line %d: %s", line, msg);
-    snprintf(g_compile_error, sizeof(g_compile_error), "line %d: %s", line, msg);
+    if (!g_compile_error[0]) {
+        snprintf(g_compile_error, sizeof(g_compile_error), "%s", msg);
+        g_compile_error_line = line;
+    }
 }
 
 static int alloc_reg(SeaCompiler *c) {
@@ -3393,6 +3403,7 @@ static SeaChunk* compile_program(SeaNode *program, const char *source_name, bool
     if (!program) return NULL;
 
     g_compile_error[0] = '\0';
+    g_compile_error_line = 0;
 
     SeaCompiler c;
     memset(&c, 0, sizeof(c));

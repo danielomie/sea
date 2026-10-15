@@ -440,3 +440,33 @@ Desempenho:
 Encontrados no caminho:
 - **`libs/jwt`** testava `if not claims` depois do decode: com valores de erro, um payload inválido passaria. Agora usa `is_error` e exige uma tabela.
 - **`libs/http`** chamava `error(...)` esperando interromper, mas em Sea `error()` só cria um valor. Agora usa `panic`: um `http.json` de valor que não pode ser codificado vira 500, e o client recusa um `opts.json` assim.
+
+## Parser como módulo embutido `sea/parser` **(2026-10)**
+
+A antiga `libs/parser` (um `.so` que recompilava o lexer e o parser) virou o
+módulo embutido `require("sea/parser")`: sem build, sempre o mesmo parser do
+compilador. Novidades:
+- colunas, `end_line` de blocos/tabelas/chamadas, `raw` dos literais, `paren`, `is_const`, `is_method`;
+- comentários (`comments = true`), `tokenize`, `check` (sintaxe e compilação sem rodar), `children`/`walk`;
+- `format`, que preserva comentários, linhas em branco, blocos de uma linha e a forma dos literais.
+
+Erros de sintaxe agora saem como `arquivo:linha:col: mensagem` (antes `sea parse
+error: line N: mensagem`, sem arquivo nem coluna), e os de compilação como
+`arquivo:linha: mensagem`.
+
+Confirmados por teste antes da correção:
+- **Segfault com código muito aninhado.** Cerca de 450 funções aninhadas, ou
+  60 mil parênteses, estouravam a pilha do parser/compilador. Agora há limites
+  (1000 níveis de expressão/bloco, 100 funções aninhadas) que dão erro.
+- **`string.format`/`printf` truncavam:** cada `%s` em 255 bytes e o resultado
+  inteiro em 4095.
+
+Lidos no código e corrigidos junto (buffer dinâmico):
+- uma especificação com muitas flags ou dígitos (`%----…d`) escrevia além de `spec[32]` na pilha;
+- um `%` no fim da string fazia o laço ler além do terminador.
+
+Encontrados no caminho:
+- o erro de compilação ficava num buffer global: dois `require` em goroutines diferentes podiam trocar as mensagens. Agora é por thread, e guarda o primeiro erro, não o último;
+- o lexer montava "unexpected character" num buffer `static`, compartilhado entre threads;
+- um `#` fora do início da linha virava token de erro sem mensagem;
+- tokens de string multilinha levavam a linha do fim, não a do começo.

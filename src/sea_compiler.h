@@ -126,5 +126,7 @@ SeaChunk* sea_compile(SeaNode *program, const char *source_name);
 // Compile the program's main script (see sea_compile_main in sea_compiler.c)
 SeaChunk* sea_compile_main(SeaNode *program, const char *source_name);
 
-// Get last compilation error
+// The first error of the last failed compilation on this thread (message
+// without position; NULL if none) and its line
 const char* sea_compile_error(void);
+int         sea_compile_error_line(void);

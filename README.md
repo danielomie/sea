@@ -34,7 +34,8 @@ for i = 1, 6 do print(<-results) end
   goroutines) plus a cycle collector; see [memory](docs/memory.md).
 - **Fast** — NaN-boxed values, computed-goto dispatch, an optimizing compiler,
   and an optional JIT (libgccjit) that speeds hot numeric code up 2–4×.
-- **Batteries** — `math`, `string`, `io`, `os`, `sync`, `time`; external
+- **Batteries** — `math`, `string`, `io`, `os`, `sync`, `time`, `net`, and
+  `sea/parser` (Sea's own parser: AST, tokens, checks, a formatter); external
   libraries for JSON, XML, HTTP, TLS, JWT, CLI flags and a terminal UI.
 
 ## Quick start
@@ -70,7 +71,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 |----------|----------|
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
-| [Libraries](docs/libs.md) | `json`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `parser` |
+| [Libraries](docs/libs.md) | `json`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |
@@ -89,7 +90,7 @@ with `bin/sea-jit --jit`).
 | Algorithms | `graphs` (BFS maze + Dijkstra with a binary heap), `dynamic_programming` (LCS, edit distance, knapsack, memoization) |
 | Closures | `generators` (generators, memoization, per-iteration loop variables), `closures` |
 | Text & data | `word_count`, `calculator` (lexer + recursive-descent parser), `csv_report` (CSV → aggregation → JSON), `strings`, `verbos` |
-| Language & stdlib | `collections`, `structs`, `errors`, `os_demo`, `time_demo`, `file_watcher` |
+| Language & stdlib | `collections`, `structs`, `errors`, `os_demo`, `time_demo`, `file_watcher`, `seafmt` (formatter/checker on `sea/parser`) |
 | Concurrency | `pipeline`, `worker_pool`, `pubsub`, `timeout`, `rate_limiter`, `circuit_breaker`, `pool`, `logger`, `webhook`, `metrics_server` |
 
 ## Performance
@@ -111,6 +112,7 @@ make test-dwe    # tests with the optimizer's diagnostic checks
 make test-seac   # tests run from compiled .seac bytecode
 make test-jit    # tests with every chunk JIT-compiled
 make test-asan   # tests under AddressSanitizer
+make test-format # sea/parser's formatter round trip over every .sea file
 bash tests/compare/run_benchmarks.sh   # regenerate docs/benchmarks.md
 ```
 

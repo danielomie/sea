@@ -25,7 +25,7 @@ JIT_OBJ_DIR = obj-jit
 JIT_OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(JIT_OBJ_DIR)/%.o)
 JIT_TARGET  = $(BIN_DIR)/sea-jit
 
-.PHONY: all clean test test-jit test-seac test-dwe asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
+.PHONY: all clean test test-jit test-seac test-dwe test-format asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
 
 all: $(TARGET)
 
@@ -119,6 +119,10 @@ endif
 
 test: all
 	@$(TARGET) tests/run_tests.sea
+
+# sea/parser's format round trip over every .sea file (see the script)
+test-format: $(TARGET)
+	@$(TARGET) tests/format_roundtrip.sea $$(find . -name '*.sea' -not -path './.git/*' | sort)
 
 # Run tests under AddressSanitizer (leak detection disabled; register-borrowing
 # semantics mean local variables that are never stored to a container will appear

@@ -1,0 +1,106 @@
+--
+-- seafmt — format and check Sea source with the built-in parser library
+--
+--   bin/sea examples/seafmt/seafmt.sea file.sea          formatted code on stdout
+--   bin/sea examples/seafmt/seafmt.sea -l files...       list files not formatted
+--   bin/sea examples/seafmt/seafmt.sea -w files...       rewrite files in place
+--   bin/sea examples/seafmt/seafmt.sea -c files...       check: syntax and compile errors
+--   bin/sea examples/seafmt/seafmt.sea -s file.sea       summary: functions and globals
+--
+-- Demonstra require("sea/parser"): parse, format, check, walk.
+--
+
+local parser = require("sea/parser")
+
+local mode = "print"
+local files = []
+for i = 1, len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-l" then
+        mode = "list"
+    elseif a == "-w" then
+        mode = "write"
+    elseif a == "-c" then
+        mode = "check"
+    elseif a == "-s" then
+        mode = "summary"
+    else
+        files[] = a
+    end
+end
+
+if len(files) == 0 then
+    print("usage: seafmt [-l | -w | -c | -s] file.sea...")
+    os.exit(2)
+end
+
+-- the names a block declares with `local`, and the globals it assigns
+local function summary(path, src)
+    local ast = parser.parse(src, {name = path})?
+    local locals = [=]
+    local funcs = []
+    local globals = []
+    parser.walk(ast, function(node, parent)
+        if node.type == "local" then
+            for _, name in node.names do locals[name] = true end
+        elseif node.type == "func" and node.name ~= nil then
+            local kind = "function"
+            if node.is_method then kind = "method" end
+            funcs[] = string.format("%4d  %-8s %s(%d params)", node.line, kind, node.name, len(node.params))
+        elseif node.type == "assign" then
+            for _, t in node.targets do
+                if t.type == "ident" and not locals[t.name] then
+                    globals[] = string.format("%4d  global   %s", t.line, t.name)
+                end
+            end
+        end
+    end)
+    print(path .. ":")
+    for _, f in funcs do print(f) end
+    for _, g in globals do print(g) end
+    return nil
+end
+
+local status = 0
+for _, path in files do
+    local src = os.readfile(path)
+    if src == nil then
+        print(path .. ": cannot read")
+        status = 1
+        continue
+    end
+    if mode == "check" then
+        local d = parser.check(src, {name = path})
+        if d ~= nil then
+            print(d.text .. "  (" .. d.phase .. ")")
+            status = 1
+        end
+        continue
+    end
+    if mode == "summary" then
+        local r = summary(path, src)
+        if is_error(r) then
+            print(r.message)
+            status = 1
+        end
+        continue
+    end
+
+    local out = parser.format(src, {name = path})
+    if is_error(out) then
+        print(out.message)
+        status = 1
+    elseif mode == "print" then
+        printf("%s", out)
+    elseif out ~= src then
+        if mode == "list" then
+            print(path)
+        else
+            local f = io.open(path, "w")
+            io.write_string(f, out)
+            io.close(f)
+            print("formatted " .. path)
+        end
+    end
+end
+os.exit(status)

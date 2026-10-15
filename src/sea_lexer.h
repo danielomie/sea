@@ -27,6 +27,7 @@ typedef enum {
     TK_ARROW_LEFT,   // <-
     TK_ARROW_RIGHT,  // ->
     TK_QUESTION,     // ?
+    TK_COMMENT,      // -- ... (only with SeaLexer.keep_comments)
 
     TK_EOF,
     TK_ERROR,
@@ -34,7 +35,8 @@ typedef enum {
 
 typedef struct {
     SeaTK    type;
-    int      line;
+    int      line;       /* line and column (1-based, in bytes) of the first char */
+    int      col;
     const char *start;
     int      len;
     bool     is_float;   /* true when literal has '.', 'e', or 'E' (e.g. 0.0, 1e5) */
@@ -49,6 +51,11 @@ typedef struct {
     const char *cur;
     const char *start;
     int         line;
+    const char *line_start;  /* first char of the current line (for columns) */
+    int         tok_line;    /* position of the token being scanned */
+    int         tok_col;
+    bool        keep_comments; /* return comments as TK_COMMENT (tokenizers) */
+    char        msg_buf[64];
     SeaToken    current;
     SeaToken    lookahead;
     bool        has_lookahead;
@@ -57,6 +64,8 @@ typedef struct {
 
 // Initialize lexer with source code
 void      sea_lexer_init(SeaLexer *l, const char *source);
+// Same, optionally returning comments as TK_COMMENT tokens
+void      sea_lexer_init_ex(SeaLexer *l, const char *source, bool keep_comments);
 
 // Get next token (advances the lexer)
 SeaToken  sea_lexer_next(SeaLexer *l);

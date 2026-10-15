@@ -52,7 +52,7 @@ static char peek_next(SeaLexer *l) {
 
 static char advance_char(SeaLexer *l) {
     char c = *l->cur++;
-    if (c == '\n') l->line++;
+    if (c == '\n') { l->line++; l->line_start = l->cur; }
     return c;
 }
 
@@ -72,10 +72,12 @@ static void skip_whitespace_and_comments(SeaLexer *l) {
             case '\n':
                 l->cur++;
                 l->line++;
+                l->line_start = l->cur;
                 break;
             case '-':
                 // Single line comment: -- ...
                 if (peek_next(l) == '-') {
+                    if (l->keep_comments) return;
                     l->cur += 2;
                     while (*l->cur != '\0' && *l->cur != '\n') l->cur++;
                 } else {
@@ -85,6 +87,7 @@ static void skip_whitespace_and_comments(SeaLexer *l) {
             case '#':
                 // Hash-bang: # at start of file
                 if (l->cur == l->src || l->cur[-1] == '\n') {
+                    if (l->keep_comments) return;
                     while (*l->cur != '\0' && *l->cur != '\n') l->cur++;
                 } else {
                     return;
@@ -109,9 +112,11 @@ static SeaTK check_keyword(const char *start, int len) {
 static SeaToken make_token(SeaLexer *l, SeaTK type) {
     SeaToken t;
     t.type = type;
-    t.line = l->line;
+    t.line = l->tok_line;
+    t.col = l->tok_col;
     t.start = l->start;
     t.len = (int)(l->cur - l->start);
+    t.is_float = false;
     t.val.number = 0;
     return t;
 }
@@ -119,7 +124,9 @@ static SeaToken make_token(SeaLexer *l, SeaTK type) {
 static SeaToken error_token(SeaLexer *l, const char *msg) {
     SeaToken t;
     t.type = TK_ERROR;
-    t.line = l->line;
+    t.line = l->tok_line;
+    t.col = l->tok_col;
+    t.is_float = false;
     t.start = msg;
     t.len = (int)strlen(msg);
     t.val.number = 0;
@@ -141,6 +148,7 @@ static SeaToken scan_string(SeaLexer *l, char quote) {
         char c = *l->cur++;
         if (c == '\n') {
             l->line++;
+            l->line_start = l->cur;
         }
         if (c == '\\') {
             char esc = *l->cur++;
@@ -183,11 +191,7 @@ static SeaToken scan_string(SeaLexer *l, char quote) {
     // Null-terminate
     SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, '\0');
 
-    SeaToken t;
-    t.type = TK_STRING;
-    t.line = l->line;
-    t.start = l->start;
-    t.len = (int)(l->cur - l->start);
+    SeaToken t = make_token(l, TK_STRING);
     t.val.string.ptr = buf;    // caller must free
     t.val.string.len = (size_t)(buf_len - 1);
     return t;
@@ -203,11 +207,12 @@ static SeaToken scan_long_string(SeaLexer *l) {
     }
     l->cur++; // consume second [
     // Skip initial newline
-    if (*l->cur == '\n') { l->cur++; l->line++; }
+    if (*l->cur == '\n') { l->cur++; l->line++; l->line_start = l->cur; }
     else if (*l->cur == '\r') {
         l->cur++;
         if (*l->cur == '\n') l->cur++;
         l->line++;
+        l->line_start = l->cur;
     }
 
     char *buf = NULL;
@@ -215,18 +220,14 @@ static SeaToken scan_long_string(SeaLexer *l) {
 
     while (*l->cur != '\0') {
         char c = *l->cur++;
-        if (c == '\n') l->line++;
+        if (c == '\n') { l->line++; l->line_start = l->cur; }
         if (c == ']') {
             int cnt = 0;
             while (*l->cur == '=' && cnt < level) { cnt++; l->cur++; }
             if (cnt == level && *l->cur == ']') {
                 l->cur++; // consume closing ]
                 SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, '\0');
-                SeaToken t;
-                t.type = TK_STRING;
-                t.line = l->line;
-                t.start = l->start;
-                t.len = (int)(l->cur - l->start);
+                SeaToken t = make_token(l, TK_STRING);
                 t.val.string.ptr = buf;
                 t.val.string.len = (size_t)(buf_len - 1);
                 return t;
@@ -283,9 +284,19 @@ static SeaToken scan_number(SeaLexer *l) {
 static SeaToken scan_token(SeaLexer *l) {
     skip_whitespace_and_comments(l);
     l->start = l->cur;
+    l->tok_line = l->line;
+    l->tok_col = (int)(l->cur - l->line_start) + 1;
 
     if (*l->cur == '\0') {
         return make_token(l, TK_EOF);
+    }
+
+    /* Comments reach here only with keep_comments (a `--` comment, or the
+     * `#` line at the start of the file or of a line) */
+    if ((l->cur[0] == '-' && l->cur[1] == '-') ||
+        (l->cur[0] == '#' && (l->cur == l->src || l->cur[-1] == '\n'))) {
+        while (*l->cur != '\0' && *l->cur != '\n') l->cur++;
+        return make_token(l, TK_COMMENT);
     }
 
     char c = advance_char(l);
@@ -340,7 +351,7 @@ static SeaToken scan_token(SeaLexer *l) {
         case ',': return make_token(l, TK_COMMA);
         case '%': return make_token(l, TK_PERCENT);
         case '^': return make_token(l, TK_CARET);
-        case '#': return make_token(l, TK_ERROR);
+        case '#': return error_token(l, "unexpected character '#'");
         case '&': return make_token(l, TK_AMP);
         case '|': return make_token(l, TK_PIPE);
         case '~':
@@ -378,9 +389,8 @@ static SeaToken scan_token(SeaLexer *l) {
             }
             return make_token(l, TK_DOT);
         default: {
-            static char msg[64];
-            snprintf(msg, sizeof(msg), "unexpected character '%c'", c);
-            return error_token(l, msg);
+            snprintf(l->msg_buf, sizeof(l->msg_buf), "unexpected character '%c'", c);
+            return error_token(l, l->msg_buf);
         }
     }
 }
@@ -388,10 +398,18 @@ static SeaToken scan_token(SeaLexer *l) {
 // ---- Public API ----
 
 void sea_lexer_init(SeaLexer *l, const char *source) {
+    sea_lexer_init_ex(l, source, false);
+}
+
+void sea_lexer_init_ex(SeaLexer *l, const char *source, bool keep_comments) {
     l->src = source;
     l->cur = source;
     l->start = source;
     l->line = 1;
+    l->line_start = source;
+    l->tok_line = 1;
+    l->tok_col = 1;
+    l->keep_comments = keep_comments;
     l->has_lookahead = false;
     l->err_msg = NULL;
     // Pre-scan first token
@@ -493,6 +511,7 @@ const char* sea_tk_name(SeaTK tk) {
         case TK_ARROW_LEFT:  return "<-";
         case TK_ARROW_RIGHT: return "->";
         case TK_QUESTION:  return "?";
+        case TK_COMMENT:   return "<comment>";
         case TK_EOF:       return "<eof>";
         case TK_ERROR:     return "<error>";
         default:           return "<unknown>";
