@@ -108,9 +108,13 @@ struct SeaVM {
     SeaDeferEntry defers[256];
     int           defer_count;
 
-    // Panic state
+    // Panic state (see panic_unwind in vm_run_inner)
     bool      panicking;
+    bool      panic_propagating; /* escaped a nested vm_run: the VM loop of the C
+                                    caller (native, JIT helper) continues unwinding */
     SeaValue  panic_val;
+    char     *panic_trace;       /* traceback captured where the panic started */
+    void     *panic_jmp;         /* innermost vm_run's jump buffer (runtime errors) */
 
     // Error message
     char err_msg[512];
@@ -159,6 +163,12 @@ struct SeaVM {
 /* Convenience accessors — keep existing code working with minimal churn */
 #define vm_globals(vm)  ((vm)->shared->globals)
 #define vm_loaded(vm)   ((vm)->shared->loaded)
+
+/* Globals are read and written by every goroutine: always go through these
+ * (never sea_table_set/get on vm_globals directly; see SeaTableSync). */
+void sea_globals_set(SeaVM *vm, SeaValue key, SeaValue val);
+bool sea_globals_get(SeaVM *vm, SeaValue key, SeaValue *out);
+bool sea_globals_get_str(SeaVM *vm, const char *name, SeaValue *out);
 
 // Create/destroy VM
 SeaVM*  sea_vm_new(void);
@@ -209,3 +219,12 @@ SeaString* sea_vm_tostring(SeaVM *vm, SeaValue v);
 // Create an error value
 SeaValue sea_make_error(SeaVM *vm, SeaValue msg);
 SeaValue sea_make_error_str(SeaVM *vm, const char *msg);
+
+/* Start a panic with value v (owned): runtime errors and panic() land here.
+ * Unwinds to the innermost running VM loop; recover() in a deferred call stops
+ * it. With no VM loop running, prints the traceback and exits. */
+SEA_NORETURN void sea_vm_raise(SeaVM *vm, SeaValue v);
+/* Print the panic (traceback + value) and exit(1): an unrecovered panic. */
+SEA_NORETURN void sea_vm_panic_exit(SeaVM *vm);
+/* recover(): take the panic value (nil when not panicking). */
+SeaValue sea_vm_recover(SeaVM *vm);

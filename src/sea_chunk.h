@@ -63,7 +63,14 @@ struct SeaChunk {
     /* Inline caches for table lookups, one slot per instruction (used by
      * LOAD_GLOBAL / GET_FIELD); allocated on first use, see sea_chunk_ics. */
     struct SeaTableICSlot *ics;
+
+    /* Source file of a function prototype: the root chunk's name (borrowed;
+     * the root outlives its protos). Set by sea_chunk_set_source. */
+    const char *source;
 };
+
+/* Point every prototype under root (and root itself) at root's name. */
+void sea_chunk_set_source(SeaChunk *root);
 
 /* One inline-cache slot; layout-compatible with SeaTableIC (sea_table.h).
  * GET_TABLE / SET_TABLE instructions use `idx` instead as type feedback for

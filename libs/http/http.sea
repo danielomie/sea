@@ -415,6 +415,7 @@ local DEFAULTS = {
     max_requests = 1000,       -- per connection
     keep_alive = true,
     log = false,
+    gzip = false,              -- true (bodies >= 1 KB) or a minimum size in bytes
 }
 
 local function opt(o, k)
@@ -487,6 +488,84 @@ local function make_request(head, body, remote, tls)
     return req
 end
 
+-- Run the handler. A panic or runtime error in it becomes a 500 (logged with
+-- the request) instead of ending the process.
+local function call_handler(handler, req, on_error)
+    local failed = nil
+    local function run()
+        defer function()
+            local e = recover()
+            if e ~= nil then failed = e end
+        end
+        return handler(req)
+    end
+    local resp = run()
+    if failed ~= nil then
+        if on_error then
+            on_error(failed, req)
+        else
+            local m = is_error(failed) and failed.message or tostring(failed)
+            print("http: handler failed on " .. req.method .. " " .. req.target .. ": " .. m ..
+                  "; sending 500")
+        end
+        return plain(500, "Internal Server Error\n")
+    end
+    return resp
+end
+
+-- gzip for responses (opts.gzip) ----------------------------------------------
+
+local function accepts_gzip(ae)
+    for _, part in string.split(ae, ",") do
+        local item = string.trim(part)
+        local semi = string.find(item, ";")
+        local name = string.lower(string.trim(semi and string.sub(item, 1, semi - 1) or item))
+        if name == "gzip" or name == "*" then
+            local q = semi and string.find(item, "q=0", semi)
+            if not q then return true end
+            local rest = string.sub(item, q + 3)
+            if string.trim(rest) ~= "" and string.trim(rest) ~= ".0" and
+               string.trim(rest) ~= ".00" and string.trim(rest) ~= ".000" then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function compressible(ctype)
+    return string.find(ctype, "text/", 1) == 1 or string.find(ctype, "json", 1) ~= nil or
+           string.find(ctype, "javascript", 1) ~= nil or string.find(ctype, "xml", 1) ~= nil or
+           string.find(ctype, "svg", 1) ~= nil
+end
+
+-- Compress resp's body in place when the client accepts gzip and it is worth it.
+local function maybe_gzip(resp, req_headers, min_size)
+    local body = resp.body
+    local st = resp.status
+    if len(body) < min_size or st < 200 or st == 204 or st == 304 then return end
+    local ae = req_headers["accept-encoding"]
+    if ae == nil or not accepts_gzip(ae) then return end
+    local ctype = "text/plain"
+    local vary = nil
+    local h = [=]
+    if resp.headers then
+        for k, v in resp.headers do
+            local lk = string.lower(tostring(k))
+            if lk == "content-encoding" then return end      -- already encoded
+            if lk == "content-type" then ctype = string.lower(tostring(v)) end
+            if lk == "vary" then vary = tostring(v) else h[k] = v end
+        end
+    end
+    if not compressible(ctype) then return end
+    local z = native.gzip(body)
+    if is_error(z) or len(z) >= len(body) then return end
+    h["Content-Encoding"] = "gzip"
+    h["Vary"] = vary and (vary .. ", Accept-Encoding") or "Accept-Encoding"
+    resp["body"] = z
+    resp["headers"] = h
+end
+
 local function conn_state(srv, key, idle)
     local mu = srv.mu
     mu.acquire(mu)
@@ -544,7 +623,10 @@ local function serve_conn(srv, c, key, remote)
 
         local t0 = o.log and time.now() or nil
         local req = make_request(head, body, remote, c.tls)
-        local resp = normalize(handler(req))
+        local resp = normalize(call_handler(handler, req, srv.on_error))
+        if o.gzip then
+            maybe_gzip(resp, head.headers, type(o.gzip) == "int" and o.gzip or 1024)
+        end
         served = served + 1
         local keep = head.keep_alive and o.keep_alive and not srv.stopping and
                      served < o.max_requests and resp.close ~= true
@@ -572,7 +654,10 @@ end
 --   srv.wait()   — block until the server is closed
 -- opts: host, tls = {cert, key [, ca]}, read_timeout, idle_timeout,
 --       write_timeout (ms), max_header_bytes, max_body_bytes, max_requests,
---       keep_alive (bool), log (bool: one line per request)
+--       keep_alive (bool), log (bool: one line per request),
+--       on_error(err, req) (a handler panicked or failed; default: print it),
+--       gzip (true: compress text-like bodies >= 1 KB for clients that accept
+--       it; or the minimum size in bytes)
 function M.listen(port, handler, opts)
     if type(handler) == "table" or type(handler) == "map" then handler = handler.handle end
     if type(handler) ~= "function" then return error("http.listen: handler must be a function or a router") end
@@ -596,6 +681,7 @@ function M.listen(port, handler, opts)
     srv["stopping"] = false
     srv["opts"] = o
     srv["handler"] = handler
+    srv["on_error"] = opts and opts.on_error
     srv["conns"] = [=]
     srv["mu"] = sync.mutex()
     local done = chan(1)
@@ -603,11 +689,14 @@ function M.listen(port, handler, opts)
     srv["close"] = function()
         if srv.stopping then return end
         srv.stopping = true
-        net.close(lfd)
+        -- shutdown, not close: the goroutines that own these sockets wake up
+        -- and close them (closing here could let a socket's number be reused
+        -- under its owner's next read)
+        net.shutdown(lfd)
         local mu = srv.mu
         mu.acquire(mu)
         for _, st in srv.conns do
-            if st ~= nil and st.idle then c_close(st.conn) end
+            if st ~= nil and st.idle then net.shutdown(st.conn.fd) end
         end
         mu.release(mu)
     end
@@ -621,7 +710,10 @@ function M.listen(port, handler, opts)
         while true do
             local fd = net.accept(lfd)
             if is_error(fd) then
-                if srv.stopping then break end
+                if srv.stopping then
+                    net.close(lfd)
+                    break
+                end
                 time.sleep(10 * time.Millisecond)   -- e.g. out of file descriptors
             else
                 next_key = next_key + 1
@@ -852,6 +944,10 @@ local function do_request(method, url, o, redirects_left)
         end
     end
     if not has["user-agent"] then lines[] = "User-Agent: sea-http/1.1\r\n" end
+    -- ask for gzip unless the caller set Accept-Encoding (then the body is
+    -- theirs to decode) or turned decompression off
+    local decompress = o.decompress ~= false and not has["accept-encoding"]
+    if decompress then lines[] = "Accept-Encoding: gzip\r\n" end
     if not has["accept"] then lines[] = "Accept: */*\r\n" end
     if o.basic_auth and not has["authorization"] then
         local cred = (o.basic_auth.user or "") .. ":" .. (o.basic_auth.password or "")
@@ -901,6 +997,21 @@ local function do_request(method, url, o, redirects_left)
     end
     if resp == nil then return make_error(last_err, url) end
     resp["url"] = url
+
+    -- transparent decompression (we asked for gzip): the headers then describe
+    -- the decoded body, so Content-Encoding and Content-Length are dropped
+    local enc = resp.headers["content-encoding"]
+    if decompress and enc ~= nil and resp.body ~= "" then
+        local e = string.lower(string.trim(enc))
+        if e == "gzip" or e == "x-gzip" or e == "deflate" then
+            local plain_body = native.gunzip(resp.body, max_body)
+            if is_error(plain_body) then return make_error(plain_body.message, url) end
+            resp["body"] = plain_body
+            del resp.headers["content-encoding"]
+            del resp.headers["content-length"]
+            resp["uncompressed"] = true
+        end
+    end
 
     -- redirects
     local status = resp.status
@@ -955,7 +1066,8 @@ end
 --       query (map), timeout (ms, per network operation; default 30000),
 --       follow_redirects (bool or max hops; default 5), keep_alive (bool),
 --       basic_auth = {user, password}, verify (false: skip TLS checks),
---       tls (extra ssl.connect opts), max_body_bytes
+--       tls (extra ssl.connect opts), max_body_bytes,
+--       decompress (default true: ask for gzip and decode it)
 -- (The older form request(method, url, body, content_type, headers) works too.)
 function M.request(method, url, a, b, c)
     local o

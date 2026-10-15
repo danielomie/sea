@@ -365,7 +365,30 @@ Encontrados no VM:
 
 **Testes:** `tests/unit/107_net.sea` e `tests/unit/108_http_lib.sea`. Também rodaram sob ASAN (inclusive com `SEA_GC_THRESHOLD=1`) e TSAN. O cliente foi testado contra servidores HTTPS reais.
 
-**Pendentes:**
-- `globals_lock` em `SeaShared` nunca é usado, então gravar globais de várias goroutines é uma corrida.
-- A resolução de DNS (`getaddrinfo`) ainda bloqueia a thread.
-- Um erro de execução dentro de um handler ainda encerra o processo.
+**Pendentes:** globais sem lock, DNS bloqueante e erro em handler encerrando o processo. Resolvidos na entrada seguinte.
+
+## Globais concorrentes, DNS, panics de verdade e gzip **(2026-10)**
+
+**Corrida na tabela de globais (crash).** `globals_lock` existia mas nunca era usado. Uma goroutine que criava uma global nova podia redimensionar a tabela enquanto outra lia qualquer global, até `print` ou `math`. O array antigo era liberado sob o leitor, e `entries`/`cap` eram publicados separados. O reprodutor dava core dump em 5 de 6 execuções e às vezes perdia uma global. Agora as globais usam `SeaTableSync` (`sea_table.h`):
+- escritas com mutex e seqlock;
+- leituras sem lock: o inline cache lê `cap` antes de `entries` e o caminho lento revalida pelo seqlock;
+- o resize publica o array novo antes do `cap` novo e guarda o antigo até o fim. O crescimento é geométrico, então isso custa menos que o array atual.
+
+Sem goroutines vivas, a escrita usa o caminho simples. Teste: `109_globals_concurrent`, que falhava 8 de 10 vezes no binário antigo.
+
+**DNS bloqueava a thread do escalonador**, e o `net.connect` refazia o `getaddrinfo` a cada retomada depois de um park. Agora:
+- as consultas rodam num pool de até 8 threads e a goroutine espera um eventfd pelo netpoller;
+- o resultado fica em `io->aux` e não é refeito;
+- IPs numéricos não passam pelo pool;
+- o timeout do connect cobre a resolução, até na thread principal.
+
+Com um DNS lento simulado (2 s por consulta), 8 conexões levam 2,5 s em vez de 10,3 s, e as outras goroutines não atrasam.
+
+**Panic não desempilhava.** `OP_PANIC` rodava todos os defers da pilha do VM, inclusive os de funções externas. Depois de um `recover`, descartava sem rodar os defers que restavam e **continuava na instrução seguinte ao panic**: `panic("x")` seguido de `return "fine"` devolvia `"fine"`. Erros de execução nem passavam por ali: `sea_vm_error_noreturn` chamava `exit(1)`, então um erro num handler http derrubava o servidor. Agora panic e erros de execução fazem unwinding frame a frame, com semântica de Go (veja [architecture.md](architecture.md#panics) e "panic and recover" em [reference.md](reference.md)). Isso funciona através de callbacks nativos, corpos de módulo e código JIT, sem mudar o código gerado. Erros de execução trazem `arquivo:linha:` na mensagem, e o traceback mostra o arquivo de cada função (`SeaChunk.source`; antes aparecia `[?]`, e o chunk principal virava "função" quando o caminho não tinha `/`). O servidor http converte panics de handler em 500 (`opts.on_error`). Teste: `110_panic_recover`.
+
+**`srv.close()` fechava fds que outra goroutine usava** (TSAN). Uma goroutine prestes a chamar `recv` podia ler de outra conexão se o número do fd fosse reaproveitado por um `accept`. Agora o servidor usa o novo `net.shutdown`, que acorda a goroutine dona do fd, e é ela que fecha.
+
+**gzip:**
+- o cliente pede gzip e descomprime de forma transparente (`opts.decompress`, `resp.uncompressed`);
+- o servidor comprime respostas de texto quando `opts.gzip` está ligado;
+- natives novos `gzip`/`gunzip` em `http_native.so`, com limite de tamanho contra zip bombs.

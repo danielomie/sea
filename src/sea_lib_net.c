@@ -13,7 +13,11 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 /*
@@ -27,7 +31,7 @@
  *   net.accept(fd [, timeout_ms])           → fd
  *   net.read(fd, max [, timeout_ms])        → string ("" at end of stream)
  *   net.write(fd, data [, timeout_ms])      → bytes written (all of data)
- *   net.close(fd)
+ *   net.close(fd),   net.shutdown(fd)   (wake its owner without freeing the fd)
  *   net.local_port(fd) → int,   net.peer(fd) → "ip:port"
  */
 
@@ -65,6 +69,160 @@ static bool arg_fd(int argc, SeaValue *args, int *fd) {
     return *fd >= 0;
 }
 
+/* ---- Name resolution off the scheduler threads ---------------------------
+ * getaddrinfo blocks (DNS), so lookups run on a few resolver threads. Each
+ * job has an eventfd the caller waits on through the netpoller (a goroutine
+ * parks; the main thread blocks in poll, still honouring its timeout). A job
+ * is shared by the caller and the resolver (refs = 2): a caller that times out
+ * just drops its reference and the resolver frees the job when it finishes. */
+
+typedef struct DnsJob {
+    struct DnsJob   *next;
+    atomic_int       refs;
+    atomic_int       done;
+    int              efd;
+    int              gai;
+    struct addrinfo *res;
+    char             port[32];
+    char             host[];
+} DnsJob;
+
+#define DNS_MAX_THREADS 8
+
+static pthread_mutex_t dns_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  dns_cv = PTHREAD_COND_INITIALIZER;
+static DnsJob *dns_head, *dns_tail;
+static int dns_threads, dns_idle;
+
+static void dns_job_unref(DnsJob *j) {
+    if (atomic_fetch_sub(&j->refs, 1) != 1) return;
+    if (j->res) freeaddrinfo(j->res);
+    sea_netpoll_close(j->efd);
+    free(j);
+}
+
+static void *dns_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&dns_mu);
+        while (!dns_head) {
+            dns_idle++;
+            pthread_cond_wait(&dns_cv, &dns_mu);
+            dns_idle--;
+        }
+        DnsJob *j = dns_head;
+        dns_head = j->next;
+        if (!dns_head) dns_tail = NULL;
+        pthread_mutex_unlock(&dns_mu);
+
+        struct addrinfo hints = {0};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        j->gai = getaddrinfo(j->host, j->port, &hints, &j->res);
+        atomic_store(&j->done, 1);
+        uint64_t one = 1;
+        ssize_t wr = write(j->efd, &one, sizeof one);
+        (void)wr;
+        dns_job_unref(j);
+    }
+    return NULL;
+}
+
+static DnsJob *dns_submit(const char *host, const char *port) {
+    size_t hl = strlen(host);
+    DnsJob *j = calloc(1, sizeof *j + hl + 1);
+    if (!j) return NULL;
+    j->efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (j->efd < 0) { free(j); return NULL; }
+    atomic_init(&j->refs, 2);
+    atomic_init(&j->done, 0);
+    memcpy(j->host, host, hl + 1);
+    snprintf(j->port, sizeof j->port, "%s", port);
+
+    pthread_mutex_lock(&dns_mu);
+    if (dns_tail) dns_tail->next = j; else dns_head = j;
+    dns_tail = j;
+    if (dns_idle == 0 && dns_threads < DNS_MAX_THREADS) {
+        pthread_t t;
+        pthread_attr_t at;
+        pthread_attr_init(&at);
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&t, &at, dns_worker, NULL) == 0) dns_threads++;
+        pthread_attr_destroy(&at);
+    }
+    bool none = dns_threads == 0;
+    if (none) {                         /* could not start any resolver thread */
+        if (dns_head == j) dns_head = dns_tail = NULL;
+    } else {
+        pthread_cond_signal(&dns_cv);
+    }
+    pthread_mutex_unlock(&dns_mu);
+    if (none) {
+        close(j->efd);
+        free(j);
+        return NULL;
+    }
+    return j;
+}
+
+/* Resolve host:port for net.connect. The result is kept in io->aux[3] (job in
+ * aux[2] while it runs) so a resumed call does not resolve again. Returns
+ * SEA_IO_READY with *out set, SEA_IO_PARK, SEA_IO_TIMEOUT, or -1 with *gai
+ * set (a getaddrinfo error). */
+static int resolve(SeaVM *vm, SeaIoCall *io, const char *host, const char *port,
+                   struct addrinfo **out, int *gai) {
+    if (io->aux[3]) { *out = (struct addrinfo *)(intptr_t)io->aux[3]; return SEA_IO_READY; }
+
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
+    if (getaddrinfo(host, port, &hints, &res) == 0) {      /* an IP: no lookup */
+        io->aux[3] = (int64_t)(intptr_t)res;
+        *out = res;
+        return SEA_IO_READY;
+    }
+
+    DnsJob *j = (DnsJob *)(intptr_t)io->aux[2];
+    if (!j) {
+        j = dns_submit(host, port);
+        if (!j) {                                           /* fall back: block */
+            hints.ai_flags = 0;
+            *gai = getaddrinfo(host, port, &hints, &res);
+            if (*gai != 0) return -1;
+            io->aux[3] = (int64_t)(intptr_t)res;
+            *out = res;
+            return SEA_IO_READY;
+        }
+        io->aux[2] = (int64_t)(intptr_t)j;
+    }
+    for (;;) {
+        if (atomic_load(&j->done)) {
+            io->aux[2] = 0;
+            *gai = j->gai;
+            res = j->res;
+            j->res = NULL;
+            dns_job_unref(j);
+            if (*gai != 0) return -1;
+            io->aux[3] = (int64_t)(intptr_t)res;
+            *out = res;
+            return SEA_IO_READY;
+        }
+        int w = sea_io_wait(vm, j->efd, SEA_IO_READ);
+        if (w == SEA_IO_PARK) return SEA_IO_PARK;
+        if (w != SEA_IO_READY) {
+            io->aux[2] = 0;
+            dns_job_unref(j);
+            return SEA_IO_TIMEOUT;
+        }
+    }
+}
+
+static void free_resolved(SeaIoCall *io) {
+    if (io->aux[3]) freeaddrinfo((struct addrinfo *)(intptr_t)io->aux[3]);
+    io->aux[3] = 0;
+}
+
 /* net.connect(host, port [, timeout_ms]). Across a park, aux[0] holds the
  * connecting fd + 1 and aux[1] the index of the address being tried. */
 static SeaValue net_connect(SeaVM *vm, int argc, SeaValue *args) {
@@ -81,13 +239,16 @@ static SeaValue net_connect(SeaVM *vm, int argc, SeaValue *args) {
     }
 
     SeaIoCall *io = sea_io_begin(vm, opt_ms(argc, args, 2));
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    int gai = getaddrinfo(host->data, port, &hints, &res);   /* blocking DNS */
+    struct addrinfo *res = NULL;
+    int gai = 0;
+    int r = resolve(vm, io, host->data, port, &res, &gai);
     sea_obj_release(&host->obj);
-    if (gai != 0) {
-        if (io->aux[0]) close((int)io->aux[0] - 1);
+    if (r == SEA_IO_PARK) return SEA_PARK_VAL;
+    if (r == SEA_IO_TIMEOUT) {
+        sea_io_end(vm);
+        return sea_make_error_str(vm, "timeout");
+    }
+    if (r != SEA_IO_READY) {
         sea_io_end(vm);
         char buf[160];
         snprintf(buf, sizeof buf, "connect: %s", gai_strerror(gai));
@@ -108,7 +269,7 @@ static SeaValue net_connect(SeaVM *vm, int argc, SeaValue *args) {
                 /* writable and no error: connected? (poll may wake early) */
                 struct sockaddr_storage peer; socklen_t pl = sizeof peer;
                 if (getpeername(fd, (struct sockaddr*)&peer, &pl) == 0) {
-                    freeaddrinfo(res);
+                    free_resolved(io);
                     sea_io_end(vm);
                     set_nodelay(fd);
                     return sea_int_val(fd);
@@ -125,7 +286,7 @@ static SeaValue net_connect(SeaVM *vm, int argc, SeaValue *args) {
             fd = socket(p->ai_family, p->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, p->ai_protocol);
             if (fd < 0) { last_err = errno; continue; }
             if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
-                freeaddrinfo(res);
+                free_resolved(io);
                 sea_io_end(vm);
                 set_nodelay(fd);
                 return sea_int_val(fd);
@@ -135,12 +296,12 @@ static SeaValue net_connect(SeaVM *vm, int argc, SeaValue *args) {
             io->aux[1] = idx;
         }
         int w = sea_io_wait(vm, fd, SEA_IO_WRITE);
-        if (w == SEA_IO_PARK) { freeaddrinfo(res); return SEA_PARK_VAL; }
+        if (w == SEA_IO_PARK) return SEA_PARK_VAL;   /* res stays in aux[3] */
         if (w == SEA_IO_READY) {          /* blocking path: check it now */
             int err = 0; socklen_t el = sizeof err;
             getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
             if (err == 0) {
-                freeaddrinfo(res);
+                free_resolved(io);
                 sea_io_end(vm);
                 set_nodelay(fd);
                 return sea_int_val(fd);
@@ -153,7 +314,7 @@ static SeaValue net_connect(SeaVM *vm, int argc, SeaValue *args) {
         io->aux[0] = 0; io->aux[1] = idx + 1;
         if (w == SEA_IO_TIMEOUT) break;
     }
-    freeaddrinfo(res);
+    free_resolved(io);
     sea_io_end(vm);
     if (last_err == ETIMEDOUT) return sea_make_error_str(vm, "timeout");
     return net_err(vm, "connect", last_err);
@@ -304,6 +465,17 @@ static SeaValue net_close(SeaVM *vm, int argc, SeaValue *args) {
     return SEA_NIL_VAL;
 }
 
+/* net.shutdown(fd): end both directions without releasing the fd. A goroutine
+ * reading or accepting on it wakes up (EOF / error) and closes it itself —
+ * the way to stop a socket another goroutine owns: closing it from here could
+ * let its number be reused under that goroutine's next read. */
+static SeaValue net_shutdown(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    int fd;
+    if (arg_fd(argc, args, &fd)) shutdown(fd, SHUT_RDWR);
+    return SEA_NIL_VAL;
+}
+
 static SeaValue net_local_port(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     int fd;
@@ -352,6 +524,7 @@ void sea_lib_net_register(SeaVM *vm) {
     mod_set(vm, mod, "read",       net_read);
     mod_set(vm, mod, "write",      net_write);
     mod_set(vm, mod, "close",      net_close);
+    mod_set(vm, mod, "shutdown",   net_shutdown);
     mod_set(vm, mod, "local_port", net_local_port);
     mod_set(vm, mod, "peer",       net_peer);
     sea_vm_register_module(vm, "net", mod);

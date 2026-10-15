@@ -133,7 +133,7 @@ An initial newline immediately after the opening bracket is ignored. The number 
 
 | Keyword | Description |
 |---------|-------------|
-| `panic` | Terminate with an error message |
+| `panic` | Start a panic (unwinds, running deferred calls) |
 | `recover` | Recover from a panic inside a deferred call |
 | `defer` | Schedule a call to run when the enclosing function returns |
 
@@ -239,7 +239,7 @@ An initial newline immediately after the opening bracket is ignored. The number 
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `panic` | `panic(v)` | Print message to stderr and call `exit(1)` |
+| `panic` | `panic(v)` | Start a panic with value `v` (see [panic and recover](#panic-and-recover)); unrecovered, it prints the traceback and exits with code 1 |
 | `recover` | `recover() → value\|nil` | Inside a deferred call, recover the panic value; otherwise returns `nil` |
 
 ### Math (global aliases)
@@ -426,12 +426,13 @@ message is `"timeout"`. Timeouts are in milliseconds; omitted or `nil` means wai
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `net.connect` | `connect(host, port [, timeout]) → fd \| error` | Resolve `host` and connect (tries each address; TCP_NODELAY on). DNS resolution itself still blocks |
+| `net.connect` | `connect(host, port [, timeout]) → fd \| error` | Resolve `host` and connect (tries each address; TCP_NODELAY on). Name lookups run on a small resolver thread pool, so they park too, and the timeout covers them |
 | `net.listen` | `listen(port [, host [, backlog]]) → fd \| error` | Bind and listen (SO_REUSEADDR). `port` 0 picks a free port; `host` defaults to all interfaces |
 | `net.accept` | `accept(fd [, timeout]) → fd \| error` | Wait for and accept one connection |
 | `net.read` | `read(fd, max [, timeout]) → string \| error` | Up to `max` bytes as soon as any arrive; `""` at end of stream |
 | `net.write` | `write(fd, data [, timeout]) → int \| error` | Write all of `data` (the timeout applies to each wait); returns `len(data)` |
 | `net.close` | `close(fd)` | Close; a goroutine waiting on `fd` wakes with an error |
+| `net.shutdown` | `shutdown(fd)` | End both directions without freeing the fd: a goroutine reading or accepting on it wakes (EOF / error) and closes it itself. Use this, not `close`, to stop a socket another goroutine owns — closing it lets the fd number be reused under that goroutine's next read |
 | `net.local_port` | `local_port(fd) → int` | Port the socket is bound to |
 | `net.peer` | `peer(fd) → string` | `"ip:port"` of the remote end |
 
@@ -718,8 +719,53 @@ function safe()
         if e ~= nil then print("recovered:", e) end
     end
     panic("oops")
+    print("not reached")
 end
+safe()          -- prints "recovered: oops"; safe() returns nil
 ```
+
+### panic and recover
+
+`panic(v)` and **runtime errors** (indexing `nil`, arithmetic on a table,
+calling `nil`, …) unwind the call stack the same way, as in Go:
+
+- Execution stops at the panic. Each function on the stack, innermost first,
+  runs its deferred calls (LIFO) and returns.
+- A deferred call that calls `recover()` stops the unwinding and gets the panic
+  value. The function whose deferred call recovered then returns normally to
+  its caller, **with nil results**, after running its remaining deferred calls.
+  The caller continues as after any call.
+- For a runtime error, `recover()` returns an error value whose message starts
+  with the location: `is_error(e)`, `e.message == "main.sea:12: attempt to
+  index a nil value"`. For `panic(v)` it returns `v`.
+- `recover()` returns `nil` when there is no panic.
+- A panic inside a deferred call replaces the one being unwound.
+- Panics cross native callbacks (`once.do_once(once, f)`), module bodies run by
+  `require`, and JIT-compiled code.
+- An unrecovered panic, in the main script or in any goroutine, prints the
+  traceback and ends the process (exit code 1).
+
+```sea
+local function try(f, ...)
+    local err = nil
+    local function run(...)
+        defer function() err = recover() end
+        return f(...)
+    end
+    local result = run(...)
+    return result, err
+end
+
+local r, e = try(function()
+    local t = nil
+    return t.x
+end)
+print(r, e.message)     -- nil   main.sea:13: attempt to index a nil value
+```
+
+Functions unwound by a panic do not release their local variables (the
+values leak). Panics are for exceptional paths; use error values and `?` for
+expected failures.
 
 **Error object field:**
 
@@ -782,8 +828,8 @@ end
 
 Goroutines run on a pool of scheduler threads (one per CPU). Blocking on a
 channel, `time.sleep` and every wait in the `net` module park the goroutine
-without holding its thread. Other blocking calls — file I/O, `io.read`, DNS
-lookups, a native library that blocks — do hold the thread, so enough of them at
+without holding its thread. Other blocking calls — file I/O, `io.read`, a
+native library that blocks — do hold the thread, so enough of them at
 once can stall the other goroutines.
 
 ---

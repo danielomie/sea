@@ -1,6 +1,7 @@
 #pragma once
 #include "sea_object.h"
 #include "sea_memory.h"
+#include <pthread.h>
 
 /*
  * Sea hash table - used for both maps and struct-like tables.
@@ -42,14 +43,53 @@ typedef struct {
 
 bool sea_table_get_ic_slow(SeaTable *t, SeaValue key, SeaTableIC *ic, SeaValue *out);
 
-static inline bool sea_table_get_ic(SeaTable *t, SeaValue key, SeaTableIC *ic, SeaValue *out) {
+/* cap is loaded before entries (acquire): a table published with
+ * sea_table_set_sync stores entries before cap, so a reader that sees the new
+ * cap also sees the new entries, and one that sees the old cap indexes either
+ * array in bounds. On ordinary tables these are plain loads. */
+static inline bool sea_table_ic_hit(SeaTable *t, SeaValue key, SeaTableIC *ic, SeaValue *out) {
     SeaTableEntry *e = __atomic_load_n(&ic->entries, __ATOMIC_RELAXED);
     uint32_t i = __atomic_load_n(&ic->idx, __ATOMIC_RELAXED);
-    if (e && e == t->entries && i < t->cap && e[i].key == key) {
-        *out = e[i].value;
+    uint32_t cap = __atomic_load_n(&t->cap, __ATOMIC_ACQUIRE);
+    if (e && e == __atomic_load_n(&t->entries, __ATOMIC_RELAXED) && i < cap &&
+        __atomic_load_n(&e[i].key, __ATOMIC_RELAXED) == key) {
+        *out = __atomic_load_n(&e[i].value, __ATOMIC_RELAXED);
         return true;
     }
+    return false;
+}
+
+static inline bool sea_table_get_ic(SeaTable *t, SeaValue key, SeaTableIC *ic, SeaValue *out) {
+    if (sea_table_ic_hit(t, key, ic, out)) return true;
     return sea_table_get_ic_slow(t, key, ic, out);
+}
+
+/* ---- Tables read by many threads without a lock (the globals) -----------
+ * Writers take `mu` and run a seqlock (`seq` odd while a write is under
+ * way); readers never lock: they retry if `seq` moved. A resize publishes the
+ * new array before the new cap and keeps the old array on `retired` (freed by
+ * sea_table_sync_destroy) because a reader may still be probing it; growth is
+ * geometric, so the retired arrays add up to less than the live one. Readers
+ * must use sea_table_get_sync / sea_table_get_ic (never sea_table_get), and
+ * all writes must go through sea_table_set_sync. */
+typedef struct {
+    pthread_mutex_t mu;
+    uint32_t        seq;
+    SeaTableEntry **retired;
+    uint32_t       *retired_cap;   /* entry count of each retired array */
+    uint32_t        n_retired, retired_size;
+} SeaTableSync;
+
+void sea_table_sync_init(SeaTableSync *ts);
+void sea_table_sync_destroy(SeaTableSync *ts);
+void sea_table_set_sync(SeaTable *t, SeaTableSync *ts, SeaValue key, SeaValue val);
+/* ic may be NULL */
+bool sea_table_get_sync(SeaTable *t, SeaTableSync *ts, SeaValue key, SeaTableIC *ic, SeaValue *out);
+
+static inline bool sea_table_get_ic_sync(SeaTable *t, SeaTableSync *ts, SeaValue key,
+                                         SeaTableIC *ic, SeaValue *out) {
+    if (sea_table_ic_hit(t, key, ic, out)) return true;
+    return sea_table_get_sync(t, ts, key, ic, out);
 }
 
 // Get a value by key (returns false if not found)

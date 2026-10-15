@@ -6,7 +6,7 @@ HTTP/1.1 client and server for Sea, with HTTPS through `libs/ssl`.
 |-------|------|------|
 | Sockets | built-in `net` module | Non-blocking TCP: a wait parks only its goroutine (netpoller) |
 | TLS | `libs/ssl` | OpenSSL over `net` sockets |
-| Parsing | `http_native.c` → `http_native.so` | Strict request/response head parsers, chunked coding, URL coding, dates (C, no OpenSSL) |
+| Parsing | `http_native.c` → `http_native.so` | Strict request/response head parsers, chunked coding, URL coding, dates, gzip (C + zlib, no OpenSSL) |
 | API | `http.sea` | Client (pool, redirects), server (keep-alive, limits), router, helpers |
 
 The full reference (every function, option and field) is in
@@ -15,7 +15,7 @@ The full reference (every function, option and field) is in
 ## Build
 
 ```sh
-make -C libs/http     # http_native.so
+make -C libs/http     # http_native.so (needs zlib headers: zlib1g-dev)
 make -C libs/ssl      # needed for https:// and the tls option (OpenSSL 3 headers)
 make -C libs/json     # needed for http.json, opts.json and req:json()
 ```
@@ -44,7 +44,7 @@ http.request("PATCH", url, { body = "...", content_type = "text/plain" })
 ```
 
 Connections are kept alive and pooled per host. Redirects are followed (5 hops
-by default). Chunked responses are decoded. `verify = false` skips certificate
+by default). Chunked and gzip responses are decoded. `verify = false` skips certificate
 checks.
 
 ## Server
@@ -70,7 +70,10 @@ connection. Malformed or smuggling-shaped requests are rejected with 400/501/505
 
 A handler returns `{status, body, headers}` (or a plain string). Helpers:
 `http.text`, `http.html`, `http.json`, `http.redirect`, `http.set_cookie`,
-`http.static(dir)`. A `nil` or invalid response becomes a 500.
+`http.static(dir)`. A `nil` or invalid response becomes a 500, and so does a
+handler that panics or hits a runtime error (reported to `opts.on_error`,
+printed by default); the server keeps running. `gzip = true` compresses
+text-like responses for clients that accept it.
 
 HTTPS: pass `tls = { cert = "cert.pem", key = "key.pem" }` (add `ca` to require
 client certificates).

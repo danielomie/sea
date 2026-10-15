@@ -1,4 +1,6 @@
 #include "sea_table.h"
+#include <sched.h>
+#include <stdlib.h>
 #include "sea_rope.h"
 #include "sea_string.h"
 #include "sea_object.h"
@@ -189,6 +191,143 @@ void sea_table_set(SeaTable *t, SeaValue key, SeaValue val) {
 /* As sea_table_set, taking over the caller's reference to val. */
 void sea_table_set_move(SeaTable *t, SeaValue key, SeaValue val) {
     table_set(t, key, val, false);
+}
+
+/* ---- Lock-free readers, locked writers (see SeaTableSync) ------------- */
+
+void sea_table_sync_init(SeaTableSync *ts) {
+    pthread_mutex_init(&ts->mu, NULL);
+    ts->seq = 0;
+    ts->retired = NULL;
+    ts->retired_cap = NULL;
+    ts->n_retired = ts->retired_size = 0;
+}
+
+void sea_table_sync_destroy(SeaTableSync *ts) {
+    for (uint32_t i = 0; i < ts->n_retired; i++)
+        sea_free(ts->retired[i], sizeof(SeaTableEntry) * ts->retired_cap[i]);
+    free(ts->retired);
+    free(ts->retired_cap);
+    ts->retired = NULL;
+    ts->retired_cap = NULL;
+    ts->n_retired = ts->retired_size = 0;
+    pthread_mutex_destroy(&ts->mu);
+}
+
+static void sync_retire(SeaTableSync *ts, SeaTableEntry *entries, uint32_t cap) {
+    if (ts->n_retired == ts->retired_size) {
+        uint32_t n = ts->retired_size ? ts->retired_size * 2 : 8;
+        ts->retired = realloc(ts->retired, n * sizeof *ts->retired);
+        ts->retired_cap = realloc(ts->retired_cap, n * sizeof *ts->retired_cap);
+        ts->retired_size = n;
+    }
+    ts->retired[ts->n_retired] = entries;
+    ts->retired_cap[ts->n_retired] = cap;
+    ts->n_retired++;
+}
+
+static inline uint32_t seq_begin(SeaTableSync *ts) {
+    uint32_t s = ts->seq;
+    __atomic_store_n(&ts->seq, s + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    return s;
+}
+
+static inline void seq_end(SeaTableSync *ts, uint32_t s) {
+    __atomic_store_n(&ts->seq, s + 2, __ATOMIC_RELEASE);
+}
+
+void sea_table_set_sync(SeaTable *t, SeaTableSync *ts, SeaValue key, SeaValue val) {
+    if (SEA_UNLIKELY(sea_is_rope(key))) key = sea_rope_key(key);
+    sea_store_barrier(&t->obj, key);
+    sea_store_barrier(&t->obj, val);
+    val_retain(val);                       /* the table owns a ref to the value */
+    SeaValue old = SEA_NIL_VAL;
+
+    pthread_mutex_lock(&ts->mu);
+    SeaTableEntry *e = find_entry(t->entries, t->cap, key);
+    if (!is_empty(e->key) && !is_tombstone(e->key)) {
+        old = e->value;                    /* released after the store */
+        uint32_t s = seq_begin(ts);
+        __atomic_store_n(&e->value, val, __ATOMIC_RELAXED);
+        seq_end(ts, s);
+    } else if (t->count + 1 > t->cap * 3 / 4) {
+        /* Grow into an array nobody sees yet, then publish entries before cap. */
+        val_retain(key);
+        uint32_t new_cap = t->cap * 2;
+        SeaTableEntry *ne = SEA_ALLOC_N(SeaTableEntry, new_cap);
+        for (uint32_t i = 0; i < new_cap; i++) {
+            ne[i].key = SEA_NIL_VAL;
+            ne[i].value = SEA_NIL_VAL;
+        }
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < t->cap; i++) {
+            SeaTableEntry *src = &t->entries[i];
+            if (is_empty(src->key) || is_tombstone(src->key)) continue;
+            SeaTableEntry *d = find_entry(ne, new_cap, src->key);
+            d->key = src->key;
+            d->value = src->value;
+            count++;
+        }
+        SeaTableEntry *d = find_entry(ne, new_cap, key);
+        d->key = key;
+        d->value = val;
+        SeaTableEntry *old_entries = t->entries;
+        uint32_t old_cap = t->cap;
+        uint32_t s = seq_begin(ts);
+        __atomic_store_n(&t->entries, ne, __ATOMIC_RELEASE);
+        __atomic_store_n(&t->cap, new_cap, __ATOMIC_RELEASE);
+        t->count = count + 1;
+        seq_end(ts, s);
+        sync_retire(ts, old_entries, old_cap);
+    } else {
+        val_retain(key);                   /* table now owns a ref to the key */
+        uint32_t s = seq_begin(ts);
+        __atomic_store_n(&e->value, val, __ATOMIC_RELAXED);
+        __atomic_store_n(&e->key, key, __ATOMIC_RELEASE);
+        t->count++;
+        seq_end(ts, s);
+    }
+    pthread_mutex_unlock(&ts->mu);
+    val_release(old);
+}
+
+/* find_entry for a reader racing with sea_table_set_sync: atomic loads, and
+ * NULL when the key is absent. Terminates on a torn (old cap, new entries)
+ * snapshot too: the new array holds at most 3/4 of the old cap in entries. */
+static SeaTableEntry *find_entry_ro(SeaTableEntry *entries, uint32_t cap, SeaValue key) {
+    uint32_t idx = hash_value(key) & (cap - 1);
+    for (;;) {
+        SeaTableEntry *e = &entries[idx];
+        SeaValue k = __atomic_load_n(&e->key, __ATOMIC_ACQUIRE);
+        if (is_empty(k)) return NULL;
+        if (!is_tombstone(k) && key_equal(k, key)) return e;
+        idx = (idx + 1) & (cap - 1);
+    }
+}
+
+bool sea_table_get_sync(SeaTable *t, SeaTableSync *ts, SeaValue key, SeaTableIC *ic, SeaValue *out) {
+    if (SEA_UNLIKELY(sea_is_rope(key))) key = sea_rope_key(key);
+    for (unsigned spins = 0;; spins++) {
+        uint32_t s1 = __atomic_load_n(&ts->seq, __ATOMIC_ACQUIRE);
+        if (s1 & 1) {
+            if (spins > 64) sched_yield();
+            continue;
+        }
+        uint32_t cap = __atomic_load_n(&t->cap, __ATOMIC_ACQUIRE);
+        SeaTableEntry *entries = __atomic_load_n(&t->entries, __ATOMIC_RELAXED);
+        SeaTableEntry *e = find_entry_ro(entries, cap, key);
+        SeaValue v = e ? __atomic_load_n(&e->value, __ATOMIC_RELAXED) : SEA_NIL_VAL;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&ts->seq, __ATOMIC_RELAXED) != s1) continue;
+        if (!e) return false;
+        if (ic) {
+            __atomic_store_n(&ic->entries, entries, __ATOMIC_RELAXED);
+            __atomic_store_n(&ic->idx, (uint32_t)(e - entries), __ATOMIC_RELAXED);
+        }
+        *out = v;
+        return true;
+    }
 }
 
 bool sea_table_delete(SeaTable *t, SeaValue key) {

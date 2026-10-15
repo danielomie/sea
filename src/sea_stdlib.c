@@ -170,24 +170,17 @@ static SeaValue fn_close(SeaVM *vm, int argc, SeaValue *args) {
 }
 
 // panic(v)
+/* panic(v) called as a function value (the statement form is OP_PANIC):
+ * the same unwinding (sea_vm_raise takes an owned value) */
 static SeaValue fn_panic(SeaVM *vm, int argc, SeaValue *args) {
     SeaValue v = (argc > 0) ? args[0] : SEA_NIL_VAL;
-    SeaString *s = sea_vm_tostring(vm, v);
-    fprintf(stderr, "sea panic: %s\n", s->data);
-    sea_obj_release(&s->obj);
-    exit(1);
+    sea_vm_raise(vm, sea_val_ref(v));
 }
 
 // recover()
 static SeaValue fn_recover(SeaVM *vm, int argc, SeaValue *args) {
     (void)argc; (void)args;
-    if (vm->panicking) {
-        SeaValue v = vm->panic_val;
-        vm->panicking = false;
-        vm->panic_val = SEA_NIL_VAL;
-        return v;
-    }
-    return SEA_NIL_VAL;
+    return sea_vm_recover(vm);
 }
 
 /* ---- require() helpers ---- */
@@ -226,7 +219,7 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
 
     /* 1. Built-in / pre-registered modules (math, string, map, …) */
     SeaValue mod = SEA_NIL_VAL;
-    if (sea_table_get_str(vm_globals(vm), name, &mod))
+    if (sea_globals_get_str(vm, name, &mod))
         return sea_val_ref(mod);
 
     /* 2. Resolve file path

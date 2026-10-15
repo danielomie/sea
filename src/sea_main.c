@@ -80,6 +80,7 @@ static int run_compiled(SeaVM *vm, const char *path) {
     }
     SeaChunk *chunk = sea_chunk_read(f);
     fclose(f);
+    sea_chunk_set_source(chunk);
     if (!chunk) {
         fprintf(stderr, "sea: invalid or outdated bytecode file '%s' "
                         "(recompile it with `sea compile`)\n", path);

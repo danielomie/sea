@@ -1,5 +1,6 @@
 #pragma once
 #include "sea_common.h"
+#include "sea_table.h"
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -99,7 +100,7 @@ typedef struct SeaScheduler {
 typedef struct SeaShared {
     SeaTable        *globals;       /* global variable table               */
     SeaMap          *loaded;        /* module cache (require)              */
-    pthread_rwlock_t globals_lock;  /* read: shared; write: exclusive      */
+    SeaTableSync     globals_sync;  /* globals: lock-free reads, locked writes */
     pthread_mutex_t  loaded_lock;   /* protects loaded map                 */
     bool             jit_enabled;   /* program-wide JIT flag (--jit); goroutine
                                        child VMs share this, so they JIT too */

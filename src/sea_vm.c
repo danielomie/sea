@@ -19,6 +19,7 @@
 
 // Forward declaration: the dispatch loop, taking base frame level
 static int vm_run(SeaVM *vm, int base_frame);
+static int vm_run_ex(SeaVM *vm, int base_frame, bool top, bool unwind);
 
 // ---- VM construction ----
 
@@ -62,6 +63,7 @@ void sea_vm_free(SeaVM *vm) {
     if (vm->owns_shared) {
         sea_shared_free(vm->shared);
     }
+    free(vm->panic_trace);
     SEA_FREE(vm, SeaVM);
 }
 
@@ -76,6 +78,7 @@ void sea_vm_reset_child(SeaVM *vm) {
         sea_chunk_free(c);
         c = next;
     }
+    free(vm->panic_trace);
     memset(vm, 0, sizeof(*vm));
     /* frame_count == 0 signals "needs init" to worker_thread */
 }
@@ -84,9 +87,9 @@ void sea_vm_reset_child(SeaVM *vm) {
 
 /* Walk the call stack and print file:line info for each frame to stderr.
  * Assumes frame->ip was saved by the DISPATCH macro before each instruction. */
-static void sea_vm_print_traceback(SeaVM *vm) {
+static void vm_write_traceback(SeaVM *vm, FILE *out) {
     if (vm->frame_count == 0) return;
-    fprintf(stderr, "stack traceback:\n");
+    fprintf(out, "stack traceback:\n");
     for (int i = vm->frame_count - 1; i >= 0; i--) {
         SeaCallFrame *f = &vm->frames[i];
         if (!f->closure || !f->closure->chunk) continue;
@@ -95,20 +98,25 @@ static void sea_vm_print_traceback(SeaVM *vm) {
         /* ip saved by DISPATCH() points to the next instruction; -1 = current */
         int idx  = (int)(f->ip - 1 - c->code);
         int line = (idx >= 0 && idx < c->lines_len) ? c->lines[idx] : -1;
-        /* Heuristic: top-level chunks have '/' in the name (file path);
-         * function chunks only have the function name. */
-        int is_file = name && strchr(name, '/');
+        /* A root chunk (main script, module) is its own source; prototypes
+         * point at their root (sea_chunk_set_source). */
+        int is_file = c->source ? c->source == c->name : (name && strchr(name, '/'));
         if (line > 0) {
+            const char *src = c->source ? c->source : "[?]";
             if (is_file)
-                fprintf(stderr, "\t%s:%d: in main chunk\n", name, line);
+                fprintf(out, "\t%s:%d: in main chunk\n", name, line);
             else if (name[0])
-                fprintf(stderr, "\t[?]:%d: in function '%s'\n", line, name);
+                fprintf(out, "\t%s:%d: in function '%s'\n", src, line, name);
             else
-                fprintf(stderr, "\t[?]:%d: in anonymous function\n", line);
+                fprintf(out, "\t%s:%d: in anonymous function\n", src, line);
         } else {
-            fprintf(stderr, "\t%s: (no line info)\n", name);
+            fprintf(out, "\t%s: (no line info)\n", name);
         }
     }
+}
+
+static void sea_vm_print_traceback(SeaVM *vm) {
+    vm_write_traceback(vm, stderr);
 }
 
 void sea_vm_error(SeaVM *vm, const char *fmt, ...) {
@@ -121,11 +129,87 @@ void sea_vm_error(SeaVM *vm, const char *fmt, ...) {
 void sea_vm_error_noreturn(SeaVM *vm, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    vsnprintf(vm->err_msg, sizeof(vm->err_msg), fmt, args);
+    char msg[sizeof vm->err_msg];
+    vsnprintf(msg, sizeof msg, fmt, args);
     va_end(args);
-    sea_vm_print_traceback(vm);
-    fprintf(stderr, "sea runtime error: %s\n", vm->err_msg);
+    /* "file:line: message", as in Lua: where the error happened */
+    snprintf(vm->err_msg, sizeof vm->err_msg, "%s", msg);
+    if (vm->frame_count > 0) {
+        SeaCallFrame *f = &vm->frames[vm->frame_count - 1];
+        SeaChunk *c = f->closure ? f->closure->chunk : NULL;
+        int idx = c ? (int)(f->ip - 1 - c->code) : -1;
+        if (c && idx >= 0 && idx < c->lines_len && c->lines[idx] > 0) {
+            const char *src = c->source ? c->source : (c->name ? c->name : "?");
+            snprintf(vm->err_msg, sizeof vm->err_msg, "%.180s:%d: %.300s", src, c->lines[idx], msg);
+        }
+    }
+    sea_vm_raise(vm, sea_make_error_str(vm, vm->err_msg));
+}
+
+/* ---- Panics ----
+ * A panic (panic(v) or a runtime error) unwinds the call stack frame by frame,
+ * running each frame's deferred calls (panic_unwind in vm_run_inner). A
+ * deferred call that calls recover() stops it: that frame then returns
+ * normally, with nil results, after its remaining deferred calls. A panic
+ * that reaches the root of a nested vm_run (sea_vm_call from a native, a
+ * module body, a JIT helper) sets panic_propagating and returns; the caller's
+ * VM loop continues the unwinding when control gets back to it. A panic that
+ * reaches the root of the program or of a goroutine ends the process.
+ *
+ * Runtime errors raised from C code inside the loop longjmp to it (vm_run).
+ * Frames that are unwound do not release their locals (a leak on that path,
+ * like the values held by deferred-call arguments of an aborted native). */
+
+typedef struct {
+    jmp_buf buf;
+} SeaPanicJmp;
+
+static void vm_capture_trace(SeaVM *vm) {
+    free(vm->panic_trace);
+    vm->panic_trace = NULL;
+    char *buf = NULL;
+    size_t n = 0;
+    FILE *f = open_memstream(&buf, &n);
+    if (!f) return;
+    vm_write_traceback(vm, f);
+    fclose(f);
+    vm->panic_trace = buf;
+}
+
+void sea_vm_raise(SeaVM *vm, SeaValue v) {
+    if (vm->panicking) { if (sea_is_obj(vm->panic_val)) sea_obj_release(sea_as_obj(vm->panic_val)); }   /* a new panic replaces it */
+    vm->panicking = true;
+    vm->panic_propagating = false;
+    vm->panic_val = v;
+    vm_capture_trace(vm);
+    if (vm->panic_jmp) longjmp(((SeaPanicJmp *)vm->panic_jmp)->buf, 1);
+    sea_vm_panic_exit(vm);
+}
+
+void sea_vm_panic_exit(SeaVM *vm) {
+    if (vm->panic_trace) fputs(vm->panic_trace, stderr);
+    SeaValue v = vm->panic_val;
+    if (sea_is_error(v)) {
+        SeaString *s = sea_vm_tostring(vm, SEA_AS_ERROR(v)->message);
+        fprintf(stderr, "sea runtime error: %s\n", s->data);
+        sea_obj_release(&s->obj);
+    } else {
+        SeaString *s = sea_vm_tostring(vm, v);
+        fprintf(stderr, "sea panic: %s\n", s->data);
+        sea_obj_release(&s->obj);
+    }
+    fflush(stdout);
     exit(1);
+}
+
+SeaValue sea_vm_recover(SeaVM *vm) {
+    if (!vm->panicking) return SEA_NIL_VAL;
+    SeaValue v = vm->panic_val;      /* owned: moves to the caller */
+    vm->panicking = false;
+    vm->panic_val = SEA_NIL_VAL;
+    free(vm->panic_trace);
+    vm->panic_trace = NULL;
+    return v;
 }
 
 // ---- Native closure creation ----
@@ -144,11 +228,33 @@ SeaClosure* sea_native_closure(const char *name, SeaValue (*fn)(SeaVM*, int, Sea
     return cl;
 }
 
+void sea_globals_set(SeaVM *vm, SeaValue key, SeaValue val) {
+    /* With no goroutine alive, the main thread is the only one that can touch
+     * the globals (a spawn counts the goroutine before it can run). */
+    if (!vm->goroutine &&
+        (!sea_global_sched || atomic_load(&sea_global_sched->goroutine_count) == 0)) {
+        sea_table_set(vm_globals(vm), key, val);
+        return;
+    }
+    sea_table_set_sync(vm_globals(vm), &vm->shared->globals_sync, key, val);
+}
+
+bool sea_globals_get(SeaVM *vm, SeaValue key, SeaValue *out) {
+    return sea_table_get_sync(vm_globals(vm), &vm->shared->globals_sync, key, NULL, out);
+}
+
+bool sea_globals_get_str(SeaVM *vm, const char *name, SeaValue *out) {
+    SeaString *s = sea_string_intern(name, strlen(name));
+    bool found = sea_globals_get(vm, sea_obj_val(&s->obj), out);
+    sea_obj_release(&s->obj);
+    return found;
+}
+
 void sea_vm_register_native(SeaVM *vm, const char *name,
                               SeaValue (*fn)(SeaVM*, int, SeaValue*)) {
     SeaClosure *cl = sea_native_closure(name, fn);   /* cl rc=1 */
     SeaString *key = sea_string_intern(name, strlen(name)); /* key rc=2 */
-    sea_table_set(vm_globals(vm), sea_obj_val(&key->obj), sea_obj_val(&cl->obj));
+    sea_globals_set(vm, sea_obj_val(&key->obj), sea_obj_val(&cl->obj));
     /* table_set retained both: cl rc=2, key rc=3 */
     sea_obj_release(&key->obj); /* key rc=2 (intern=1 + table=1) */
     sea_obj_release(&cl->obj);  /* cl  rc=1 (table=1) */
@@ -157,7 +263,7 @@ void sea_vm_register_native(SeaVM *vm, const char *name,
 void sea_vm_register_module(SeaVM *vm, const char *name, SeaTable *mod) {
     sea_table_add_lowercase_aliases(mod);
     SeaString *key = sea_string_intern(name, strlen(name)); /* key rc=2 */
-    sea_table_set(vm_globals(vm), sea_obj_val(&key->obj), sea_obj_val(&mod->obj));
+    sea_globals_set(vm, sea_obj_val(&key->obj), sea_obj_val(&mod->obj));
     /* table_set retained both */
     sea_obj_release(&key->obj);  /* caller releases their ref */
     /* mod: caller passes their ref; they should release after this call if desired */
@@ -436,7 +542,7 @@ static SeaValue table_get(SeaVM *vm, SeaValue obj_val, SeaValue key) {
     if (sea_is_string(obj_val)) {
         // String method access
         SeaValue str_mod;
-        if (sea_table_get_str(vm_globals(vm), "string", &str_mod) && sea_is_table(str_mod)) {
+        if (sea_globals_get_str(vm, "string", &str_mod) && sea_is_table(str_mod)) {
             SeaValue fn = SEA_NIL_VAL;
             sea_table_get(SEA_AS_TABLE(str_mod), key, &fn);
             return fn;
@@ -546,6 +652,7 @@ bool sea_vm_goroutine_init(SeaVM *vm, SeaValue fn, SeaValue *args, int argc) {
         vm->native_depth++;
         vm->regs[0] = call_native(vm, cl, argc, args);
         vm->native_depth--;
+        if (vm->panic_propagating) sea_vm_panic_exit(vm);
         for (int i = 0; i < argc; i++) vm_release_val(args[i]);
         return false;
     }
@@ -584,7 +691,7 @@ bool sea_vm_goroutine_init(SeaVM *vm, SeaValue fn, SeaValue *args, int argc) {
 /* Run (or resume) the goroutine until it finishes or parks on a channel.
  * Returns SEA_OK on normal return, SEA_SUSPENDED if parked. */
 int sea_vm_resume(SeaVM *vm) {
-    return vm_run(vm, 0);
+    return vm_run_ex(vm, 0, true, false);
 }
 
 /* ---- Call dispatch ----*/
@@ -965,7 +1072,35 @@ static inline void vm_array_push_move(SeaValue *base, int a, int b) {
     vm_release_val(v);
 }
 
+static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind);
+
+/* Run frames until frame_count drops to base_frame (or the goroutine parks).
+ * top: this is the root of the program or of a goroutine (an unrecovered
+ * panic ends the process); otherwise a C caller waits for the result.
+ * unwind: start by unwinding a panic (see Panics). Runtime errors raised by
+ * C code called from the loop come back here through longjmp. */
+static int vm_run_ex(SeaVM *vm, int base_frame, bool top, bool unwind) {
+    SeaPanicJmp pj;
+    void *prev = vm->panic_jmp;
+    int depth = vm->native_depth;
+    volatile bool vunwind = unwind;
+    vm->panic_jmp = &pj;
+    if (_setjmp(pj.buf)) {
+        vm->panic_jmp = &pj;
+        vm->native_depth = depth;     /* raised between a ++ and its -- */
+        vm->io_call.active = false;   /* a native died mid-I/O */
+        vunwind = true;
+    }
+    int r = vm_run_inner(vm, base_frame, top, vunwind);
+    vm->panic_jmp = prev;
+    return r;
+}
+
 static int vm_run(SeaVM *vm, int base_frame) {
+    return vm_run_ex(vm, base_frame, false, false);
+}
+
+static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
     SeaCallFrame *frame = &vm->frames[vm->frame_count - 1];
     register SeaValue *base __asm__("r13") = frame->base;
     register uint32_t *ip __asm__("r14") = frame->ip;
@@ -1004,6 +1139,9 @@ static int vm_run(SeaVM *vm, int base_frame) {
     if (SEA_JIT_IS_CODE(_jf)) { \
         int _nret = ((SeaJittedFn)_jf)(vm, (_nf)); \
         if (_nret == SEA_JIT_SUSPEND) return SEA_SUSPENDED; /* nf->ip = resume point */ \
+        /* a panic escaped a call made by the native code: it bailed (spilled \
+         * its frame) and the unwinding continues here */ \
+        if (SEA_UNLIKELY(_nret == SEA_JIT_BAILOUT && vm->panic_propagating)) goto panic_unwind; \
         if (_nret != SEA_JIT_BAILOUT) { \
             /* native code may have created closures over nf's registers */ \
             if (vm->open_upvalues) close_upvalues(vm, (_nf)->base); \
@@ -1037,20 +1175,20 @@ static int vm_run(SeaVM *vm, int base_frame) {
 /* Run all deferred calls registered for the current frame (LIFO order),
  * then restore the defer stack pointer. Must be called before any RETURN. */
 #define RUN_DEFERS() do { \
-    int _base = frame->defer_base; \
-    for (int _d = vm->defer_count - 1; _d >= _base; _d--) { \
-        SeaDeferEntry *_de = &vm->defers[_d]; \
-        if (sea_is_obj(_de->fn)) { \
+    while (vm->defer_count > frame->defer_base) { \
+        SeaDeferEntry _de = vm->defers[--vm->defer_count]; \
+        if (sea_is_obj(_de.fn)) { \
             frame->ip = ip; \
-            vm_release_val(sea_vm_call(vm, _de->fn, _de->args, _de->argc)); \
+            vm_release_val(sea_vm_call(vm, _de.fn, _de.args, _de.argc)); \
             frame = &vm->frames[vm->frame_count - 1]; \
             base  = frame->base; \
             ip    = frame->ip; \
             chunk = frame->closure->chunk; \
         } \
-        defer_entry_release(_de); \
+        defer_entry_release(&_de); \
+        /* the deferred call panicked: unwind this frame (its other defers too) */ \
+        if (SEA_UNLIKELY(vm->panic_propagating)) goto panic_unwind; \
     } \
-    vm->defer_count = _base; \
 } while(0)
 
     static void *dispatch_table[OP_COUNT] = {
@@ -1177,6 +1315,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
         dispatch_table[OP_IISUB] = &&lbl_IISUB_CHECKED;
     }
 
+    if (SEA_UNLIKELY(unwind)) goto panic_unwind;
     DISPATCH();
 
     lbl_LOAD_NIL: {
@@ -1216,8 +1355,8 @@ static int vm_run(SeaVM *vm, int base_frame) {
         int a = SEA_INSTR_A(i), bx = SEA_INSTR_Bx(i);
         SeaValue key = CONST(bx);
         SeaValue val = SEA_NIL_VAL;
-        sea_table_get_ic(vm_globals(vm), key,
-                         (SeaTableIC*)&sea_chunk_ics(chunk)[ip - 1 - chunk->code], &val);
+        sea_table_get_ic_sync(vm_globals(vm), &vm->shared->globals_sync, key,
+                              (SeaTableIC*)&sea_chunk_ics(chunk)[ip - 1 - chunk->code], &val);
         REG(a) = val;
         DISPATCH();
     }
@@ -1226,7 +1365,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
         int a = SEA_INSTR_A(i), bx = SEA_INSTR_Bx(i);
         SeaValue key = CONST(bx);
         sea_val_mark_shared(REG(a));
-        sea_table_set(vm_globals(vm), key, REG(a));
+        sea_globals_set(vm, key, REG(a));
         DISPATCH();
     }
     lbl_LOAD_UP: {
@@ -2033,6 +2172,10 @@ static int vm_run(SeaVM *vm, int base_frame) {
                     return SEA_SUSPENDED;
                 }
                 native_call_done(base, a, b, argc, result);
+                if (SEA_UNLIKELY(vm->panic_propagating)) {   /* from a callback */
+                    SAVE_IP();
+                    goto panic_unwind;
+                }
             } else {
                 SeaChunk *callee_chunk = cl->chunk;
                 int n_args = argc < 256 ? argc : 255;
@@ -2168,6 +2311,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
         int nret = ((SeaJittedFn)jf)(vm, frame);
         if (nret == SEA_JIT_SUSPEND) return SEA_SUSPENDED;   /* frame->ip = resume point */
         if (nret == SEA_JIT_BAILOUT) {
+            if (SEA_UNLIKELY(vm->panic_propagating)) goto panic_unwind;
             /* Resume where native code stopped (or right here, if this loop
              * head is not an OSR entry). Re-check only every 64 back-edges so
              * a loop that cannot stay native costs little. */
@@ -2696,46 +2840,61 @@ static int vm_run(SeaVM *vm, int base_frame) {
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i);
         SAVE_IP();
+        SeaValue v = REG(a);
+        vm_retain_val(v);                /* owned by the VM until recover() takes it */
+        if (vm->panicking) vm_release_val(vm->panic_val);
         vm->panicking = true;
-        vm->panic_val = REG(a);          /* owned by the VM until recover() takes it */
-        vm_retain_val(vm->panic_val);
-
-        // Run deferred calls in LIFO order
-        for (int d = vm->defer_count - 1; d >= 0; d--) {
-            SeaDeferEntry *de = &vm->defers[d];
-            bool recovered = false;
-            if (sea_is_obj(de->fn)) {
-                vm_release_val(sea_vm_call(vm, de->fn, de->args, de->argc));
-                recovered = !vm->panicking;
-            }
-            defer_entry_release(de);
-            if (recovered) {
-                /* the remaining (outer) entries are dropped, as before */
-                for (int e = d - 1; e >= 0; e--) defer_entry_release(&vm->defers[e]);
-                break;
-            }
-        }
-        vm->defer_count = 0;
-
-        if (vm->panicking) {
-            SeaString *s = sea_vm_tostring(vm, vm->panic_val);
-            sea_vm_print_traceback(vm);
-            fprintf(stderr, "sea panic: %s\n", s->data);
-            sea_obj_release(&s->obj);
-            exit(1);
-        }
-        DISPATCH();
+        vm->panic_val = v;
+        vm_capture_trace(vm);
+        goto panic_unwind;
     }
+
+    /* Unwind a panic (see Panics): run the top frame's deferred calls; if one
+     * recovers, that frame returns nil (RETURN0 runs its other defers);
+     * otherwise pop it and go on with its caller. */
+    panic_unwind: {
+        vm->panic_propagating = false;
+        vm->io_call.active = false;
+        for (;;) {
+            frame = &vm->frames[vm->frame_count - 1];
+            bool recovered = false;
+            while (vm->defer_count > frame->defer_base) {
+                SeaDeferEntry de = vm->defers[--vm->defer_count];
+                if (sea_is_obj(de.fn)) {
+                    vm_release_val(sea_vm_call(vm, de.fn, de.args, de.argc));
+                    vm->panic_propagating = false;   /* a new panic replaced it */
+                }
+                defer_entry_release(&de);
+                frame = &vm->frames[vm->frame_count - 1];
+                if (!vm->panicking) { recovered = true; break; }
+            }
+            if (recovered) {
+                base  = frame->base;
+                ip    = frame->ip;
+                chunk = frame->closure->chunk;
+                goto lbl_RETURN0;
+            }
+            if (vm->open_upvalues) close_upvalues(vm, frame->base);
+            if (frame->vararg_count) release_varargs(frame);
+            vm->frame_arena_used = frame->arena_mark;
+            vm->frame_count--;
+            if (vm->frame_count <= base_frame) {
+                if (top) sea_vm_panic_exit(vm);
+                if (vm->has_exec_result) {
+                    vm->exec_result = SEA_NIL_VAL;
+                    vm->has_exec_result = false;
+                }
+                frame->base[0] = SEA_NIL_VAL;     /* the C caller reads base[0] */
+                vm->panic_propagating = true;
+                return SEA_OK;
+            }
+        }
+    }
+
     lbl_RECOVER: {
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i);
-        if (vm->panicking) {
-            REG(a) = vm->panic_val;
-            vm->panicking = false;
-            vm->panic_val = SEA_NIL_VAL;
-        } else {
-            REG(a) = SEA_NIL_VAL;
-        }
+        REG(a) = sea_vm_recover(vm);
         DISPATCH();
     }
 
@@ -2966,7 +3125,10 @@ static int jit_run_callee(SeaVM *vm, SeaClosure *cl, SeaValue *base, int a, int 
             /* bailout: nf->ip points at the resume instruction; interpret below */
         }
     }
-    vm_run(vm, base_frame);              /* runs nf to completion and pops it */
+    /* runs nf to completion and pops it; after a bailout caused by a panic in
+     * a call nf's native code made, unwinds nf instead */
+    vm_run_ex(vm, base_frame, false, vm->panic_propagating);
+    if (vm->panic_propagating) return 1;   /* bail: our caller's loop unwinds */
     /* the RETURN left one result (+1) in nf->base[0] (a C-boundary return) */
     if (b > 0) base[a] = nf->base[0];
     else vm_release_val(nf->base[0]);
@@ -2990,7 +3152,7 @@ int sea_jit_call(SeaVM *vm, SeaValue *base, int a, int b, int c) {
     if (cl->is_native) {
         SeaValue r = call_native(vm, cl, c, &base[a + 1]);
         native_call_done(base, a, b, c, r);
-        return 0;
+        return vm->panic_propagating ? 1 : 0;
     }
     /* Only run callees that have native code. For an interpreted callee the
      * re-entrant vm_run below is slower than the interpreter's own inline
@@ -3035,7 +3197,7 @@ int sea_jit_new_array(SeaVM *vm, SeaValue *base, int a, int b) {
  * embedded by the JIT from chunk->constants. */
 int sea_jit_load_global(SeaVM *vm, SeaValue *base, int a, SeaValue key, SeaTableIC *ic) {
     SeaValue val = SEA_NIL_VAL;
-    sea_table_get_ic(vm_globals(vm), key, ic, &val);
+    sea_table_get_ic_sync(vm_globals(vm), &vm->shared->globals_sync, key, ic, &val);
     base[a] = val;
     return 0;
 }
@@ -3177,7 +3339,7 @@ int sea_jit_concat(SeaVM *vm, SeaValue *base, int a, int b, int c) {
 /* OP_STORE_GLOBAL: G[key] = R[a] (mirrors lbl_STORE_GLOBAL). */
 int sea_jit_store_global(SeaVM *vm, SeaValue *base, int a, SeaValue key) {
     sea_val_mark_shared(base[a]);
-    sea_table_set(vm_globals(vm), key, base[a]);
+    sea_globals_set(vm, key, base[a]);
     return 0;
 }
 
@@ -3384,7 +3546,7 @@ int sea_vm_exec(SeaVM *vm, SeaChunk *chunk) {
     /* The top-level chunk is JIT-compiled like any other once one of its loops
      * gets hot (back-edge counter in vm_run), and entered there via OSR. */
     sea_gc_vm = vm;                  /* cycle buffer of the main goroutine */
-    int result = vm_run(vm, 0);
+    int result = vm_run_ex(vm, 0, true, false);
     sea_obj_release(&cl->obj);
     return result;
 }
@@ -3444,6 +3606,9 @@ int sea_vm_exec_mod(SeaVM *vm, SeaChunk *chunk, SeaValue *result) {
 /* Call a Sea function from C. The arguments are borrowed (the caller keeps
  * them); the result is owned (+1): release it or store it. */
 SeaValue sea_vm_call(SeaVM *vm, SeaValue fn_val, SeaValue *args, int argc) {
+    /* a panic escaped an earlier callback: the native calling us is about to
+     * return into the unwinding, so run nothing more */
+    if (SEA_UNLIKELY(vm->panic_propagating)) return SEA_NIL_VAL;
     if (!sea_is_obj(fn_val)) {
         fprintf(stderr, "sea: attempt to call a %s value\n", sea_type_name(fn_val));
         return SEA_NIL_VAL;

@@ -3430,5 +3430,6 @@ static SeaChunk* compile_program(SeaNode *program, const char *source_name, bool
         return NULL;
     }
 
+    sea_chunk_set_source(c.chunk);
     return c.chunk;
 }

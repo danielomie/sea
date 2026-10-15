@@ -110,8 +110,10 @@ goroutine runs. Code that never shares a value never pays for atomics.
 
 Atomic counts keep objects alive, but they do not make **contents** safe to
 update from several goroutines at once. Two goroutines writing the same table,
-map or array without a lock is a data race. Writing a global from goroutines is
-one too: globals have no lock yet. Guard such state with `sync.mutex`, or keep
+map or array without a lock is a data race. The globals table itself is safe:
+goroutines may define and read globals at once (writes take a lock, reads stay
+lock-free; see `SeaTableSync` in `sea_table.h`), but two goroutines updating
+the same global (`n = n + 1`) still race. Guard such state with `sync.mutex`, or keep
 it in one goroutine and talk to it over channels. Captured variables (upvalues)
 shared between goroutines are the exception: writing and closing one takes a
 per-upvalue spinlock (`sea_upvalue_lock`), and reads retry if the upvalue was
@@ -247,6 +249,8 @@ static SeaValue fn_pair(SeaVM *vm, int argc, SeaValue *args) {
   that table: the closure is freed under the running frame. Keep another reference
   (a local) for the duration of the call.
 - **`panic` without `recover`** ends the process, so nothing is released.
+- **Frames unwound by a panic** (or a runtime error) do not release their
+  locals, even when an outer function recovers: those values leak.
 
 ## Checking for leaks
 

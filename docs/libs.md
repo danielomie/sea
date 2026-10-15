@@ -206,7 +206,7 @@ console.shimmer_stop()
 
 ## `http`
 
-HTTP/1.1 client and server. Requires `http_native.so` (strict request/response parsers, URL coding), plus `libs/ssl` for HTTPS and `libs/json` for the JSON helpers. Build: `make -C libs/http libs/ssl libs/json` (one `make -C` each).
+HTTP/1.1 client and server. Requires `http_native.so` (strict request/response parsers, URL coding), plus `libs/ssl` for HTTPS and `libs/json` for the JSON helpers. Build: `make -C libs/http libs/ssl libs/json` (one `make -C` each); `http_native.so` links zlib (`zlib1g-dev` / `zlib-devel`) for gzip.
 
 ```sea
 local http = require("../libs/http/http")   -- relative to the requiring file
@@ -238,9 +238,10 @@ Sockets come from the built-in `net` module: every network wait parks only the g
 | `basic_auth` | — | `{user, password}` |
 | `verify` | `true` | `false` skips TLS certificate checks |
 | `tls` | — | Extra `ssl.connect` opts (`cert`, `key`, `sni`, `min_version`) |
-| `max_body_bytes` | 100 MB | Larger responses fail |
+| `max_body_bytes` | 100 MB | Larger responses fail (also the limit for a decompressed body) |
+| `decompress` | `true` | Send `Accept-Encoding: gzip` and decode gzip/deflate responses. Off when you set `Accept-Encoding` yourself (the body is then yours to decode) |
 
-The client sends `Host` (with the port when it is not the default), `User-Agent: sea-http/1.1` and `Accept: */*` (unless given) and `Content-Length` (a non-string body is converted with `tostring`); it decodes chunked responses and skips 1xx interim responses.
+The client sends `Host` (with the port when it is not the default), `User-Agent: sea-http/1.1`, `Accept: */*` and `Accept-Encoding: gzip` (unless given), and `Content-Length` (a non-string body is converted with `tostring`); it decodes chunked responses and skips 1xx interim responses.
 
 **Response:**
 
@@ -253,6 +254,7 @@ The client sends `Host` (with the port when it is not the default), `User-Agent:
 | `body` | Body string (`""` for HEAD / 204 / 304) |
 | `url` | Final URL after redirects |
 | `error` | Message, only when `status == 0` |
+| `uncompressed` | `true` when a gzip/deflate body was decoded (`Content-Encoding` and `Content-Length` are then removed from `headers`) |
 | `resp:json()` | Decodes the body as JSON |
 
 ### Server
@@ -280,6 +282,8 @@ The client sends `Host` (with the port when it is not the default), `User-Agent:
 | `max_requests` | `1000` | Requests per connection before it is closed |
 | `keep_alive` | `true` | `false` closes after every response |
 | `log` | `false` | Print one line per request: method, target, status, time |
+| `gzip` | `false` | `true`: gzip text-like responses (`text/*`, JSON, JavaScript, XML, SVG) of 1 KB or more for clients that accept it, adding `Vary: Accept-Encoding`; a number sets the minimum size. Responses that already have a `Content-Encoding` are left alone |
+| `on_error` | prints | `on_error(err, req)`: called when a handler panics or hits a runtime error (the client gets a 500) |
 | `quiet` | `false` | (`serve` only) no "listening" line |
 
 The server supports keep-alive and pipelining, chunked request bodies, `Expect: 100-continue`, and HEAD (headers only). It adds `Date`, `Content-Length` and `Connection`. Malformed requests get 400, 501 (unknown Transfer-Encoding) or 505, including request-smuggling shapes: `Content-Length` together with `Transfer-Encoding`, conflicting lengths, obsolete line folding, and bare CR/LF.
@@ -301,7 +305,7 @@ The server supports keep-alive and pipelining, chunked request bodies, `Expect: 
 | `params` | Route parameters (router only) |
 | `req:json()` | Decodes the body as JSON |
 
-**Response** (what the handler returns): a table/map `{status = 200, body = "", headers = {...}, close = false}`, or just a string (200, `text/plain`). A non-string `body` is converted with `tostring`. Header values may be arrays (repeated headers). `close = true` closes the connection after the response. Anything else — `nil`, an invalid status, a header with CR/LF — becomes a 500 and is logged. Without a `Content-Type`, `text/plain; charset=utf-8` is used.
+**Response** (what the handler returns): a table/map `{status = 200, body = "", headers = {...}, close = false}`, or just a string (200, `text/plain`). A non-string `body` is converted with `tostring`. Header values may be arrays (repeated headers). `close = true` closes the connection after the response. Anything else — `nil`, an invalid status, a header with CR/LF — becomes a 500 and is logged. A handler that panics or hits a runtime error (indexing nil, …) also gets the client a 500; the error goes to `on_error` (by default printed with the request) and the server keeps running. Without a `Content-Type`, `text/plain; charset=utf-8` is used.
 
 **Response helpers:**
 
@@ -369,7 +373,7 @@ http.serve(8443, function(req) return "Secure hello!\n" end,
     { tls = { cert = "cert.pem", key = "key.pem" } })
 ```
 
-**Breaking changes (2026-10):** `req.path` no longer includes the query string (use `req.query`, or `req.target` for the raw form). Handlers returning `nil` now produce a 500 instead of stopping the server.
+**Breaking changes (2026-10):** `req.path` no longer includes the query string (use `req.query`, or `req.target` for the raw form). Handlers returning `nil`, panicking or failing with a runtime error now produce a 500 instead of stopping the server.
 
 ---
 

@@ -88,7 +88,28 @@ so every native that can park must be safe to re-run from the top. On the main
 thread, or under a nested `sea_vm_call` (`vm->native_depth > 0`) where the C
 stack cannot be suspended, `sea_io_wait` falls back to a blocking `poll`.
 `time.sleep` and the `net` module use this. `libs/ssl` and `libs/http` build on
-`net`.
+`net`. Name lookups (`getaddrinfo` blocks) run on up to 8 resolver threads;
+the caller waits on an eventfd through the same mechanism.
+
+Globals are one table shared by every goroutine: writers take a lock and a
+seqlock, readers (`LOAD_GLOBAL` and its inline cache) take none; a resize
+publishes the new array before the new capacity and keeps old arrays until
+exit (`SeaTableSync`).
+
+## Panics
+
+`panic(v)` and runtime errors unwind frame by frame, running each frame's
+deferred calls (`panic_unwind` in `vm_run_inner`); `recover()` in a deferred
+call makes that frame return nil. Runtime errors raised by C code inside the
+loop (`sea_vm_error_noreturn` → `sea_vm_raise`) `longjmp` to the innermost
+`vm_run_ex`, which starts the unwinding. When a panic reaches the root of a
+nested run (`sea_vm_call` from a native, a module body, a JIT helper), that run
+returns with `panic_propagating` set: `sea_vm_call` then refuses further calls,
+the interpreter continues unwinding after the native returns, and JIT code,
+which sees the callee helper fail, bails out (spilling its frame) so the
+interpreter unwinds its frame too. At the root of the program or of a
+goroutine, an unrecovered panic prints the traceback captured where it started
+and exits.
 
 ## JIT
 

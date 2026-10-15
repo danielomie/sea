@@ -1,0 +1,131 @@
+-- Panics and runtime errors unwind the stack, running deferred calls;
+-- recover() in a deferred call stops the unwinding.
+
+local function catch(f, ...)
+    local caught = nil
+    local function run(...)
+        defer function()
+            local e = recover()
+            if e ~= nil then caught = e end
+        end
+        return f(...)
+    end
+    local r = run(...)
+    return r, caught
+end
+
+local function msg(e)
+    if not is_error(e) then return tostring(e) end
+    -- runtime errors read "path/file.sea:line: message": keep just the file name
+    local m = e.message
+    local colon = string.find(m, ":") or 0
+    local cut = 0
+    for i = 1, colon do
+        if string.sub(m, i, i) == "/" then cut = i end
+    end
+    return "error: " .. string.sub(m, cut + 1)
+end
+
+-- 1. runtime errors are recoverable; the recovering function returns nil
+local r, e = catch(function()
+    local t = nil
+    return t.x
+end)
+print("index nil:", r, msg(e))
+r, e = catch(function() return 1 + {} end)
+print("arith:", r, msg(e))
+r, e = catch(function()
+    local f = nil
+    return f()
+end)
+print("call nil:", r, msg(e))
+r, e = catch(function() return "ok" end)
+print("no panic:", r, e)
+
+-- 2. execution does not continue after panic; defers of every frame run, inner first
+local log = []
+local function inner()
+    defer function() log[] = "inner defer" end
+    panic("boom")
+    log[] = "after panic (must not run)"
+end
+local function middle()
+    defer function() log[] = "middle defer" end
+    inner()
+    log[] = "after inner (must not run)"
+end
+local function outer()
+    defer function()
+        log[] = "outer recovers: " .. tostring(recover())
+    end
+    defer function() log[] = "outer defer 2" end
+    middle()
+end
+outer()
+for _, l in log do print(l) end
+
+-- 3. the recovering frame's caller continues normally
+local function safe_div(a, b)
+    defer function() recover() end
+    if b == 0 then panic("division by zero") end
+    return a // b
+end
+print("safe_div:", safe_div(10, 2), safe_div(1, 0), "continues")
+
+-- 4. a panic inside a deferred call (normal return) is unwound too
+r, e = catch(function()
+    defer function()
+        local z = nil
+        return z.y
+    end
+    return "value"
+end)
+print("panic in defer:", r, msg(e))
+
+-- 5. a deferred call that panics again replaces the panic
+r, e = catch(function()
+    defer function() panic("second") end
+    panic("first")
+end)
+print("re-panic:", r, msg(e))
+
+-- 6. through a native callback (sync.once) and a module body
+local once = sync.once()
+r, e = catch(function()
+    once.do_once(once, function() panic("in once") end)
+    return "not reached"
+end)
+print("native callback:", r, msg(e))
+PANIC_MOD_FAIL = true
+r, e = catch(function() return require("./110_panic_mod") end)
+print("module body:", r, msg(e))
+
+-- 7. in a goroutine
+local ch = chan(1)
+go (function()
+    local rr, ee = catch(function()
+        local a = []
+        return a.b.c
+    end)
+    ch <- msg(ee)
+end)()
+print("goroutine:", <-ch)
+
+-- 8. hot functions (JIT-compiled under bin/sea-jit) calling one that fails
+local function leaf(i)
+    if i == 4000 then
+        local n = nil
+        return n + 1
+    end
+    return i
+end
+local function hot(n)
+    local s = 0
+    for i = 1, n do s = s + leaf(i) end
+    return s
+end
+r, e = catch(hot, 3000)
+print("hot ok:", r, e)
+r, e = catch(hot, 5000)
+print("hot fails:", r, msg(e))
+print("after:", hot(100))

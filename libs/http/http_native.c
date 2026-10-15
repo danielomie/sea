@@ -24,6 +24,9 @@
  *   monotonic_ms()              → monotonic clock, milliseconds
  *   valid_token(s)              → true if s is an HTTP token (header name, method)
  *   valid_field_value(s)        → true if s has no CR, LF or other control bytes
+ *   gzip(s [, level])           → gzip-compressed s (level 1-9, default 6)
+ *   gunzip(s [, max])           → decompressed gzip or zlib data | error (corrupt,
+ *                                 or larger than max bytes; default 100 MB)
  */
 
 #include "sea.h"
@@ -34,6 +37,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <zlib.h>
 
 /* ---- Small helpers -------------------------------------------------------- */
 
@@ -515,6 +519,95 @@ static SeaValue fn_base64(SeaVM *vm, int argc, SeaValue *args) {
     return r;
 }
 
+static SeaValue fn_gzip(SeaVM *vm, int argc, SeaValue *args) {
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return sea_make_error_str(vm, "gzip: string expected");
+    int level = 6;
+    if (argc > 1 && sea_is_int(args[1])) level = (int)sea_as_int(args[1]);
+    if (level < 1 || level > 9) level = 6;
+    z_stream z;
+    memset(&z, 0, sizeof z);
+    if (deflateInit2(&z, level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        sea_obj_release(&s->obj);
+        return sea_make_error_str(vm, "gzip: init failed");
+    }
+    uLong cap = deflateBound(&z, s->len) + 32;
+    unsigned char *out = malloc(cap);
+    if (!out) {
+        deflateEnd(&z);
+        sea_obj_release(&s->obj);
+        return sea_make_error_str(vm, "gzip: out of memory");
+    }
+    z.next_in = (Bytef *)s->data;
+    z.avail_in = (uInt)s->len;
+    z.next_out = out;
+    z.avail_out = (uInt)cap;
+    int rc = deflate(&z, Z_FINISH);
+    size_t n = z.total_out;
+    deflateEnd(&z);
+    sea_obj_release(&s->obj);
+    if (rc != Z_STREAM_END) {
+        free(out);
+        return sea_make_error_str(vm, "gzip: compression failed");
+    }
+    SeaValue r = sea_obj_val(&sea_string_new((const char *)out, n)->obj);
+    free(out);
+    return r;
+}
+
+static SeaValue fn_gunzip(SeaVM *vm, int argc, SeaValue *args) {
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return sea_make_error_str(vm, "gunzip: string expected");
+    size_t max = 104857600;
+    if (argc > 1 && sea_is_int(args[1]) && sea_as_int(args[1]) > 0) max = (size_t)sea_as_int(args[1]);
+    z_stream z;
+    memset(&z, 0, sizeof z);
+    if (inflateInit2(&z, 15 + 32) != Z_OK) {          /* +32: gzip or zlib header */
+        sea_obj_release(&s->obj);
+        return sea_make_error_str(vm, "gunzip: init failed");
+    }
+    size_t cap = s->len * 4 + 1024, n = 0;
+    if (cap > max + 1) cap = max + 1;
+    unsigned char *out = malloc(cap);
+    const char *err = NULL;
+    z.next_in = (Bytef *)s->data;
+    z.avail_in = (uInt)s->len;
+    for (;;) {
+        if (!out) { err = "gunzip: out of memory"; break; }
+        if (n == cap) {
+            if (cap > max) { err = "gunzip: data larger than the limit"; break; }
+            size_t nc = cap * 2;
+            if (nc > max + 1) nc = max + 1;
+            unsigned char *o2 = realloc(out, nc);
+            if (!o2) { err = "gunzip: out of memory"; break; }
+            out = o2;
+            cap = nc;
+        }
+        z.next_out = out + n;
+        z.avail_out = (uInt)(cap - n);
+        int rc = inflate(&z, Z_NO_FLUSH);
+        n = cap - z.avail_out;
+        if (rc == Z_STREAM_END) {
+            if (n > max) err = "gunzip: data larger than the limit";
+            break;
+        }
+        if (rc != Z_OK && !(rc == Z_BUF_ERROR && z.avail_out == 0)) {
+            err = "gunzip: corrupt data";
+            break;
+        }
+        if (z.avail_in == 0 && z.avail_out != 0) { err = "gunzip: truncated data"; break; }
+    }
+    inflateEnd(&z);
+    sea_obj_release(&s->obj);
+    if (err) {
+        free(out);
+        return sea_make_error_str(vm, err);
+    }
+    SeaValue r = sea_obj_val(&sea_string_new((const char *)out, n)->obj);
+    free(out);
+    return r;
+}
+
 static SeaValue fn_monotonic_ms(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm; (void)argc; (void)args;
     return sea_int_val(sea_now_ms());
@@ -554,5 +647,7 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     sea_mod_set(mod, "monotonic_ms",        fn_monotonic_ms);
     sea_mod_set(mod, "valid_token",         fn_valid_token);
     sea_mod_set(mod, "valid_field_value",   fn_valid_field_value);
+    sea_mod_set(mod, "gzip",                fn_gzip);
+    sea_mod_set(mod, "gunzip",              fn_gunzip);
     return sea_obj_val(&mod->obj);
 }

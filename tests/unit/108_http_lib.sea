@@ -27,9 +27,18 @@ router.get("/cookie", function(req)
 end)
 router.get("/go", function(req) return http.redirect("/") end)
 router.get("/nil", function(req) return nil end)
+router.get("/crash", function(req)
+    local t = nil
+    return http.text(t.missing)
+end)
+router.get("/panic", function(req) panic("handler gave up") end)
 router.get("/big", function(req) return http.text(string.rep("x", 100000)) end)
 
-local srv = http.listen(0, router, { read_timeout = 2000 })
+local errors = []
+local function on_error(e, req)
+    errors[] = req.path .. " " .. (is_error(e) and "runtime error" or tostring(e))
+end
+local srv = http.listen(0, router, { read_timeout = 2000, on_error = on_error })
 local base = "http://127.0.0.1:" .. srv.port
 
 local r = http.get(base .. "/")
@@ -49,6 +58,9 @@ local h = http.head(base .. "/big")
 print("head:", h.status, len(h.body), h.headers["content-length"])
 print("big:", len(http.get(base .. "/big").body))
 print("bad handler -> 500:", http.get(base .. "/nil").status)
+print("runtime error -> 500:", http.get(base .. "/crash").status)
+print("panic -> 500:", http.get(base .. "/panic").status)
+print("errors seen:", errors[0], errors[1])
 print("server still up:", http.get(base .. "/").body)
 print("bad header rejected:", http.get(base .. "/", { headers = { X = "a\r\nb: c" } }).status)
 
@@ -77,3 +89,15 @@ print("status:", http.status_text(429))
 srv.close()
 srv.wait()
 print("closed:", http.get(base .. "/", { timeout = 500 }).status)
+
+-- gzip: server compresses for clients that accept it; client decodes
+local big = string.rep("compress me ", 500)
+local gsrv = http.listen(0, function(req) return http.text(big) end, { gzip = true })
+local gbase = "http://127.0.0.1:" .. gsrv.port
+local g = http.get(gbase .. "/")
+print("gzip auto:", len(g.body) == len(big), g.uncompressed, g.headers["vary"])
+local graw = http.get(gbase .. "/", { headers = { ["Accept-Encoding"] = "gzip" } })
+print("gzip raw:", graw.headers["content-encoding"], len(graw.body) < len(big))
+print("gzip refused:", len(http.get(gbase .. "/", { decompress = false }).body))
+gsrv.close()
+gsrv.wait()

@@ -15,6 +15,15 @@ SeaChunk* sea_chunk_new(const char *name) {
     return c;
 }
 
+static void set_source(SeaChunk *c, const char *src) {
+    c->source = src;
+    for (int i = 0; i < c->proto_len; i++) set_source(c->protos[i], src);
+}
+
+void sea_chunk_set_source(SeaChunk *root) {
+    if (root) set_source(root, root->name);
+}
+
 struct SeaTableICSlot *sea_chunk_ics(SeaChunk *c) {
     struct SeaTableICSlot *ics = __atomic_load_n(&c->ics, __ATOMIC_ACQUIRE);
     if (ics) return ics;

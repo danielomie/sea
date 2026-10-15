@@ -104,7 +104,16 @@ to the wait**: keep partial progress in `vm->io_call` (`progress`, `aux[]`), not
 in locals, and allocate nothing before the last possible park. Close sockets with
 `sea_netpoll_close(fd)` so parked waiters wake. The usage pattern is in the
 header comment, and `src/sea_lib_net.c` and `libs/ssl/ssl_native.c` are worked
-examples. Plain blocking calls (file I/O, `getaddrinfo`) still hold the thread.
+examples. Plain blocking calls (file I/O) still hold the thread; `net.connect`
+resolves names on a resolver thread pool instead.
+
+## Runtime Errors and Panics
+
+`sea_vm_error_noreturn()` no longer exits: it raises a panic (`sea_vm_raise`)
+that `longjmp`s to the innermost VM loop, which unwinds frames running their
+defers until a `recover()` (see "Panics" in `docs/architecture.md`). So C code
+in the VM that can raise must not hold a lock or own an unreleased resource
+at that point. Natives should still report failures as error values.
 
 ## Keeping `docs/reference.md` Up-to-date
 
@@ -129,4 +138,4 @@ examples. Plain blocking calls (file I/O, `getaddrinfo`) still hold the thread.
 - **String indexing is 1-based** in `string.sub`, `string.find`, `string.byte` (matching Lua convention), but array/table indexing is 0-based.
 - **Cycles** are freed by the cycle collector (automatically, or `gc.collect()`), except cycles of objects shared between goroutines, which still leak; break those by setting a field to nil (see `docs/memory.md`).
 - **`isnan` / `isinf`** are registered as bare globals (in addition to `math.isnan` / `math.isinf`).
-- **Stack traceback**: runtime errors print `file:line: in main chunk` or `[?]:line: in function 'name'`. The `[?]` prefix means it's a named function chunk (no `/` in chunk name); a path-like name means a file-level chunk.
+- **Runtime errors are panics**: `recover()` in a deferred call catches them (Go semantics: the recovering function returns nil). The message starts with `file:line:`. Unrecovered, they print a traceback of `file:line: in main chunk` / `file:line: in function 'name'` lines (each function knows its source file: `SeaChunk.source`).
