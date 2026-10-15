@@ -10,8 +10,8 @@
 -- Múltiplos goroutines de cliente disparam requisições concorrentes.
 --
 
-local http = require("./libs/http/http")
-local json = require("./libs/json/json")
+local http = require("../../libs/http/http")
+local json = require("../../libs/json/json")
 
 print("╔══════════════════════════════════════════╗")
 print("║      Metrics Server em Sea               ║")
@@ -80,14 +80,9 @@ local function handler(req)
     }
 end
 
--- ── Servidor em goroutine (não bloqueia o main) ───────────────────────────────
-local PORT = 18181
-go (function()
-    http.serve(PORT, handler)
-end)()
-
--- Dá tempo para o servidor iniciar
-time.sleep(100 * time.Millisecond)
+-- ── Servidor em segundo plano (http.listen não bloqueia o main) ─────────────
+local srv = http.listen(0, handler)       -- porta 0: qualquer porta livre
+local PORT = srv.port
 print("Servidor rodando em http://localhost:" .. PORT)
 print("")
 
@@ -141,7 +136,7 @@ print("")
 
 print("── Padrão ───────────────────────────────────")
 print("  sync.mutex protege counters e total")
-print("  http.serve(port, fn) roda em goroutine separada")
+print("  http.listen(port, fn) serve em segundo plano; srv.close() encerra")
 print("  json.encode(obj) serializa mapa [=] para JSON")
 
-os.exit(0)   -- encerra o processo (server goroutine rodaria para sempre)
+srv.close()   -- encerra o servidor; o programa termina normalmente

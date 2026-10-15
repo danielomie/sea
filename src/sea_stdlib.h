@@ -20,6 +20,7 @@ void sea_lib_os_set_args(SeaVM *vm, int argc, char **argv);
 void sea_lib_sync_register(SeaVM *vm);
 void sea_lib_map_register(SeaVM *vm);
 void sea_lib_time_register(SeaVM *vm);
+void sea_lib_net_register(SeaVM *vm);
 
 // Internal helper used by stdlib lib files
 void mod_set(SeaVM *vm, SeaTable *mod, const char *name,

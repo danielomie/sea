@@ -1,7 +1,7 @@
 -- client_https.sea — HTTPS GET and POST example
 -- Usage: bin/sea libs/http/examples/client_https.sea
 
-local http = require("./libs/http/http")
+local http = require("../http")
 
 -- HTTPS GET
 local url = "https://httpbin.org/get"

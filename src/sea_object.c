@@ -82,7 +82,7 @@ void sea_obj_mark_shared(SeaObject *obj) {
              * held in a still-running main-chunk local unshared, so its
              * refcounts raced across scheduler threads.) */
             SeaUpvalue *up = (SeaUpvalue*)obj;
-            SeaValue v = *__atomic_load_n(&up->location, __ATOMIC_ACQUIRE);
+            SeaValue v = sea_upvalue_get(up);
             if (sea_is_obj(v)) sea_obj_mark_shared(sea_as_obj(v));
             break;
         }

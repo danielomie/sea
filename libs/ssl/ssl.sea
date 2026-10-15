@@ -10,36 +10,136 @@ local native = require("ssl_native")
 
 local M = {}
 
--- ---- TLS Client -----------------------------------------------------------
+-- ---- TLS connections ------------------------------------------------------
+--
+-- TLS runs over sockets from the built-in `net` module: every wait (handshake,
+-- read, write, accept) parks only the calling goroutine (on the main thread it
+-- blocks), so a slow peer never holds up the others.
 
 -- ssl.connect(host, port, [opts]) → conn|nil
 -- opts: {verify=bool, cert=path, key=path, sni=string,
---        min_version="TLSv1.2"|"TLSv1.3"}
--- Returns an opaque TLS connection handle.
+--        min_version="TLSv1.2"|"TLSv1.3", timeout=ms}
+-- Returns an opaque TLS connection handle (nil on failure; ssl.last_error()
+-- tells why — from code running in many goroutines, prefer ssl.dial, whose
+-- errors are values).
+local last_err = nil
+function M.last_error() return last_err end
+
 function M.connect(host, port, opts)
-    return native.tls_connect(host, port, opts)
+    local timeout = opts and opts.timeout or nil
+    local fd = net.connect(host, port, timeout)
+    if is_error(fd) then
+        last_err = fd.message
+        return nil
+    end
+    local conn = native.tls_client(fd, host, opts)
+    if is_error(conn) then
+        net.close(fd)
+        last_err = conn.message
+        return nil
+    end
+    local ok = native.tls_handshake(conn, timeout)
+    if is_error(ok) then
+        native.tls_close(conn)
+        last_err = ok.message
+        return nil
+    end
+    return conn
 end
 
--- ssl.read(conn, [n]) → string|nil
--- Without n: reads until the peer closes (EOF). With n: reads exactly n bytes.
-function M.read(conn, n)
-    return native.tls_read(conn, n)
+-- ssl.dial(host, port, [opts]) → conn | error
+-- As ssl.connect, but a failure is returned as an error value (is_error),
+-- which is safe to use from many goroutines at once.
+function M.dial(host, port, opts)
+    local timeout = opts and opts.timeout or nil
+    local fd = net.connect(host, port, timeout)
+    if is_error(fd) then return fd end
+    local conn = native.tls_client(fd, host, opts)
+    if is_error(conn) then
+        net.close(fd)
+        return conn
+    end
+    local ok = native.tls_handshake(conn, timeout)
+    if is_error(ok) then
+        native.tls_close(conn)
+        return ok
+    end
+    return conn
 end
 
--- ssl.read_request(conn) → string|nil
--- Reads a full HTTP request over TLS (headers + body via Content-Length).
--- Use this in HTTPS servers instead of ssl.read() which blocks until EOF.
-function M.read_request(conn)
-    return native.tls_read_request(conn)
+-- ssl.read(conn, [n [, timeout_ms]]) → string|nil
+-- Without n: reads until the peer closes (EOF). With n: reads exactly n bytes
+-- (fewer if the stream ends first).
+function M.read(conn, n, timeout)
+    local parts = []
+    local have = 0
+    while n == nil or have < n do
+        local want = 65536
+        if n ~= nil and n - have < want then want = n - have end
+        local chunk = native.tls_recv(conn, want, timeout)
+        if is_error(chunk) then
+            last_err = chunk.message
+            if have == 0 then return nil end
+            break
+        end
+        if chunk == "" then break end
+        parts[] = chunk
+        have = have + len(chunk)
+    end
+    return string.join(parts, "")
 end
 
--- ssl.write(conn, data) → nil
-function M.write(conn, data)
-    native.tls_write(conn, data)
+-- ssl.recv(conn [, max [, timeout_ms]]) → string ("" at EOF) | error
+-- One read of whatever is available (up to max bytes).
+function M.recv(conn, max, timeout)
+    return native.tls_recv(conn, max or 65536, timeout)
+end
+
+-- ssl.read_request(conn [, timeout_ms]) → string|nil
+-- Reads one HTTP request over TLS: headers, then the body by Content-Length.
+function M.read_request(conn, timeout)
+    local buf = ""
+    local head_end = nil
+    while head_end == nil do
+        if len(buf) > 1048576 then return buf end
+        local chunk = native.tls_recv(conn, 65536, timeout)
+        if is_error(chunk) or chunk == "" then return buf end
+        buf = buf .. chunk
+        head_end = string.find(buf, "\r\n\r\n")
+    end
+    local head = string.lower(string.sub(buf, 1, head_end))
+    local need = 0
+    local cl = string.find(head, "\r\ncontent-length:")
+    if cl then
+        local line_end = string.find(head, "\r\n", cl + 2) or len(head)
+        need = tonumber(string.trim(string.sub(head, cl + 17, line_end - 1))) or 0
+    end
+    local total = head_end + 3 + need
+    while len(buf) < total do
+        local chunk = native.tls_recv(conn, total - len(buf), timeout)
+        if is_error(chunk) or chunk == "" then break end
+        buf = buf .. chunk
+    end
+    return buf
+end
+
+-- ssl.write(conn, data [, timeout_ms]) → bytes written | nil
+function M.write(conn, data, timeout)
+    local n = native.tls_send(conn, data, timeout)
+    if is_error(n) then
+        last_err = n.message
+        return nil
+    end
+    return n
+end
+
+-- ssl.send(conn, data [, timeout_ms]) → bytes written | error
+function M.send(conn, data, timeout)
+    return native.tls_send(conn, data, timeout)
 end
 
 -- ssl.close(conn) → nil
--- Performs TLS shutdown and closes the underlying socket.
+-- Sends the TLS close notification (without waiting) and closes the socket.
 function M.close(conn)
     native.tls_close(conn)
 end
@@ -76,31 +176,73 @@ function M.server_free(ctx)
     native.server_free(ctx)
 end
 
--- ssl.listen(port) → fd|nil
+-- ssl.listen(port [, host]) → fd|nil
 -- Binds a TCP server socket. Pass fd to ssl.accept or ssl.serve.
-function M.listen(port)
-    return native.server_listen(port)
+function M.listen(port, host)
+    local fd = net.listen(port, host)
+    if is_error(fd) then
+        last_err = fd.message
+        return nil
+    end
+    return fd
 end
 
--- ssl.accept(ctx, fd) → conn|nil
--- Accepts one pending connection and performs the TLS server handshake.
--- Returns the same handle type as ssl.connect (read/write/close work on it).
-function M.accept(ctx, fd)
-    return native.server_accept(ctx, fd)
+-- ssl.handshake_server(ctx, fd [, timeout_ms]) → conn | error
+-- TLS server handshake on an already accepted socket (10 s by default; the
+-- socket is closed on failure). Errors are values: safe from any goroutine.
+function M.handshake_server(ctx, fd, timeout)
+    local conn = native.tls_server(ctx, fd)
+    if is_error(conn) then
+        net.close(fd)
+        return conn
+    end
+    local ok = native.tls_handshake(conn, timeout or 10000)
+    if is_error(ok) then
+        native.tls_close(conn)
+        return ok
+    end
+    return conn
+end
+
+-- ssl.wrap_server(ctx, fd [, timeout_ms]) → conn|nil   (ssl.last_error() on failure)
+function M.wrap_server(ctx, fd, timeout)
+    local conn = M.handshake_server(ctx, fd, timeout)
+    if is_error(conn) then
+        last_err = conn.message
+        return nil
+    end
+    return conn
+end
+
+-- ssl.accept(ctx, fd [, timeout_ms]) → conn|nil
+-- Accepts one pending connection and performs the TLS server handshake
+-- (10 s by default). Returns the same handle type as ssl.connect.
+function M.accept(ctx, fd, timeout)
+    local cfd = net.accept(fd)
+    if is_error(cfd) then
+        last_err = cfd.message
+        return nil
+    end
+    return M.wrap_server(ctx, cfd, timeout)
 end
 
 -- ssl.serve(ctx, port, handler) → never returns
--- Blocking TLS server loop. Calls handler(conn) for each accepted connection.
--- handler is responsible for calling ssl.read, ssl.write, and ssl.close.
+-- TLS server loop. Calls handler(conn) in a new goroutine for each accepted
+-- connection; handler calls ssl.read/ssl.write/ssl.close.
 function M.serve(ctx, port, handler)
-    local srv = native.server_listen(port)
+    local srv = M.listen(port)
     if not srv then
         print("ssl.serve: cannot bind port " .. port)
         return
     end
     while true do
-        local conn = native.server_accept(ctx, srv)
-        if conn then handler(conn) end
+        local cfd = net.accept(srv)
+        if not is_error(cfd) then
+            go (function()
+                local conn = M.handshake_server(ctx, cfd)
+                if not is_error(conn) then handler(conn) end
+            end)()
+        end
     end
 end
 

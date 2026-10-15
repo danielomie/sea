@@ -206,111 +206,170 @@ console.shimmer_stop()
 
 ## `http`
 
-Requires `http_native.so` and `ssl` lib. Build: `make -C libs/http`.
+HTTP/1.1 client and server. Requires `http_native.so` (strict request/response parsers, URL coding), plus `libs/ssl` for HTTPS and `libs/json` for the JSON helpers. Build: `make -C libs/http libs/ssl libs/json` (one `make -C` each).
 
 ```sea
-local http = require("./libs/http/http")
+local http = require("../libs/http/http")   -- relative to the requiring file
 ```
+
+Sockets come from the built-in `net` module: every network wait parks only the goroutine doing it (netpoller), so a slow or idle peer never stalls the others. All timeouts are in milliseconds.
+
+### Client
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `http.get` | `get(url [, opts]) → response` | HTTP/HTTPS GET; follows redirects by default |
-| `http.post` | `post(url, body [, content_type [, opts]]) → response` | POST request |
-| `http.request` | `request(method, url [, body [, content_type [, headers]]]) → response` | Arbitrary method |
-| `http.serve` | `serve(port, handler [, opts])` | Concurrent HTTP/HTTPS server; `handler` can be a function or a router |
-| `http.parse_query` | `parse_query(s) → table` | Parse query string from path or URL; percent-decodes keys and values |
-| `http.router` | `router() → router` | Create a router object for method-based dispatch with middleware |
+| `http.request` | `request(method, url [, opts]) → response` | Any method. The older `request(method, url, body, content_type, headers)` form still works |
+| `http.get` / `head` / `delete` | `get(url [, opts]) → response` | Requests without a body |
+| `http.post` / `put` / `patch` | `post(url, body [, content_type [, opts]]) → response` | `content_type` defaults to `application/octet-stream` when a `body` is given; `body` may be `nil` when `opts.json`/`opts.form` is used |
 
-**Router methods:**
+**Client `opts`** (table or map):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `headers` | — | Extra request headers (a value may be an array for a repeated header). CR/LF in names or values is rejected |
+| `body` | — | Request body (string) |
+| `json` | — | Value to send JSON-encoded (sets `Content-Type: application/json`) |
+| `form` | — | Map sent as `application/x-www-form-urlencoded` |
+| `content_type` | — | Content-Type of `body` |
+| `query` | — | Map appended to the URL as a query string |
+| `timeout` | `30000` | Per network operation (connect, TLS handshake, each read/write) |
+| `follow_redirects` | `true` | `false`, `true` (up to 5 hops) or a max hop count. 303 — and 301/302 after a POST — become GET; `Authorization`/`Cookie` are dropped when redirected to another host |
+| `keep_alive` | `true` | Reuse connections (pool of up to 8 idle per host, 30 s max age; a stale reused connection is retried once) |
+| `basic_auth` | — | `{user, password}` |
+| `verify` | `true` | `false` skips TLS certificate checks |
+| `tls` | — | Extra `ssl.connect` opts (`cert`, `key`, `sni`, `min_version`) |
+| `max_body_bytes` | 100 MB | Larger responses fail |
+
+The client sends `Host` (with the port when it is not the default), `User-Agent: sea-http/1.1` and `Accept: */*` (unless given) and `Content-Length` (a non-string body is converted with `tostring`); it decodes chunked responses and skips 1xx interim responses.
+
+**Response:**
+
+| Field | Description |
+|-------|-------------|
+| `status` | Status code; `0` when the request failed (connection, TLS, timeout, malformed response) |
+| `ok` | `true` for 2xx |
+| `reason` | Reason phrase |
+| `headers` | Map with lowercase keys (repeated headers joined with `", "`) |
+| `body` | Body string (`""` for HEAD / 204 / 304) |
+| `url` | Final URL after redirects |
+| `error` | Message, only when `status == 0` |
+| `resp:json()` | Decodes the body as JSON |
+
+### Server
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http.listen` | `listen(port, handler [, opts]) → server\|error` | Start serving in the background and return at once. `port` 0 picks a free port |
+| `http.serve` | `serve(port, handler [, opts])` | `listen` + print a "listening" line (unless `opts.quiet`) + block until the server is closed |
+
+`handler(req) → response` is a function or a router. Every connection runs in its own goroutine.
+
+**Server object:** `srv.port` (bound port), `srv.tls` (bool), `srv.close()` (stop accepting; idle keep-alive connections are closed, busy ones finish their request), `srv.wait()` (block until closed).
+
+**Server `opts`:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `host` | all interfaces | Address to bind |
+| `tls` | — | Enable HTTPS: `{cert, key [, ca]}` (`ca` requires client certificates) |
+| `read_timeout` | `30000` | Time to receive a whole request once it starts (also the TLS handshake); 408 after it |
+| `idle_timeout` | `60000` | Time a keep-alive connection may wait for its next request |
+| `write_timeout` | `30000` | Per response write |
+| `max_header_bytes` | `65536` | Larger request heads get 431 |
+| `max_body_bytes` | 10 MB | Larger bodies get 413 |
+| `max_requests` | `1000` | Requests per connection before it is closed |
+| `keep_alive` | `true` | `false` closes after every response |
+| `log` | `false` | Print one line per request: method, target, status, time |
+| `quiet` | `false` | (`serve` only) no "listening" line |
+
+The server supports keep-alive and pipelining, chunked request bodies, `Expect: 100-continue`, and HEAD (headers only). It adds `Date`, `Content-Length` and `Connection`. Malformed requests get 400, 501 (unknown Transfer-Encoding) or 505, including request-smuggling shapes: `Content-Length` together with `Transfer-Encoding`, conflicting lengths, obsolete line folding, and bare CR/LF.
+
+**Request** (the handler's argument, a map):
+
+| Field | Description |
+|-------|-------------|
+| `method` | `"GET"`, `"POST"`, … |
+| `target` | Raw request target, e.g. `"/search?q=a%20b"` |
+| `path` | Path **without** the query string (`"/search"`), not percent-decoded |
+| `query` | Map of decoded query parameters (`req.query["q"] == "a b"`) |
+| `headers` | Map with lowercase keys |
+| `body` | Body string (chunked bodies already decoded) |
+| `version` | `"HTTP/1.1"` or `"HTTP/1.0"` |
+| `remote_addr` | `"ip:port"` of the peer |
+| `tls` | `true` over HTTPS |
+| `cookies` | Map from the `Cookie` header |
+| `params` | Route parameters (router only) |
+| `req:json()` | Decodes the body as JSON |
+
+**Response** (what the handler returns): a table/map `{status = 200, body = "", headers = {...}, close = false}`, or just a string (200, `text/plain`). A non-string `body` is converted with `tostring`. Header values may be arrays (repeated headers). `close = true` closes the connection after the response. Anything else — `nil`, an invalid status, a header with CR/LF — becomes a 500 and is logged. Without a `Content-Type`, `text/plain; charset=utf-8` is used.
+
+**Response helpers:**
+
+| Function | Description |
+|----------|-------------|
+| `http.text(body [, status])` | `text/plain` response |
+| `http.html(body [, status])` | `text/html` response |
+| `http.json(value [, status [, headers]])` | JSON-encoded `value`, `application/json` |
+| `http.redirect(url [, status])` | Redirect (302 by default) with `Location` |
+| `http.set_cookie(resp, name, value [, opts]) → resp` | Adds a `Set-Cookie`; `opts`: `path, domain, max_age, expires, secure, http_only, same_site` |
+| `http.static(dir [, opts]) → handler` | Serves files under `dir` with a MIME type by extension; `opts`: `index` (`"index.html"`), `prefix` (URL prefix to strip). GET/HEAD only; `..` and NUL in paths are refused |
+
+### Router
+
+```sea
+local r = http.router()
+r.use(function(req, next) ... return next(req) end)
+r.get("/users/:id", function(req) return http.json({ id = req.params["id"] }) end)
+http.serve(8080, r)
+```
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `router.get` | `get(path, [mws,] fn)` | Register a GET handler |
-| `router.post` | `post(path, [mws,] fn)` | Register a POST handler |
-| `router.put` | `put(path, [mws,] fn)` | Register a PUT handler |
-| `router.delete` | `delete(path, [mws,] fn)` | Register a DELETE handler |
-| `router.patch` | `patch(path, [mws,] fn)` | Register a PATCH handler |
-| `router.any` | `any(path, [mws,] fn)` | Register a handler for any HTTP method |
-| `router.use` | `use(mw)` | Add global middleware: `mw(req, next) → resp` |
-| `router.group` | `group(prefix, {mws}) → group` | Sub-router with shared path prefix and middlewares |
-| `router.handle` | `handle(req) → resp` | Dispatch function (used internally by `http.serve`) |
+| `router.get` / `post` / `put` / `delete` / `patch` / `head` | `get(path, [mws,] fn)` | Register a handler for that method |
+| `router.any` | `any(path, [mws,] fn)` | Handler for any method |
+| `router.use` | `use(mw)` | Global middleware: `mw(req, next) → resp` |
+| `router.group` | `group(prefix, {mws}) → group` | Sub-router with a shared prefix and middlewares (same methods) |
+| `router.handle` | `handle(req) → resp` | Dispatch (what the server calls) |
 
-**Path patterns:** exact segments (`/users`), parameters (`:name` → `req.params["name"]`), wildcard suffix (`/files/*`).
+**Path patterns:** exact segments (`/users`), parameters (`:name` → `req.params["name"]`, percent-decoded), and a trailing `*` (the rest of the path in `req.params["*"]`).
 
-**Automatic responses:** 404 when no path matches; 405 Method Not Allowed when path matches but method doesn't.
+**Automatic responses:** 404 when no path matches; 405 with an `Allow` header when the path matches but the method does not. HEAD falls back to the GET route.
 
-**Middleware:** `fn(req, next) → resp`. Call `next(req)` to continue the chain; return a response directly to short-circuit. Responses from handlers are automatically converted to mutable maps so middlewares can add/modify fields.
+**Middleware:** call `next(req)` to continue, or return a response to short-circuit. Responses are turned into mutable maps, so middleware can change `status`, `body` and `headers`; a `nil` from a handler becomes 500.
 
-**Client `opts` table:**
+### Utilities
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `headers` | table | Extra request headers |
-| `timeout` | int | Timeout in milliseconds (0 = no timeout) |
-| `follow_redirects` | bool | Follow 3xx redirects (default: `true`, up to 5 hops) |
-
-**Server `opts` table:**
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `tls` | table | Enable HTTPS: `{cert="cert.pem", key="key.pem" [, ca="ca.pem"]}` |
-
-Each request is handled in a goroutine (concurrent connections supported for both HTTP and HTTPS).
-
-**Response table:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | int | HTTP status code (0 on connection error) |
-| `ok` | bool | `true` if status is 2xx |
-| `body` | string | Response body |
-| `headers` | table | Response headers (lowercase string keys) |
-| `error` | string | Error message (only when `ok=false`) |
-
-**Request table (server handler arg):**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `method` | string | `"GET"`, `"POST"`, etc. |
-| `path` | string | Full URL path including query string (e.g. `"/api?id=1"`) |
-| `headers` | table | Request headers (lowercase keys) |
-| `body` | string | Request body |
-| `tls` | bool | `true` when connection is HTTPS |
-
-**Handler return table:**
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `status` | `200` | HTTP status code |
-| `body` | `""` | Response body |
-| `headers` | `{"Content-Type":"text/plain; charset=utf-8"}` | Response headers |
+| Function | Description |
+|----------|-------------|
+| `http.parse_url(url) → {scheme, host, port, path, query, target}\|nil` | Splits an http/https URL (IPv6 literals in `[...]`, default ports, fragment dropped) |
+| `http.parse_query(s) → map` | Decodes `a=1&b=x%20y` (the part after `?` if `s` is a path or URL); `+` means space |
+| `http.build_query(t) → string` | Encodes a map (keys sorted; an array value repeats the key) |
+| `http.url_encode(s)` / `http.url_decode(s)` | Percent-encoding (everything but `A-Z a-z 0-9 - _ . ~`); decoding turns `+` into a space |
+| `http.status_text(code) → string` | Reason phrase, e.g. `"Not Found"` |
 
 ```sea
--- Client with timeout and redirect control
-local r = http.get("https://api.example.com/data", { timeout = 5000 })
-if r.ok then print(r.body) end
+-- Client
+local r = http.get("https://api.example.com/items", { query = { page = 2 }, timeout = 5000 })
+if r.ok then print(r:json().total) else print(r.status, r.error) end
 
--- POST with JSON
-local r2 = http.post("https://api.example.com/items",
-    '{"name":"sea"}', "application/json", { timeout = 3000 })
+local r2 = http.post("https://api.example.com/items", nil, nil, { json = { name = "sea" } })
 
--- Parse query string
-local params = http.parse_query(req.path)  -- "/search?q=hello%20world&n=10"
--- params["q"] == "hello world", params["n"] == "10"
-
--- Plain HTTP server (concurrent)
-http.serve(8080, function(req)
-    if req.method == "GET" and req.path == "/hello" then
-        return { status = 200, body = "Hello!\n" }
+-- Server, stopped from code
+local srv = http.listen(8080, function(req)
+    if req.path == "/hello" then
+        return http.text("Hello, " .. (req.query["name"] or "world") .. "!\n")
     end
     return { status = 404, body = "Not found\n" }
-end)
+end, { log = true })
+-- ...
+srv.close()
 
--- HTTPS server (concurrent)
-http.serve(8443, function(req)
-    return { status = 200, body = "Secure hello!\n" }
-end, { tls = { cert = "cert.pem", key = "key.pem" } })
+-- HTTPS
+http.serve(8443, function(req) return "Secure hello!\n" end,
+    { tls = { cert = "cert.pem", key = "key.pem" } })
 ```
+
+**Breaking changes (2026-10):** `req.path` no longer includes the query string (use `req.query`, or `req.target` for the raw form). Handlers returning `nil` now produce a 500 instead of stopping the server.
 
 ---
 
@@ -324,15 +383,21 @@ local ssl = require("./libs/ssl/ssl")
 
 Full SSL/TLS + cryptography library. All handles (connections, certs, keys, CSRs) are opaque integers; call the matching `_free` function when done.
 
+TLS runs over sockets from the built-in `net` module (see `docs/reference.md`): every wait — handshake, read, write, accept — parks only the calling goroutine through the netpoller (on the main thread it blocks), so one slow peer never holds up the others. Timeouts are in milliseconds and apply per operation.
+
 ### TLS Client
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `ssl.connect` | `connect(host, port [, opts]) → conn\|nil` | Open a TLS client connection. `opts`: `{verify, cert, key, sni, min_version, timeout}` |
-| `ssl.read` | `read(conn [, n]) → string\|nil` | Without `n`: read until EOF. With `n`: read exactly `n` bytes |
-| `ssl.read_request` | `read_request(conn) → string\|nil` | Read one full HTTP request over TLS (headers + body via Content-Length); use in HTTPS servers instead of `read()` |
-| `ssl.write` | `write(conn, data)` | Write data |
-| `ssl.close` | `close(conn)` | TLS shutdown + close socket |
+| `ssl.connect` | `connect(host, port [, opts]) → conn\|nil` | Open a TLS client connection. `opts` (table or map): `{verify, cert, key, sni, min_version, timeout}`. On failure `ssl.last_error()` says why |
+| `ssl.dial` | `dial(host, port [, opts]) → conn\|error` | Same as `connect`, but returns an error value (`is_error`) — safe from many goroutines at once |
+| `ssl.last_error` | `last_error() → string\|nil` | Message of the last failure of a `nil`-returning function (shared, not per goroutine) |
+| `ssl.read` | `read(conn [, n [, timeout]]) → string\|nil` | Without `n`: read until EOF. With `n`: read exactly `n` bytes (fewer if the stream ends) |
+| `ssl.recv` | `recv(conn [, max [, timeout]]) → string\|error` | One read of whatever is available (up to `max`, default 65536); `""` at EOF |
+| `ssl.read_request` | `read_request(conn [, timeout]) → string\|nil` | Read one full HTTP request (headers + Content-Length body). Prefer `libs/http` for real servers |
+| `ssl.write` | `write(conn, data [, timeout]) → n\|nil` | Write all of `data` |
+| `ssl.send` | `send(conn, data [, timeout]) → n\|error` | As `write`, with an error value on failure |
+| `ssl.close` | `close(conn)` | Send close_notify (without waiting) and close the socket; wakes any goroutine waiting on it |
 | `ssl.peer_cert` | `peer_cert(conn) → cert\|nil` | Peer certificate handle (inspect with `cert_info`, free with `cert_free`) |
 | `ssl.version` | `version(conn) → string` | Negotiated TLS version, e.g. `"TLSv1.3"` |
 | `ssl.cipher` | `cipher(conn) → string` | Negotiated cipher suite |
@@ -343,9 +408,11 @@ Full SSL/TLS + cryptography library. All handles (connections, certs, keys, CSRs
 |----------|-----------|-------------|
 | `ssl.server` | `server(opts) → ctx\|nil` | Create server context. `opts`: `{cert, key, ca, min_version}`. `ca` enables mTLS |
 | `ssl.server_free` | `server_free(ctx)` | Free server context |
-| `ssl.listen` | `listen(port) → fd\|nil` | Bind a TCP socket |
-| `ssl.accept` | `accept(ctx, fd) → conn\|nil` | Accept one connection + TLS handshake |
-| `ssl.serve` | `serve(ctx, port, handler)` | Blocking server loop; calls `handler(conn)` per connection |
+| `ssl.listen` | `listen(port [, host]) → fd\|nil` | Bind a TCP socket (a `net` fd) |
+| `ssl.accept` | `accept(ctx, fd [, timeout]) → conn\|nil` | Accept one connection + TLS handshake (10 s default) |
+| `ssl.handshake_server` | `handshake_server(ctx, fd [, timeout]) → conn\|error` | TLS server handshake on a socket from `net.accept`; closes it on failure |
+| `ssl.wrap_server` | `wrap_server(ctx, fd [, timeout]) → conn\|nil` | As `handshake_server`, `nil` + `last_error()` on failure |
+| `ssl.serve` | `serve(ctx, port, handler)` | Blocking accept loop; runs `handler(conn)` in a new goroutine per connection |
 
 ### Certificates
 
@@ -432,7 +499,7 @@ ssl.close(conn)
 -- TLS server with mTLS
 local ctx = ssl.server({cert="server.pem", key="server.key", ca="ca.pem"})
 ssl.serve(ctx, 8443, function(conn)
-    local data = ssl.read(conn)
+    local data = ssl.read_request(conn)
     ssl.write(conn, "HTTP/1.0 200 OK\r\n\r\nHello\n")
     ssl.close(conn)
 end)

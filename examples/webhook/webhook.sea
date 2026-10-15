@@ -11,8 +11,8 @@
 -- e 200 nas chamadas seguintes, o que força a lógica de retry a actuar.
 --
 
-local http = require("./libs/http/http")
-local json = require("./libs/json/json")
+local http = require("../../libs/http/http")
+local json = require("../../libs/json/json")
 
 print("╔══════════════════════════════════════════╗")
 print("║      Webhook Dispatcher em Sea           ║")
@@ -48,8 +48,7 @@ local function mock_handler(req)
     }
 end
 
-go (function() http.serve(PORT, mock_handler) end)()
-time.sleep(150 * time.Millisecond)
+local srv = http.listen(PORT, mock_handler)   -- pronto ao retornar
 print("Servidor mock em http://localhost:" .. PORT)
 print("")
 
@@ -136,4 +135,4 @@ print("  retry: att * 50ms de backoff")
 print("  chan(N) + close → coleta de resultados")
 print("  sync.waitgroup → aguarda todos")
 
-os.exit(0)
+srv.close()

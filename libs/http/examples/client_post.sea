@@ -1,8 +1,8 @@
 -- client_post.sea — HTTP POST example
 -- Sends a JSON payload and prints the response.
--- Usage: bin/sea run libs/http/examples/client_post.sea
+-- Usage: bin/sea libs/http/examples/client_post.sea
 
-local http = require("./libs/http/http")
+local http = require("../http")
 
 local url  = "http://httpbin.org/post"
 local body = '{"message": "hello from Sea", "version": 1}'

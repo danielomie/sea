@@ -337,3 +337,35 @@ Encontrados ao implementá-lo:
 - **Os Makefiles das bibliotecas nativas não dependiam dos headers do VM.** Uma mudança de layout deixava `.so` desatualizadas. Agora dependem de `src/*.h`.
 
 **Testes:** `tests/unit/106_gc_cycles.sea`. Estresse: a suíte e os exemplos sob ASAN com `SEA_GC_THRESHOLD=1` (coleta em quase todo ponto seguro), mais TSAN nos testes concorrentes.
+
+## Revisão da lib http, netpoller e correções encontradas no caminho **(2026-10)**
+
+A revisão de `libs/http` encontrou falhas que derrubavam ou travavam o servidor e o cliente. Todas foram confirmadas por teste antes da correção:
+- **Um handler que retornava `nil` derrubava o servidor.** Agora qualquer resposta inválida vira 500, que é registrado no log.
+- **N conexões ociosas congelavam o servidor**, com N = número de threads do escalonador. Os sockets eram bloqueantes: cada leitura ocupava uma thread. Agora há um netpoller (`src/sea_netpoll.c`, epoll + heap de prazos numa thread própria) e o módulo embutido `net`. Uma espera estaciona só a goroutine. Com 16 clientes parados, as outras requisições respondem em 10 ms.
+- **Headers como struct + timeout derrubavam o cliente**: `__timeout` era gravado num struct selado.
+- **Redirect com `Location` relativo falhava.** Faltava também a porta no header `Host`.
+- **Corpo não-string gerava `Content-Length: 0`.** Agora é convertido com `tostring`.
+- **Respostas a HEAD enviavam corpo.**
+
+A lib foi reescrita sobre `net` (veja [libs.md](libs.md#http)). As principais mudanças:
+- keep-alive no servidor e pool de conexões no cliente;
+- chunked e `100-continue`;
+- limites e timeouts;
+- validação de CR/LF e rejeição de formas de request smuggling;
+- `req.query` (**`req.path` não inclui mais a query**);
+- `srv.close()`.
+
+`libs/ssl` passou a usar sockets de `net`. Ali também apareceu um bug: **opções passadas como map (`[=]`) eram ignoradas**. `verify = false` não tinha efeito.
+
+Encontrados no VM:
+- **Busca em struct por chave criada em tempo de execução falhava.** A chave não era interned, e `struct_find` comparava só ponteiros. Agora compara o conteúdo quando os ponteiros diferem.
+- **Os casos de envio do `select` não marcavam o valor como compartilhado** antes de entregá-lo a outra goroutine. Agora chamam `sea_val_mark_shared`, como o `<-` comum.
+- **Corrida ao fechar upvalues compartilhados.** Uma goroutine podia ler um upvalue enquanto o dono o fechava, e o valor era liberado sob ela (TSAN). Agora escrita e fechamento usam um spinlock por upvalue, e `LOAD_UP` relê se a localização mudou (`sea_upvalue_get`). Resta um aviso benigno do TSAN, comentado em `sea_vm.h`.
+
+**Testes:** `tests/unit/107_net.sea` e `tests/unit/108_http_lib.sea`. Também rodaram sob ASAN (inclusive com `SEA_GC_THRESHOLD=1`) e TSAN. O cliente foi testado contra servidores HTTPS reais.
+
+**Pendentes:**
+- `globals_lock` em `SeaShared` nunca é usado, então gravar globais de várias goroutines é uma corrida.
+- A resolução de DNS (`getaddrinfo`) ainda bloqueia a thread.
+- Um erro de execução dentro de um handler ainda encerra o processo.

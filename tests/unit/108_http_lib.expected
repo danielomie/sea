@@ -1,0 +1,21 @@
+get:	200	home	sea	true
+params+query:	a b	x&y
+post:	POST:hi:text/plain
+put json:	201	5
+cookies:	got xyz	session=abc; Path=/; HttpOnly
+redirect:	home
+no redirect:	302
+405:	405
+404:	404
+head:	200	0	100000
+big:	100000
+http: handler returned nil (expected a response table); sending 500
+bad handler -> 500:	500
+server still up:	home
+bad header rejected:	0
+concurrent:	200
+query:	a=1&b=x%20y	a&b
+parse_url:	::1	8443	/a/b	c=1
+encode:	a%20b%2Fc	a b/c
+status:	Too Many Requests
+closed:	0

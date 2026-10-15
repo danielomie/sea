@@ -1,210 +1,1067 @@
--- libs/http/http.sea — Sea HTTP library (high-level API)
+-- libs/http/http.sea — HTTP/1.1 client and server for Sea
 --
--- Provides HTTP and HTTPS client + HTTP/HTTPS server built on the http_native
--- transport layer (TCP/TLS sockets) implemented in http_native.c.
+-- Sockets come from the built-in `net` module (non-blocking: a slow peer parks
+-- only its own goroutine), TLS from libs/ssl, and the strict HTTP parsers from
+-- http_native.so (make -C libs/http).
 --
--- Usage:
---   local http = require("./libs/http/http")
+--   local http = require("../libs/http/http")      -- path relative to your file
 --
---   -- Client (http:// and https://)
---   local r = http.get("https://example.com/api")
---   print(r.status, r.ok)
---   print(r.body)
+--   local r = http.get("https://example.com/api", { timeout = 5000 })
+--   if r.ok then print(r.body) end
 --
---   -- HTTP server (plain TCP, concurrent via goroutines)
 --   http.serve(8080, function(req)
---       return { status = 200, body = "Hello\n" }
+--       return http.json({ hello = req.query["name"] or "world" })
 --   end)
 --
---   -- HTTPS server (TLS, concurrent via goroutines)
---   http.serve(8443, function(req)
---       return { status = 200, body = "Hello TLS\n" }
---   end, { tls = { cert = "cert.pem", key = "key.pem" } })
+-- See docs/libs.md for the full reference.
 
 local native = require("http_native")
 local ssl    = require("../ssl/ssl")
 
+local M = {}
 
--- ---- URL parsing ------------------------------------------------------------
+-- loaded here, while require resolves paths relative to this file (a require
+-- inside a handler would resolve them relative to the running script)
+local json_lib = require("../json/json")
+local function json_mod()
+    if json_lib == nil then error("http: libs/json is not built (make -C libs/json)") end
+    return json_lib
+end
 
-local function url_parse(url)
+-- ---- Status texts -------------------------------------------------------------
+
+local STATUS_TEXT = {
+    [100] = "Continue", [101] = "Switching Protocols", [103] = "Early Hints",
+    [200] = "OK", [201] = "Created", [202] = "Accepted",
+    [203] = "Non-Authoritative Information", [204] = "No Content",
+    [205] = "Reset Content", [206] = "Partial Content",
+    [300] = "Multiple Choices", [301] = "Moved Permanently", [302] = "Found",
+    [303] = "See Other", [304] = "Not Modified", [307] = "Temporary Redirect",
+    [308] = "Permanent Redirect",
+    [400] = "Bad Request", [401] = "Unauthorized", [402] = "Payment Required",
+    [403] = "Forbidden", [404] = "Not Found", [405] = "Method Not Allowed",
+    [406] = "Not Acceptable", [407] = "Proxy Authentication Required",
+    [408] = "Request Timeout", [409] = "Conflict", [410] = "Gone",
+    [411] = "Length Required", [412] = "Precondition Failed",
+    [413] = "Content Too Large", [414] = "URI Too Long",
+    [415] = "Unsupported Media Type", [416] = "Range Not Satisfiable",
+    [417] = "Expectation Failed", [418] = "I'm a teapot",
+    [421] = "Misdirected Request", [422] = "Unprocessable Content",
+    [423] = "Locked", [424] = "Failed Dependency", [425] = "Too Early",
+    [426] = "Upgrade Required", [428] = "Precondition Required",
+    [429] = "Too Many Requests", [431] = "Request Header Fields Too Large",
+    [451] = "Unavailable For Legal Reasons",
+    [500] = "Internal Server Error", [501] = "Not Implemented",
+    [502] = "Bad Gateway", [503] = "Service Unavailable",
+    [504] = "Gateway Timeout", [505] = "HTTP Version Not Supported",
+    [507] = "Insufficient Storage", [508] = "Loop Detected",
+    [511] = "Network Authentication Required",
+}
+
+-- http.status_text(code) → string
+function M.status_text(code)
+    return STATUS_TEXT[code] or "Unknown"
+end
+
+-- ---- URLs and query strings -----------------------------------------------------
+
+-- http.url_encode(s) → string   (percent-encodes all but A-Z a-z 0-9 - _ . ~)
+function M.url_encode(s)
+    return native.url_encode(s)
+end
+
+-- http.url_decode(s) → string   ('+' is decoded as a space)
+function M.url_decode(s)
+    return native.url_decode(s)
+end
+
+local function sorted_keys(t)
+    local keys = []
+    for k, _ in t do keys[] = tostring(k) end
+    for i = 1, len(keys) - 1 do
+        local k = keys[i]
+        local j = i - 1
+        while j >= 0 and keys[j] > k do
+            keys[j + 1] = keys[j]
+            j = j - 1
+        end
+        keys[j + 1] = k
+    end
+    return keys
+end
+
+-- http.build_query(t) → "a=1&b=x%20y"   (keys sorted; an array value repeats the key)
+function M.build_query(t)
+    local parts = []
+    for _, k in sorted_keys(t) do
+        local v = t[k]
+        if type(v) == "array" then
+            for _, item in v do parts[] = native.url_encode(k) .. "=" .. native.url_encode(tostring(item)) end
+        elseif v == true then
+            parts[] = native.url_encode(k)
+        elseif v ~= nil and v ~= false then
+            parts[] = native.url_encode(k) .. "=" .. native.url_encode(tostring(v))
+        end
+    end
+    return string.join(parts, "&")
+end
+
+local function parse_query_string(qs)
+    local result = [=]
+    local i = 1
+    local n = len(qs)
+    while i <= n do
+        local amp = string.find(qs, "&", i)
+        local pair = amp and string.sub(qs, i, amp - 1) or string.sub(qs, i)
+        i = amp and amp + 1 or n + 1
+        if len(pair) > 0 then
+            local eq = string.find(pair, "=")
+            if eq then
+                result[native.url_decode(string.sub(pair, 1, eq - 1))] = native.url_decode(string.sub(pair, eq + 1))
+            else
+                result[native.url_decode(pair)] = true
+            end
+        end
+    end
+    return result
+end
+
+-- http.parse_query(s) → map   (the part after '?' of a path or URL; without a
+-- '?', the whole string is the query). Keys and values are percent-decoded.
+function M.parse_query(s)
+    local hash = string.find(s, "#")
+    if hash then s = string.sub(s, 1, hash - 1) end
+    local qi = string.find(s, "?")
+    if qi then return parse_query_string(string.sub(s, qi + 1)) end
+    if string.find(s, "/") then return [=] end
+    return parse_query_string(s)
+end
+
+-- http.parse_url(url) → {scheme, host, port, path, query, target} | nil
+-- port is a string; target is path plus "?query" (what goes on the request line).
+function M.parse_url(url)
     local scheme, rest
     if string.starts_with(url, "https://") then
         scheme = "https"
-        rest   = string.sub(url, 9)
+        rest = string.sub(url, 9)
     elseif string.starts_with(url, "http://") then
         scheme = "http"
-        rest   = string.sub(url, 8)
+        rest = string.sub(url, 8)
     else
         return nil
     end
-
-    local slash    = string.find(rest, "/")
-    local host_port, path
-    if slash then
-        host_port = string.sub(rest, 1, slash - 1)
-        path      = string.sub(rest, slash)
-    else
-        host_port = rest
-        path      = "/"
-    end
-
+    local hash = string.find(rest, "#")
+    if hash then rest = string.sub(rest, 1, hash - 1) end
+    local cut = len(rest) + 1
+    local slash = string.find(rest, "/")
+    local q = string.find(rest, "?")
+    if slash and slash < cut then cut = slash end
+    if q and q < cut then cut = q end
+    local authority = string.sub(rest, 1, cut - 1)
+    local target = string.sub(rest, cut)
+    if target == "" then target = "/" end
+    if string.sub(target, 1, 1) == "?" then target = "/" .. target end
+    local at = string.find(authority, "@")
+    if at then authority = string.sub(authority, at + 1) end      -- userinfo is ignored
     local host, port
-    local colon = string.find(host_port, ":")
-    if colon then
-        host = string.sub(host_port, 1, colon - 1)
-        port = string.sub(host_port, colon + 1)
+    if string.sub(authority, 1, 1) == "[" then                       -- IPv6 literal
+        local close = string.find(authority, "]")
+        if not close then return nil end
+        host = string.sub(authority, 2, close - 1)
+        if string.sub(authority, close + 1, close + 1) == ":" then port = string.sub(authority, close + 2) end
     else
-        host = host_port
+        local colon = string.find(authority, ":")
+        if colon then
+            host = string.sub(authority, 1, colon - 1)
+            port = string.sub(authority, colon + 1)
+        else
+            host = authority
+        end
+    end
+    if host == "" then return nil end
+    if port == nil or port == "" then
         if scheme == "https" then port = "443" else port = "80" end
     end
-
-    return { scheme=scheme, host=host, port=port, path=path }
+    local path = target
+    local query = ""
+    local qpos = string.find(target, "?")
+    if qpos then
+        path = string.sub(target, 1, qpos - 1)
+        query = string.sub(target, qpos + 1)
+    end
+    return { scheme = scheme, host = host, port = port, path = path, query = query, target = target }
 end
 
--- ---- Request builder --------------------------------------------------------
-
-local function build_request(method, path, host, body, ct, xhdrs)
-    local out = method .. " " .. path .. " HTTP/1.0\r\n"
-    out = out .. "Host: " .. host .. "\r\n"
-
-    -- User-Agent: usa o do caller se fornecido, senão o default
-    local ua = xhdrs and xhdrs["User-Agent"]
-    if ua then
-        out = out .. "User-Agent: " .. ua .. "\r\n"
-    else
-        out = out .. "User-Agent: sea-http/1.0\r\n"
+-- Resolve a redirect Location against the URL it came from.
+local function resolve_url(base, loc)
+    if string.starts_with(loc, "http://") or string.starts_with(loc, "https://") then return loc end
+    local u = M.parse_url(base)
+    if u == nil then return loc end
+    local hostport = u.host
+    if string.find(hostport, ":") then hostport = "[" .. hostport .. "]" end
+    local default_port = (u.scheme == "https" and "443") or "80"
+    if u.port ~= default_port then hostport = hostport .. ":" .. u.port end
+    if string.starts_with(loc, "//") then return u.scheme .. ":" .. loc end
+    if string.starts_with(loc, "/") then return u.scheme .. "://" .. hostport .. loc end
+    local dir = u.path
+    local last = nil
+    local i = 1
+    while true do
+        local s = string.find(dir, "/", i)
+        if not s then break end
+        last = s
+        i = s + 1
     end
-    out = out .. "Accept: */*\r\n"
+    dir = last and string.sub(dir, 1, last) or "/"
+    return u.scheme .. "://" .. hostport .. dir .. loc
+end
 
-    if body and len(body) > 0 then
-        if ct then out = out .. "Content-Type: " .. ct .. "\r\n" end
-        out = out .. "Content-Length: " .. len(body) .. "\r\n"
-    end
+-- ---- Connections ------------------------------------------------------------------
+-- A connection is {fd, handle, tls, used}: a plain socket (handle 0) or a TLS
+-- connection from libs/ssl.
 
-    if xhdrs then
-        for k, v in xhdrs do
-            if type(k) == "string" and type(v) == "string" and k ~= "User-Agent" then
-                out = out .. k .. ": " .. v .. "\r\n"
-            end
+local function c_read(c, max, timeout)
+    if c.tls then return ssl.recv(c.handle, max, timeout) end
+    return net.read(c.fd, max, timeout)
+end
+
+local function c_write(c, data, timeout)
+    if c.tls then return ssl.send(c.handle, data, timeout) end
+    return net.write(c.fd, data, timeout)
+end
+
+local function c_close(c)
+    if c.tls then ssl.close(c.handle) else net.close(c.fd) end
+end
+
+-- Header values: a string, or an array of strings for a repeated header.
+local function add_header_lines(out, name, v)
+    if type(v) == "array" then
+        for _, item in v do
+            if not native.valid_field_value(tostring(item)) then return false end
+            out[] = name .. ": " .. tostring(item) .. "\r\n"
         end
+        return true
     end
-
-    out = out .. "Connection: close\r\n\r\n"
-    if body and len(body) > 0 then out = out .. body end
-    return out
+    local s = tostring(v)
+    if not native.valid_field_value(s) then return false end
+    out[] = name .. ": " .. s .. "\r\n"
+    return true
 end
 
--- ---- Response builder (server side) ----------------------------------------
+-- ---- Server: responses -------------------------------------------------------------
 
-local STATUS_TEXT = {
-    [200] = "OK",                    [201] = "Created",
-    [204] = "No Content",            [301] = "Moved Permanently",
-    [302] = "Found",                 [304] = "Not Modified",
-    [400] = "Bad Request",           [401] = "Unauthorized",
-    [403] = "Forbidden",             [404] = "Not Found",
-    [405] = "Method Not Allowed",    [409] = "Conflict",
-    [422] = "Unprocessable Entity",  [500] = "Internal Server Error",
-    [501] = "Not Implemented",       [502] = "Bad Gateway",
-    [503] = "Service Unavailable",
-}
+local function plain(status, msg)
+    local h = [=]
+    h["Content-Type"] = "text/plain; charset=utf-8"
+    local r = [=]
+    r["status"] = status
+    r["body"] = msg
+    r["headers"] = h
+    return r
+end
 
-local function build_response(resp)
-    local status = resp.status or 200
-    local body   = resp.body   or ""
-    local text   = STATUS_TEXT[status] or "Unknown"
+-- Turn whatever the handler returned into {status, body, headers};
+-- anything unusable becomes a 500 (logged).
+local function normalize(resp)
+    local t = type(resp)
+    if t == "string" then
+        local r = [=]
+        r["status"] = 200
+        r["body"] = resp
+        return r
+    end
+    if t ~= "map" and t ~= "table" and t ~= "struct" then
+        print("http: handler returned " .. t .. " (expected a response table); sending 500")
+        return plain(500, "Internal Server Error\n")
+    end
+    local status = resp.status
+    if status == nil then status = 200 end
+    if type(status) ~= "int" or status < 100 or status > 599 then
+        print("http: handler returned invalid status " .. tostring(status) .. "; sending 500")
+        return plain(500, "Internal Server Error\n")
+    end
+    local body = resp.body
+    if body == nil then body = "" end
+    if type(body) ~= "string" then body = tostring(body) end
+    local r = [=]
+    r["status"] = status
+    r["body"] = body
+    r["headers"] = resp.headers
+    r["close"] = resp.close
+    return r
+end
 
-    local out = "HTTP/1.0 " .. status .. " " .. text .. "\r\n"
-    out = out .. "Content-Length: " .. len(body) .. "\r\n"
-
+-- Serialize a response. Returns the text, or nil if a header was invalid.
+local function render_response(resp, head_only, keep_alive, date)
+    local status = resp.status
+    local body = resp.body
+    local out = []
+    out[] = "HTTP/1.1 " .. status .. " " .. (STATUS_TEXT[status] or "Unknown") .. "\r\n"
+    local has_ct = false
+    local no_body = status < 200 or status == 204 or status == 304
     if resp.headers then
         for k, v in resp.headers do
-            out = out .. k .. ": " .. v .. "\r\n"
-        end
-    else
-        out = out .. "Content-Type: text/plain; charset=utf-8\r\n"
-    end
-
-    return out .. "Connection: close\r\n\r\n" .. body
-end
-
--- ---- Core dispatcher --------------------------------------------------------
-
-local function make_error(msg)
-    return { status=0, ok=false, body="", headers={}, error=msg }
-end
-
--- do_request: internal implementation shared by get/post/request.
--- xhdrs may contain __timeout (ms) as a passthrough key (stripped before send).
-local function do_request(method, url, body, ct, xhdrs, _redirects)
-    local max_redir = _redirects ~= nil and _redirects or 5
-
-    -- Extract internal passthrough keys (not sent as HTTP headers)
-    local timeout = xhdrs and xhdrs["__timeout"]
-
-    local u = url_parse(url)
-    if not u then return make_error("invalid URL: " .. url) end
-
-    local handle
-    if u.scheme == "https" then
-        local ssl_opts = {}
-        if timeout then ssl_opts.timeout = timeout end
-        handle = ssl.connect(u.host, u.port, ssl_opts)
-    else
-        handle = native.tcp_connect(u.host, u.port, timeout or 0)
-    end
-    if not handle then
-        return make_error("connection failed: " .. u.host .. ":" .. u.port)
-    end
-
-    -- Build headers table without internal keys
-    local send_hdrs = nil
-    if xhdrs then
-        send_hdrs = [=]
-        for k, v in xhdrs do
-            if type(k) == "string" and string.sub(k, 1, 2) ~= "__" then
-                send_hdrs[k] = v
+            local name = tostring(k)
+            local lname = string.lower(name)
+            if not native.valid_token(name) then return nil end
+            if lname ~= "content-length" and lname ~= "connection" and lname ~= "date" and
+               lname ~= "transfer-encoding" then
+                if lname == "content-type" then has_ct = true end
+                if not add_header_lines(out, name, v) then return nil end
             end
         end
     end
+    if not has_ct and not no_body then out[] = "Content-Type: text/plain; charset=utf-8\r\n" end
+    out[] = "Date: " .. date .. "\r\n"
+    if not no_body then out[] = "Content-Length: " .. len(body) .. "\r\n" end
+    out[] = keep_alive and "Connection: keep-alive\r\n" or "Connection: close\r\n"
+    out[] = "\r\n"
+    if not head_only and not no_body then out[] = body end
+    return string.join(out, "")
+end
 
-    local req = build_request(method, u.path, u.host, body, ct, send_hdrs)
-    local raw
+local function send_simple(c, status, msg, timeout)
+    local text = render_response(plain(status, msg .. "\n"), false, false, native.http_date())
+    c_write(c, text, timeout)
+end
 
-    if u.scheme == "https" then
-        ssl.write(handle, req)
-        raw = ssl.read(handle)
-        ssl.close(handle)
-    else
-        native.net_write(handle, req)
-        raw = native.net_read(handle)
-        native.net_close(handle)
+-- Response helpers for handlers ------------------------------------------------------
+
+-- http.text(body [, status]) → response
+function M.text(body, status)
+    return plain(status or 200, body)
+end
+
+-- http.html(body [, status]) → response
+function M.html(body, status)
+    local r = plain(status or 200, body)
+    r.headers["Content-Type"] = "text/html; charset=utf-8"
+    return r
+end
+
+-- http.json(value [, status [, headers]]) → response with the JSON encoding of value
+function M.json(value, status, headers)
+    local h = [=]
+    if headers then
+        for k, v in headers do h[k] = v end
     end
+    h["Content-Type"] = "application/json"
+    local r = [=]
+    r["status"] = status or 200
+    r["body"] = json_mod().encode(value)
+    r["headers"] = h
+    return r
+end
 
-    if not raw or len(raw) == 0 then return make_error("empty response") end
-    local resp = native.parse_response(raw)
+-- http.redirect(url [, status]) → response (302 by default)
+function M.redirect(url, status)
+    local r = plain(status or 302, "")
+    r.headers["Location"] = url
+    return r
+end
 
-    -- Follow redirects: 301 302 303 307 308
-    if max_redir > 0 and resp.status >= 301 and resp.status <= 308 then
-        local loc = resp.headers and resp.headers["location"]
-        if loc then
-            local new_method = method
-            local new_body   = body
-            local new_ct     = ct
-            -- 301/302/303 → convert to GET, drop body
-            if resp.status == 301 or resp.status == 302 or resp.status == 303 then
-                new_method = "GET"
-                new_body   = nil
-                new_ct     = nil
-            end
-            return do_request(new_method, loc, new_body, new_ct, xhdrs, max_redir - 1)
-        end
+-- http.set_cookie(resp, name, value [, opts]) → resp
+-- opts: {path, domain, max_age (s), expires (string), secure, http_only,
+--        same_site = "Lax"|"Strict"|"None"}
+function M.set_cookie(resp, name, value, opts)
+    local parts = []
+    parts[] = name .. "=" .. value
+    if opts then
+        if opts.path then parts[] = "Path=" .. opts.path end
+        if opts.domain then parts[] = "Domain=" .. opts.domain end
+        if opts.max_age then parts[] = "Max-Age=" .. opts.max_age end
+        if opts.expires then parts[] = "Expires=" .. opts.expires end
+        if opts.secure then parts[] = "Secure" end
+        if opts.http_only then parts[] = "HttpOnly" end
+        if opts.same_site then parts[] = "SameSite=" .. opts.same_site end
     end
-
+    if resp.headers == nil then resp.headers = [=] end
+    local cur = resp.headers["Set-Cookie"]
+    local list = []
+    if type(cur) == "array" then
+        for _, v in cur do list[] = v end
+    elseif cur ~= nil then
+        list[] = cur
+    end
+    list[] = string.join(parts, "; ")
+    resp.headers["Set-Cookie"] = list
     return resp
 end
 
--- ---- Router helpers --------------------------------------------------------
+local function parse_cookies(s)
+    local result = [=]
+    if s == nil then return result end
+    for _, part in string.split(s, ";") do
+        local p = string.trim(part)
+        local eq = string.find(p, "=")
+        if eq then result[string.sub(p, 1, eq - 1)] = string.sub(p, eq + 1) end
+    end
+    return result
+end
+
+local function body_json(self)
+    return json_mod().decode(self.body)
+end
+
+-- ---- Server: requests ----------------------------------------------------------------
+
+local DEFAULTS = {
+    read_timeout = 30000,      -- ms to receive a whole request once it starts
+    idle_timeout = 60000,      -- ms a keep-alive connection may wait for the next one
+    write_timeout = 30000,     -- ms per response write
+    max_header_bytes = 65536,
+    max_body_bytes = 10485760, -- 10 MB
+    max_requests = 1000,       -- per connection
+    keep_alive = true,
+    log = false,
+}
+
+local function opt(o, k)
+    local v = o and o[k]
+    if v == nil then return DEFAULTS[k] end
+    return v
+end
+
+-- Read the body of a request (or response) whose head was parsed; `rest` holds
+-- the bytes already read past the head. Returns body, rest — or nil, status, message.
+local function read_body(c, head, rest, max_body, timeout, on_wait)
+    if head.chunked then
+        local data = rest
+        while true do
+            local n = native.chunked_scan(data, max_body)
+            if n > 0 then
+                return native.chunked_decode(string.sub(data, 1, n)), string.sub(data, n + 1)
+            end
+            if n == -1 then return nil, 400, "malformed chunked body" end
+            if n == -2 then return nil, 413, "body too large" end
+            local chunk = c_read(c, 65536, timeout)
+            if is_error(chunk) then return nil, 408, chunk.message end
+            if chunk == "" then return nil, 400, "connection closed in the body" end
+            data = data .. chunk
+        end
+    end
+    local need = head.content_length
+    if need <= 0 then return "", rest end
+    if need > max_body then return nil, 413, "body too large" end
+    local parts = []
+    parts[] = rest
+    local have = len(rest)
+    while have < need do
+        local want = need - have
+        if want > 1048576 then want = 1048576 end
+        local chunk = c_read(c, want, timeout)
+        if is_error(chunk) then return nil, 408, chunk.message end
+        if chunk == "" then return nil, 400, "connection closed in the body" end
+        parts[] = chunk
+        have = have + len(chunk)
+    end
+    local all = string.join(parts, "")
+    if have == need then return all, "" end
+    return string.sub(all, 1, need), string.sub(all, need + 1)
+end
+
+local function make_request(head, body, remote, tls)
+    local target = head.target
+    local path = target
+    local query = ""
+    local hash = string.find(path, "#")
+    if hash then path = string.sub(path, 1, hash - 1) end
+    local qi = string.find(path, "?")
+    if qi then
+        query = string.sub(path, qi + 1)
+        path = string.sub(path, 1, qi - 1)
+    end
+    local req = [=]
+    req["method"] = head.method
+    req["target"] = target
+    req["path"] = path
+    req["query"] = parse_query_string(query)
+    req["headers"] = head.headers
+    req["body"] = body
+    req["version"] = head.version
+    req["remote_addr"] = remote
+    req["tls"] = tls
+    req["cookies"] = parse_cookies(head.headers["cookie"])
+    req["json"] = body_json
+    return req
+end
+
+local function conn_state(srv, key, idle)
+    local mu = srv.mu
+    mu.acquire(mu)
+    local st = srv.conns[key]
+    if st then st["idle"] = idle end
+    mu.release(mu)
+end
+
+-- One connection: requests in a loop while it stays keep-alive.
+local function serve_conn(srv, c, key, remote)
+    local o = srv.opts
+    local handler = srv.handler
+    local buf = ""
+    local served = 0
+    while not srv.stopping do
+        -- the head (idle_timeout for the first byte of a follow-up request)
+        local head = nil
+        local wait = served == 0 and o.read_timeout or o.idle_timeout
+        conn_state(srv, key, served > 0 and buf == "")
+        while head == nil do
+            local h = native.parse_request_head(buf, o.max_header_bytes)
+            if h == nil then
+                local chunk = c_read(c, 65536, wait)
+                if is_error(chunk) or chunk == "" then
+                    if buf ~= "" and is_error(chunk) and chunk.message == "timeout" then
+                        send_simple(c, 408, "Request Timeout", o.write_timeout)
+                    end
+                    return
+                end
+                buf = buf .. chunk
+                wait = o.read_timeout
+                conn_state(srv, key, false)
+            elseif h.error then
+                send_simple(c, h.error, STATUS_TEXT[h.error] .. ": " .. h.message, o.write_timeout)
+                return
+            else
+                head = h
+            end
+        end
+        conn_state(srv, key, false)
+        local rest = string.sub(buf, head.head_len + 1)
+        if head.content_length > o.max_body_bytes then
+            send_simple(c, 413, "Content Too Large", o.write_timeout)
+            return
+        end
+        if head.expect_continue and (head.chunked or head.content_length > 0) then
+            c_write(c, "HTTP/1.1 100 Continue\r\n\r\n", o.write_timeout)
+        end
+        local body, after, emsg = read_body(c, head, rest, o.max_body_bytes, o.read_timeout)
+        if body == nil then
+            send_simple(c, after, STATUS_TEXT[after] .. ": " .. emsg, o.write_timeout)
+            return
+        end
+        buf = after
+
+        local t0 = o.log and time.now() or nil
+        local req = make_request(head, body, remote, c.tls)
+        local resp = normalize(handler(req))
+        served = served + 1
+        local keep = head.keep_alive and o.keep_alive and not srv.stopping and
+                     served < o.max_requests and resp.close ~= true
+        local text = render_response(resp, head.method == "HEAD", keep, native.http_date())
+        if text == nil then
+            print("http: invalid response header from handler; sending 500")
+            text = render_response(plain(500, "Internal Server Error\n"), false, false, native.http_date())
+            keep = false
+        end
+        local w = c_write(c, text, o.write_timeout)
+        if o.log then
+            print(head.method .. " " .. head.target .. " " .. resp.status .. " " ..
+                  (time.since(t0) // time.Millisecond) .. "ms")
+        end
+        if is_error(w) or not keep then return end
+    end
+end
+
+-- http.listen(port, handler [, opts]) → server | error
+-- Starts serving in the background and returns at once. handler(req) → response
+-- (a function or a router). The server object has:
+--   srv.port     — the port actually bound (pass 0 for any free port)
+--   srv.close()  — stop accepting; idle connections are closed, busy ones
+--                  finish their current request
+--   srv.wait()   — block until the server is closed
+-- opts: host, tls = {cert, key [, ca]}, read_timeout, idle_timeout,
+--       write_timeout (ms), max_header_bytes, max_body_bytes, max_requests,
+--       keep_alive (bool), log (bool: one line per request)
+function M.listen(port, handler, opts)
+    if type(handler) == "table" or type(handler) == "map" then handler = handler.handle end
+    if type(handler) ~= "function" then return error("http.listen: handler must be a function or a router") end
+    local o = [=]
+    for k, v in DEFAULTS do o[k] = opt(opts, k) end
+    local lfd = net.listen(port or 0, opts and opts.host)
+    if is_error(lfd) then return lfd end
+    local ctx = nil
+    local tls_opts = opts and opts.tls
+    if tls_opts then
+        ctx = ssl.server(tls_opts)
+        if not ctx then
+            net.close(lfd)
+            return error("http.listen: TLS setup failed (check cert/key)")
+        end
+    end
+
+    local srv = [=]
+    srv["port"] = net.local_port(lfd)
+    srv["tls"] = ctx ~= nil
+    srv["stopping"] = false
+    srv["opts"] = o
+    srv["handler"] = handler
+    srv["conns"] = [=]
+    srv["mu"] = sync.mutex()
+    local done = chan(1)
+
+    srv["close"] = function()
+        if srv.stopping then return end
+        srv.stopping = true
+        net.close(lfd)
+        local mu = srv.mu
+        mu.acquire(mu)
+        for _, st in srv.conns do
+            if st ~= nil and st.idle then c_close(st.conn) end
+        end
+        mu.release(mu)
+    end
+    srv["wait"] = function()
+        local v = <-done
+        done <- v                  -- let other waiters through too
+    end
+
+    go (function()
+        local next_key = 0
+        while true do
+            local fd = net.accept(lfd)
+            if is_error(fd) then
+                if srv.stopping then break end
+                time.sleep(10 * time.Millisecond)   -- e.g. out of file descriptors
+            else
+                next_key = next_key + 1
+                local key = next_key
+                go (function()
+                    local remote = net.peer(fd)
+                    local c
+                    if ctx then
+                        local h = ssl.handshake_server(ctx, fd, o.read_timeout)
+                        if is_error(h) then return end
+                        c = { fd = fd, handle = h, tls = true, used = 0 }
+                    else
+                        c = { fd = fd, handle = 0, tls = false, used = 0 }
+                    end
+                    local st = [=]
+                    st["conn"] = c
+                    st["idle"] = false
+                    local mu = srv.mu
+                    mu.acquire(mu)
+                    srv.conns[key] = st
+                    mu.release(mu)
+                    serve_conn(srv, c, key, remote)
+                    mu.acquire(mu)
+                    del srv.conns[key]
+                    mu.release(mu)
+                    c_close(c)
+                end)()
+            end
+        end
+        done <- true
+    end)()
+    return srv
+end
+
+-- http.serve(port, handler [, opts]) — serve until the server is closed.
+-- Same opts as http.listen, plus quiet (bool: no "listening" line).
+function M.serve(port, handler, opts)
+    local srv = M.listen(port, handler, opts)
+    if is_error(srv) then
+        print("http.serve: " .. srv.message)
+        return srv
+    end
+    if not (opts and opts.quiet) then
+        local scheme = srv.tls and "https" or "http"
+        print("Sea HTTP server listening on " .. scheme .. "://0.0.0.0:" .. srv.port)
+    end
+    srv.wait()
+    return nil
+end
+
+-- ---- Client ---------------------------------------------------------------------------
+-- Connections are kept alive and reused per host (up to 8 idle each).
+
+local pool = [=]
+local pool_mu = sync.mutex()
+local POOL_IDLE = 8
+local POOL_MAX_AGE = 30000      -- ms an idle connection is trusted for
+
+local function pool_get(key)
+    pool_mu.acquire(pool_mu)
+    local ch = pool[key]
+    pool_mu.release(pool_mu)
+    if ch == nil then return nil end
+    while true do
+        local c = nil
+        local got = false
+        select
+            case c = <-ch then
+                got = true
+            case default then
+                got = false
+        end
+        if not got then return nil end
+        if native.monotonic_ms() - c.used <= POOL_MAX_AGE then return c end
+        c_close(c)
+    end
+end
+
+local function pool_put(key, c)
+    pool_mu.acquire(pool_mu)
+    local ch = pool[key]
+    if ch == nil then
+        ch = chan(POOL_IDLE)
+        pool[key] = ch
+    end
+    pool_mu.release(pool_mu)
+    c.used = native.monotonic_ms()
+    local ok = false
+    select
+        case ch <- c then
+            ok = true
+        case default then
+            ok = false
+    end
+    if not ok then c_close(c) end
+end
+
+local function make_error(msg, url)
+    local r = [=]
+    r["status"] = 0
+    r["ok"] = false
+    r["body"] = ""
+    r["headers"] = [=]
+    r["error"] = msg
+    r["url"] = url
+    return r
+end
+
+local function dial(u, o, timeout)
+    if u.scheme == "https" then
+        local topts = [=]
+        topts["timeout"] = timeout
+        if o.tls then
+            for k, v in o.tls do topts[k] = v end
+        end
+        if o.verify == false then topts["verify"] = false end
+        local h = ssl.dial(u.host, u.port, topts)
+        if is_error(h) then return h end
+        return { fd = 0, handle = h, tls = true, used = 0 }
+    end
+    local fd = net.connect(u.host, u.port, timeout)
+    if is_error(fd) then return fd end
+    return { fd = fd, handle = 0, tls = false, used = 0 }
+end
+
+-- Read one response. Returns resp, reusable — or nil, message, got_any_bytes.
+local function read_response(c, method, timeout, max_body)
+    local buf = ""
+    local head = nil
+    while head == nil do
+        local h = native.parse_response_head(buf)
+        if h == nil then
+            local chunk = c_read(c, 65536, timeout)
+            if is_error(chunk) then return nil, chunk.message, buf ~= "" end
+            if chunk == "" then return nil, "connection closed", buf ~= "" end
+            buf = buf .. chunk
+        elseif h.error then
+            return nil, h.message, true
+        elseif h.status < 200 then              -- 100 Continue, 103 Early Hints
+            buf = string.sub(buf, h.head_len + 1)
+        else
+            head = h
+        end
+    end
+    local rest = string.sub(buf, head.head_len + 1)
+    local body = ""
+    local reusable = head.keep_alive
+    local status = head.status
+    if method == "HEAD" or status == 204 or status == 304 then
+        body = ""
+    elseif head.chunked or head.content_length >= 0 then
+        local b, after, emsg = read_body(c, head, rest, max_body, timeout)
+        if b == nil then return nil, emsg, true end
+        body = b
+    else
+        -- no framing: the body runs until the server closes the connection
+        local parts = []
+        parts[] = rest
+        local have = len(rest)
+        while true do
+            local chunk = c_read(c, 65536, timeout)
+            if is_error(chunk) then return nil, chunk.message, true end
+            if chunk == "" then break end
+            parts[] = chunk
+            have = have + len(chunk)
+            if have > max_body then return nil, "body too large", true end
+        end
+        body = string.join(parts, "")
+        reusable = false
+    end
+    local r = [=]
+    r["status"] = status
+    r["ok"] = status >= 200 and status < 300
+    r["reason"] = head.reason
+    r["headers"] = head.headers
+    r["body"] = body
+    r["json"] = body_json
+    return r, reusable
+end
+
+local function do_request(method, url, o, redirects_left)
+    local u = M.parse_url(url)
+    if u == nil then return make_error("invalid URL: " .. url, url) end
+    local timeout = o.timeout or 30000
+    local max_body = o.max_body_bytes or 104857600
+
+    -- body: body / json / form
+    local body = o.body
+    local ctype = o.content_type
+    if o.json ~= nil then
+        body = json_mod().encode(o.json)
+        ctype = ctype or "application/json"
+    elseif o.form ~= nil then
+        body = M.build_query(o.form)
+        ctype = ctype or "application/x-www-form-urlencoded"
+    end
+    if body ~= nil and type(body) ~= "string" then body = tostring(body) end
+
+    local target = u.target
+    if o.query ~= nil then
+        local qs = M.build_query(o.query)
+        if qs ~= "" then
+            target = target .. (u.query == "" and "?" or "&") .. qs
+        end
+    end
+
+    local hostport = u.host
+    if string.find(hostport, ":") then hostport = "[" .. hostport .. "]" end
+    local default_port = (u.scheme == "https" and "443") or "80"
+    if u.port ~= default_port then hostport = hostport .. ":" .. u.port end
+
+    local lines = []
+    lines[] = method .. " " .. target .. " HTTP/1.1\r\n"
+    lines[] = "Host: " .. hostport .. "\r\n"
+    local has = [=]
+    if o.headers then
+        for k, v in o.headers do
+            local name = tostring(k)
+            if not native.valid_token(name) then return make_error("invalid header name: " .. name, url) end
+            local lname = string.lower(name)
+            has[lname] = true
+            if lname ~= "host" and lname ~= "content-length" and lname ~= "connection" and
+               lname ~= "transfer-encoding" then
+                if not add_header_lines(lines, name, v) then
+                    return make_error("invalid value for header " .. name, url)
+                end
+            end
+        end
+    end
+    if not has["user-agent"] then lines[] = "User-Agent: sea-http/1.1\r\n" end
+    if not has["accept"] then lines[] = "Accept: */*\r\n" end
+    if o.basic_auth and not has["authorization"] then
+        local cred = (o.basic_auth.user or "") .. ":" .. (o.basic_auth.password or "")
+        lines[] = "Authorization: Basic " .. native.base64(cred) .. "\r\n"
+    end
+    if body ~= nil then
+        if ctype and not has["content-type"] then lines[] = "Content-Type: " .. ctype .. "\r\n" end
+        lines[] = "Content-Length: " .. len(body) .. "\r\n"
+    elseif method == "POST" or method == "PUT" or method == "PATCH" then
+        lines[] = "Content-Length: 0\r\n"
+    end
+    local keep_alive = o.keep_alive ~= false
+    if not keep_alive then lines[] = "Connection: close\r\n" end
+    lines[] = "\r\n"
+    if body ~= nil then lines[] = body end
+    local request_text = string.join(lines, "")
+
+    local key = u.scheme .. "://" .. u.host .. ":" .. u.port .. (o.verify == false and "/noverify" or "")
+    local resp = nil
+    local reusable = false
+    local last_err = "request failed"
+    for attempt = 1, 2 do
+        local c = keep_alive and pool_get(key) or nil
+        local reused = c ~= nil
+        if c == nil then
+            c = dial(u, o, timeout)
+            if is_error(c) then return make_error(c.message, url) end
+        end
+        local w = c_write(c, request_text, timeout)
+        if is_error(w) then
+            c_close(c)
+            last_err = w.message
+            if not reused then return make_error(last_err, url) end
+        else
+            local r, info, got_bytes = read_response(c, method, timeout, max_body)
+            if r ~= nil then
+                resp = r
+                reusable = info
+                if reusable and keep_alive then pool_put(key, c) else c_close(c) end
+                break
+            end
+            c_close(c)
+            last_err = info
+            -- a reused connection the server had already closed: try a fresh one
+            if not reused or got_bytes then return make_error(last_err, url) end
+        end
+    end
+    if resp == nil then return make_error(last_err, url) end
+    resp["url"] = url
+
+    -- redirects
+    local status = resp.status
+    if redirects_left > 0 and (status == 301 or status == 302 or status == 303 or
+                               status == 307 or status == 308) then
+        local loc = resp.headers["location"]
+        if loc then
+            local next_url = resolve_url(url, loc)
+            local o2 = [=]
+            for k, v in o do o2[k] = v end
+            local next_method = method
+            if status == 303 or ((status == 301 or status == 302) and method ~= "GET" and method ~= "HEAD") then
+                next_method = "GET"
+                o2["body"] = nil
+                o2["json"] = nil
+                o2["form"] = nil
+            end
+            -- credentials never follow a redirect to another host
+            local nu = M.parse_url(next_url)
+            if nu and (nu.host ~= u.host or nu.port ~= u.port or nu.scheme ~= u.scheme) and o.headers then
+                local h2 = [=]
+                for k, v in o.headers do
+                    local lk = string.lower(tostring(k))
+                    if lk ~= "authorization" and lk ~= "cookie" then h2[k] = v end
+                end
+                o2["headers"] = h2
+                o2["basic_auth"] = nil
+            end
+            return do_request(next_method, next_url, o2, redirects_left - 1)
+        end
+    end
+    return resp
+end
+
+local function client_opts(opts)
+    local o = [=]
+    if opts then
+        for k, v in opts do o[k] = v end
+    end
+    return o
+end
+
+local function max_redirects(o)
+    local f = o.follow_redirects
+    if f == false then return 0 end
+    if type(f) == "int" then return f end
+    return 5
+end
+
+-- http.request(method, url [, opts]) → response
+-- opts: headers, body (string), json (value), form (map), content_type,
+--       query (map), timeout (ms, per network operation; default 30000),
+--       follow_redirects (bool or max hops; default 5), keep_alive (bool),
+--       basic_auth = {user, password}, verify (false: skip TLS checks),
+--       tls (extra ssl.connect opts), max_body_bytes
+-- (The older form request(method, url, body, content_type, headers) works too.)
+function M.request(method, url, a, b, c)
+    local o
+    if type(a) == "map" or type(a) == "table" or type(a) == "struct" then
+        o = client_opts(a)
+    else
+        o = [=]
+        o["body"] = a
+        o["content_type"] = b
+        o["headers"] = c
+    end
+    return do_request(string.upper(method), url, o, max_redirects(o))
+end
+
+-- http.get(url [, opts]) / http.head / http.delete → response
+function M.get(url, opts)
+    local o = client_opts(opts)
+    return do_request("GET", url, o, max_redirects(o))
+end
+function M.head(url, opts)
+    local o = client_opts(opts)
+    return do_request("HEAD", url, o, max_redirects(o))
+end
+function M.delete(url, opts)
+    local o = client_opts(opts)
+    return do_request("DELETE", url, o, max_redirects(o))
+end
+
+local function with_body(method, url, body, ct, opts)
+    local o = client_opts(opts)
+    if body ~= nil then o["body"] = body end
+    if ct ~= nil then o["content_type"] = ct end
+    if o.body ~= nil and o.content_type == nil and o.json == nil and o.form == nil then
+        o["content_type"] = "application/octet-stream"
+    end
+    return do_request(method, url, o, max_redirects(o))
+end
+
+-- http.post(url, body [, content_type [, opts]]) / http.put / http.patch → response
+function M.post(url, body, ct, opts)  return with_body("POST", url, body, ct, opts) end
+function M.put(url, body, ct, opts)   return with_body("PUT", url, body, ct, opts) end
+function M.patch(url, body, ct, opts) return with_body("PATCH", url, body, ct, opts) end
+
+-- ---- Static files ---------------------------------------------------------------------
+
+local MIME = {
+    html = "text/html; charset=utf-8", htm = "text/html; charset=utf-8",
+    css = "text/css; charset=utf-8", js = "text/javascript; charset=utf-8",
+    mjs = "text/javascript; charset=utf-8", json = "application/json",
+    txt = "text/plain; charset=utf-8", md = "text/markdown; charset=utf-8",
+    csv = "text/csv; charset=utf-8", xml = "application/xml",
+    svg = "image/svg+xml", png = "image/png", jpg = "image/jpeg",
+    jpeg = "image/jpeg", gif = "image/gif", webp = "image/webp",
+    ico = "image/x-icon", pdf = "application/pdf", wasm = "application/wasm",
+    woff = "font/woff", woff2 = "font/woff2", mp4 = "video/mp4",
+    zip = "application/zip",
+}
+
+-- http.static(dir [, opts]) → handler serving the files under dir
+-- opts: index (default "index.html"), prefix (URL prefix to strip, e.g. "/assets")
+-- Paths containing ".." or NUL are refused; unknown files give 404.
+function M.static(dir, opts)
+    local index = (opts and opts.index) or "index.html"
+    local prefix = (opts and opts.prefix) or ""
+    return function(req)
+        if req.method ~= "GET" and req.method ~= "HEAD" then
+            local r = plain(405, "Method Not Allowed\n")
+            r.headers["Allow"] = "GET, HEAD"
+            return r
+        end
+        local path = native.url_decode(req.path, false)
+        if prefix ~= "" then
+            if not string.starts_with(path, prefix) then return plain(404, "Not Found\n") end
+            path = string.sub(path, len(prefix) + 1)
+        end
+        if string.find(path, "..") or string.find(path, "\\") then
+            return plain(400, "Bad Request\n")
+        end
+        if path == "" or string.ends_with(path, "/") then path = path .. index end
+        if not string.starts_with(path, "/") then path = "/" .. path end
+        local file = dir .. path
+        local data = os.readfile(file)
+        if data == nil then
+            data = os.readfile(file .. "/" .. index)          -- a directory
+            if data == nil then return plain(404, "Not Found\n") end
+            file = file .. "/" .. index
+        end
+        local ext = ""
+        local i = 1
+        while true do
+            local d = string.find(file, ".", i)
+            if not d then break end
+            ext = string.lower(string.sub(file, d + 1))
+            i = d + 1
+        end
+        local h = [=]
+        h["Content-Type"] = MIME[ext] or "application/octet-stream"
+        local r = [=]
+        r["status"] = 200
+        r["body"] = data
+        r["headers"] = h
+        return r
+    end
+end
+
+-- ---- Router ---------------------------------------------------------------------------
 
 -- split "/users/42/posts" → ["users", "42", "posts"]
 local function split_path(p)
@@ -224,8 +1081,9 @@ local function split_path(p)
     return parts
 end
 
--- Tenta casar pat_parts contra req_parts; retorna params (tabela) ou nil.
--- Segmentos ":name" capturam qualquer valor; "*" no final casa o restante.
+-- Match pattern segments against request segments; params map or nil.
+-- ":name" captures a (percent-decoded) segment; a final "*" matches the rest
+-- (params["*"] holds it).
 local function match_route(pat_parts, req_parts)
     local np = len(pat_parts)
     local nr = len(req_parts)
@@ -233,10 +1091,15 @@ local function match_route(pat_parts, req_parts)
     local i = 0
     while i < np do
         local seg = pat_parts[i]
-        if seg == "*" then return params end
+        if seg == "*" then
+            local rest = []
+            for j = i, nr - 1 do rest[] = req_parts[j] end
+            params["*"] = string.join(rest, "/")
+            return params
+        end
         if i >= nr then return nil end
         if string.sub(seg, 1, 1) == ":" then
-            params[string.sub(seg, 2)] = req_parts[i]
+            params[string.sub(seg, 2)] = native.url_decode(req_parts[i], false)
         elseif seg ~= req_parts[i] then
             return nil
         end
@@ -245,11 +1108,22 @@ local function match_route(pat_parts, req_parts)
     return i == nr and params or nil
 end
 
--- Converte resp (pode ser struct selado) para um mapa [=] mutável.
--- Também converte resp.headers aninhado se for struct, para que
--- middlewares possam adicionar/modificar headers livremente.
+-- Response as a mutable map (handlers may return sealed structs), so
+-- middlewares can change status/headers.
 local function mutable_resp(resp)
-    if type(resp) ~= "struct" then return resp end
+    local t = type(resp)
+    if t == "string" then
+        local r = [=]
+        r["status"] = 200
+        r["body"] = resp
+        return r
+    end
+    if t ~= "struct" and t ~= "map" and t ~= "table" then
+        -- middlewares always get a response to work with
+        print("http: handler returned " .. t .. " (expected a response table); sending 500")
+        return plain(500, "Internal Server Error\n")
+    end
+    if t ~= "struct" then return resp end
     local hdrs = resp.headers
     if hdrs and type(hdrs) == "struct" then
         local m = [=]
@@ -260,14 +1134,10 @@ local function mutable_resp(resp)
     r["status"]  = resp.status or 200
     r["body"]    = resp.body or ""
     r["headers"] = hdrs
-    r["ok"]      = resp.ok
-    r["error"]   = resp.error
+    r["close"]   = resp.close
     return r
 end
 
--- Executa uma cadeia de middlewares seguida de handler.
--- Cada mw tem assinatura (req, next) → resp. next é o próximo na cadeia.
--- Cada resposta é convertida para mapa mutável antes de subir na cadeia.
 local function run_chain(mw_list, handler, req)
     local n = len(mw_list)
     local function build(i)
@@ -281,71 +1151,13 @@ local function run_chain(mw_list, handler, req)
     return build(0)(req)
 end
 
--- ---- Public API -------------------------------------------------------------
-
-local M = {}
-
--- http.get(url [, opts]) → response
--- opts: { headers={...}, timeout=ms, follow_redirects=bool }
-function M.get(url, opts)
-    local hdrs = opts and opts.headers and opts.headers or [=]
-    if opts and opts.timeout then hdrs["__timeout"] = opts.timeout end
-    local max_redir = (opts and opts.follow_redirects == false) and 0 or nil
-    return do_request("GET", url, nil, nil, hdrs, max_redir)
-end
-
--- http.post(url, body [, content_type [, opts]]) → response
--- opts: { headers={...}, timeout=ms, follow_redirects=bool }
-function M.post(url, body, ct, opts)
-    local hdrs = opts and opts.headers and opts.headers or [=]
-    if opts and opts.timeout then hdrs["__timeout"] = opts.timeout end
-    local max_redir = (opts and opts.follow_redirects == false) and 0 or nil
-    return do_request("POST", url, body, ct or "application/octet-stream", hdrs, max_redir)
-end
-
--- http.request(method, url [, body [, content_type [, headers]]]) → response
-function M.request(method, url, body, ct, headers)
-    return do_request(method, url, body, ct, headers)
-end
-
--- http.parse_query(s) → table  (parses ?key=val&... from a path or full URL)
--- Keys and values are percent-decoded; '+' is treated as space.
-function M.parse_query(s)
-    local result = [=]
-    local qi = string.find(s, "?")
-    if not qi then return result end
-    local qs = string.sub(s, qi + 1)
-    local i  = 1
-    local n  = len(qs)
-    while i <= n do
-        local amp  = string.find(qs, "&", i)
-        local pair = amp and string.sub(qs, i, amp - 1) or string.sub(qs, i)
-        i = amp and amp + 1 or n + 1
-        if len(pair) > 0 then
-            local eq = string.find(pair, "=")
-            if eq then
-                result[native.url_decode(string.sub(pair, 1, eq - 1))] =
-                    native.url_decode(string.sub(pair, eq + 1))
-            else
-                result[native.url_decode(pair)] = true
-            end
-        end
-    end
-    return result
-end
-
--- http.router() → router
--- Cria um router object que pode ser passado directamente para http.serve.
---
--- Métodos do router:
---   router.use(mw)                    — middleware global: mw(req, next) → resp
---   router.get(path, [mws,] fn)       — rota GET
---   router.post / put / delete / patch / any — idem para outros métodos
---   router.group(prefix, {mws})       — sub-router com prefixo e middlewares extras
---   router.handle(req) → resp         — dispatcher (usado pelo http.serve)
---
--- Parâmetros de path via ":name"; wildcard final "*".
--- Resposta automática 404 (path não casa) e 405 (path casa, método não).
+-- http.router() → router (pass it to http.serve / http.listen)
+--   router.use(mw)                    — middleware: mw(req, next) → resp
+--   router.get(path, [mws,] fn)       — also post, put, delete, patch, head, any
+--   router.group(prefix, {mws})       — sub-router with a prefix and middlewares
+--   router.handle(req) → resp         — dispatch (what the server calls)
+-- 404 when no path matches; 405 (with Allow) when the path matches but not the
+-- method; HEAD falls back to the GET route.
 function M.router()
     local global_mws = []
     local routes     = []
@@ -360,7 +1172,7 @@ function M.router()
             mws = mws_or_fn
             fn  = handler_or_nil
         end
-        routes[] = { method=method, parts=split_path(pattern), mws=mws, handler=fn }
+        routes[] = { method = method, parts = split_path(pattern), mws = mws, handler = fn }
     end
 
     function R.use(mw) global_mws[] = mw end
@@ -370,14 +1182,20 @@ function M.router()
     function R.put(path, a, b)    add("PUT",    path, a, b) end
     function R.delete(path, a, b) add("DELETE", path, a, b) end
     function R.patch(path, a, b)  add("PATCH",  path, a, b) end
+    function R.head(path, a, b)   add("HEAD",   path, a, b) end
     function R.any(path, a, b)    add("*",      path, a, b) end
 
     function R.group(prefix, extra_mws)
         local G = {}
         local function gadd(method, path, a, b)
             local mws, fn
-            if type(a) == "function" then mws = []; fn = a
-            else mws = a; fn = b end
+            if type(a) == "function" then
+                mws = []
+                fn = a
+            else
+                mws = a
+                fn = b
+            end
             local all_mws = []
             for i = 0, len(extra_mws) - 1 do all_mws[] = extra_mws[i] end
             for i = 0, len(mws) - 1      do all_mws[] = mws[i] end
@@ -388,6 +1206,7 @@ function M.router()
         function G.put(path, a, b)    gadd("PUT",    path, a, b) end
         function G.delete(path, a, b) gadd("DELETE", path, a, b) end
         function G.patch(path, a, b)  gadd("PATCH",  path, a, b) end
+        function G.head(path, a, b)   gadd("HEAD",   path, a, b) end
         function G.any(path, a, b)    gadd("*",      path, a, b) end
         return G
     end
@@ -398,103 +1217,45 @@ function M.router()
         if qi then path = string.sub(path, 1, qi - 1) end
         local rparts = split_path(path)
 
-        local path_matched = false
+        local allowed = []
+        local fallback = nil      -- GET route for a HEAD request
         for i = 0, len(routes) - 1 do
             local route = routes[i]
             local params = match_route(route.parts, rparts)
             if params then
-                if route.method == "*" or route.method == req.method then
-                    -- Cria novo mapa com campos do req + params capturados.
-                    -- Não muta o req original (pode ser struct selado).
-                    local r2 = [=]
-                    r2["method"]  = req.method
-                    r2["path"]    = req.path
-                    r2["headers"] = req.headers
-                    r2["body"]    = req.body
-                    r2["tls"]     = req.tls
-                    r2["params"]  = params
-                    local all_mws = []
-                    for j = 0, len(global_mws) - 1  do all_mws[] = global_mws[j] end
-                    for j = 0, len(route.mws) - 1   do all_mws[] = route.mws[j] end
-                    return run_chain(all_mws, route.handler, r2)
+                local m = route.method
+                if m == "*" or m == req.method then
+                    return R.dispatch(route, params, req)
                 end
-                path_matched = true
+                if m == "GET" and req.method == "HEAD" and fallback == nil then
+                    fallback = { route = route, params = params }
+                end
+                allowed[] = m
             end
         end
-
-        if path_matched then
-            return { status=405, body="Method Not Allowed\n",
-                     headers={ ["Content-Type"]="text/plain; charset=utf-8" } }
+        if fallback then return R.dispatch(fallback.route, fallback.params, req) end
+        if len(allowed) > 0 then
+            local r = plain(405, "Method Not Allowed\n")
+            r.headers["Allow"] = string.join(allowed, ", ")
+            return r
         end
-        return { status=404, body="Not Found\n",
-                 headers={ ["Content-Type"]="text/plain; charset=utf-8" } }
+        return plain(404, "Not Found\n")
+    end
+
+    function R.dispatch(route, params, req)
+        local r2 = req
+        if type(req) ~= "map" then
+            r2 = [=]
+            for k, v in req do r2[k] = v end
+        end
+        r2["params"] = params
+        local all_mws = []
+        for j = 0, len(global_mws) - 1 do all_mws[] = global_mws[j] end
+        for j = 0, len(route.mws) - 1  do all_mws[] = route.mws[j] end
+        return run_chain(all_mws, route.handler, r2)
     end
 
     return R
-end
-
--- http.serve(port, handler [, opts]) — blocks; handler(req) → resp
--- opts: { tls = { cert="...", key="...", ca="..." } }
--- With opts.tls the server accepts HTTPS connections.
--- Both HTTP and HTTPS servers handle each request in a goroutine.
-function M.serve(port, handler, opts)
-    -- Aceita router object (tabela com .handle) além de função pura
-    if type(handler) == "table" then
-        handler = handler.handle
-    end
-    local tls_opts = opts and opts.tls
-
-    if tls_opts then
-        -- HTTPS branch
-        local ctx = ssl.server(tls_opts)
-        if not ctx then
-            print("http.serve: TLS context error (check cert/key paths)")
-            return
-        end
-        local srv = ssl.listen(port)
-        if not srv then
-            print("http.serve: cannot bind port " .. port)
-            return
-        end
-        print("Sea HTTPS server listening on https://0.0.0.0:" .. port)
-        while true do
-            local conn = ssl.accept(ctx, srv)
-            if conn then
-                go (function()
-                    local raw = ssl.read_request(conn)
-                    if raw and len(raw) > 0 then
-                        local req  = native.parse_request(raw)
-                        req.tls   = true
-                        local resp = handler(req)
-                        ssl.write(conn, build_response(resp))
-                    end
-                    ssl.close(conn)
-                end)()
-            end
-        end
-    else
-        -- HTTP branch (plain TCP)
-        local srv = native.tcp_listen(port)
-        if not srv then
-            print("http.serve: cannot bind port " .. port)
-            return
-        end
-        print("Sea HTTP server listening on http://0.0.0.0:" .. port)
-        while true do
-            local cfd = native.tcp_accept(srv)
-            if cfd then
-                go (function()
-                    local raw = native.read_request(cfd)
-                    if raw and len(raw) > 0 then
-                        local req  = native.parse_request(raw)
-                        local resp = handler(req)
-                        native.net_write(cfd, build_response(resp))
-                    end
-                    native.net_close(cfd)
-                end)()
-            end
-        end
-    end
 end
 
 return M

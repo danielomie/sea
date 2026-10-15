@@ -1,0 +1,79 @@
+-- Test: libs/http (needs make -C libs/http, libs/ssl and libs/json)
+local http = require("../../libs/http/http")
+
+-- server with a router and middleware
+local router = http.router()
+router.use(function(req, next)
+    local resp = next(req)
+    if resp.headers == nil then resp.headers = [=] end
+    resp.headers["X-Served-By"] = "sea"
+    return resp
+end)
+router.get("/", function(req) return http.text("home") end)
+router.get("/users/:id", function(req)
+    return http.json({ id = req.params["id"], q = req.query["q"] })
+end)
+router.post("/echo", function(req)
+    return http.text(req.method .. ":" .. req.body .. ":" .. (req.headers["content-type"] or ""))
+end)
+router.put("/data", function(req)
+    local v = req:json()
+    return http.json({ sum = v.a + v.b }, 201)
+end)
+router.get("/cookie", function(req)
+    local r = http.text("got " .. tostring(req.cookies["session"]))
+    http.set_cookie(r, "session", "abc", { path = "/", http_only = true })
+    return r
+end)
+router.get("/go", function(req) return http.redirect("/") end)
+router.get("/nil", function(req) return nil end)
+router.get("/big", function(req) return http.text(string.rep("x", 100000)) end)
+
+local srv = http.listen(0, router, { read_timeout = 2000 })
+local base = "http://127.0.0.1:" .. srv.port
+
+local r = http.get(base .. "/")
+print("get:", r.status, r.body, r.headers["x-served-by"], r.ok)
+local u = http.get(base .. "/users/a%20b", { query = { q = "x&y" } })
+print("params+query:", u:json().id, u:json().q)
+print("post:", http.post(base .. "/echo", "hi", "text/plain").body)
+local p = http.put(base .. "/data", nil, nil, { json = { a = 2, b = 3 } })
+print("put json:", p.status, p:json().sum)
+local c = http.get(base .. "/cookie", { headers = { Cookie = "session=xyz" } })
+print("cookies:", c.body, c.headers["set-cookie"])
+print("redirect:", http.get(base .. "/go").body)
+print("no redirect:", http.get(base .. "/go", { follow_redirects = false }).status)
+print("405:", http.request("DELETE", base .. "/data").status)
+print("404:", http.get(base .. "/missing").status)
+local h = http.head(base .. "/big")
+print("head:", h.status, len(h.body), h.headers["content-length"])
+print("big:", len(http.get(base .. "/big").body))
+print("bad handler -> 500:", http.get(base .. "/nil").status)
+print("server still up:", http.get(base .. "/").body)
+print("bad header rejected:", http.get(base .. "/", { headers = { X = "a\r\nb: c" } }).status)
+
+-- concurrent clients (keep-alive pool)
+local results = chan(20)
+for i = 1, 20 do
+    go (function()
+        local ok = 0
+        for k = 1, 10 do
+            if http.get(base .. "/users/" .. i).status == 200 then ok = ok + 1 end
+        end
+        results <- ok
+    end)()
+end
+local total = 0
+for i = 1, 20 do total = total + <-results end
+print("concurrent:", total)
+
+-- helpers
+print("query:", http.build_query({ b = "x y", a = 1 }), http.parse_query("/p?k=a%26b&f").k)
+local pu = http.parse_url("https://[::1]:8443/a/b?c=1#frag")
+print("parse_url:", pu.host, pu.port, pu.path, pu.query)
+print("encode:", http.url_encode("a b/c"), http.url_decode("a+b%2Fc"))
+print("status:", http.status_text(429))
+
+srv.close()
+srv.wait()
+print("closed:", http.get(base .. "/", { timeout = 500 }).status)

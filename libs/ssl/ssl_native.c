@@ -4,9 +4,11 @@
  * Build:  cd libs/ssl && make
  *
  * Groups:
- *   TLS client     — tls_connect, tls_read, tls_write, tls_close,
- *                    tls_peer_cert, tls_version, tls_cipher
- *   TLS server     — server_new, server_free, server_listen, server_accept
+ *   TLS transport  — tls_client, tls_server, tls_handshake, tls_recv,
+ *                    tls_send, tls_close (on sockets from the `net` module,
+ *                    non-blocking through the netpoller), tls_peer_cert,
+ *                    tls_version, tls_cipher
+ *   TLS server ctx — server_new, server_free
  *   Certificates   — cert_load_file, cert_parse, cert_info, cert_pem,
  *                    cert_save, cert_free, cert_verify, cert_self_signed,
  *                    cert_sign
@@ -109,6 +111,12 @@ static bool opts_get(SeaValue opts, const char *field, SeaValue *out) {
     if (sea_is_table(opts)) {
         return sea_table_get_str(SEA_AS_TABLE(opts), field, out);
     }
+    if (sea_is_map(opts)) {                  /* [=] maps */
+        SeaString *k = sea_string_intern(field, strlen(field));
+        bool found = sea_map_get(SEA_AS_MAP(opts), sea_obj_val(&k->obj), out);
+        sea_obj_release(&k->obj);
+        return found && !sea_is_nil(*out);
+    }
     if (sea_is_struct(opts)) {
         SeaString *k = sea_string_intern(field, strlen(field));
         *out = sea_struct_get(SEA_AS_STRUCT(opts), k);
@@ -164,61 +172,6 @@ static const EVP_MD *lookup_sign_md(const char *algo) {
     return lookup_md(p ? p + 1 : algo);
 }
 
-/* ---- TCP helpers --------------------------------------------------------- */
-
-static int do_tcp_connect(const char *host, const char *port, int timeout_ms) {
-    struct addrinfo hints = {0};
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res;
-    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
-    int fd = -1;
-    for (struct addrinfo *p = res; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        if (timeout_ms > 0) {
-            struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000L };
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        }
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        close(fd); fd = -1;
-    }
-    freeaddrinfo(res);
-    return fd;
-}
-
-static int do_tcp_listen(int port) {
-    signal(SIGPIPE, SIG_IGN);
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (fd >= 0) {
-        int no6only = 0, reuse = 1;
-        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no6only, sizeof(no6only));
-        setsockopt(fd, SOL_SOCKET,   SO_REUSEADDR, &reuse,  sizeof(reuse));
-        struct sockaddr_in6 sa = {0};
-        sa.sin6_family = AF_INET6;
-        sa.sin6_addr   = in6addr_any;
-        sa.sin6_port   = htons((uint16_t)port);
-        if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 &&
-            listen(fd, 128) == 0)
-            return fd;
-        close(fd);
-    }
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int reuse = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    struct sockaddr_in sa4 = {0};
-    sa4.sin_family      = AF_INET;
-    sa4.sin_addr.s_addr = INADDR_ANY;
-    sa4.sin_port        = htons((uint16_t)port);
-    if (bind(fd, (struct sockaddr*)&sa4, sizeof(sa4)) < 0 ||
-        listen(fd, 128) < 0) {
-        close(fd); return -1;
-    }
-    return fd;
-}
-
 /* ---- Global client SSL_CTX (lazy-initialized) --------------------------- */
 
 static SSL_CTX        *g_client_ctx  = NULL;
@@ -238,29 +191,82 @@ static SSL_CTX *get_client_ctx(void) {
 }
 
 /* =========================================================================
- * TLS CLIENT
+ * TLS TRANSPORT — over non-blocking sockets from the `net` module.
+ *
+ * Every function that may wait goes through the netpoller (sea_netpoll.h):
+ * when OpenSSL wants to read or write the socket, the goroutine parks and
+ * the same native runs again once the socket is ready (OpenSSL keeps the
+ * handshake/record state in the SSL object between attempts). tls_send keeps
+ * the bytes already written in the VM's I/O call. Failures return error
+ * values; a timeout's message is "timeout".
  * ========================================================================= */
 
-static SeaValue fn_tls_connect(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 2) return SEA_NIL_VAL;
+static int64_t opt_timeout(int argc, SeaValue *args, int i) {
+    if (argc <= i) return -1;
+    if (sea_is_int(args[i])) return sea_as_int(args[i]) > 0 ? sea_as_int(args[i]) : -1;
+    if (sea_is_number(args[i])) return sea_as_number(args[i]) > 0 ? (int64_t)sea_as_number(args[i]) : -1;
+    return -1;
+}
 
-    char host[256] = {0}, port[24] = {0};
-    if (!val_to_cstr(args[0], host, sizeof(host))) return SEA_NIL_VAL;
+static SeaValue tls_error(SeaVM *vm, const char *what) {
+    char buf[256];
+    unsigned long e = ERR_get_error();
+    if (e) {
+        char es[160];
+        ERR_error_string_n(e, es, sizeof es);
+        snprintf(buf, sizeof buf, "%s: %s", what, es);
+    } else {
+        snprintf(buf, sizeof buf, "%s", what);
+    }
+    ERR_clear_error();
+    return sea_make_error_str(vm, buf);
+}
 
-    if (sea_is_int(args[1]))
-        snprintf(port, sizeof(port), "%lld", (long long)sea_as_int(args[1]));
-    else if (!val_to_cstr(args[1], port, sizeof(port)))
-        return SEA_NIL_VAL;
+/* After an SSL call returned `r`: wait for the socket if OpenSSL asked to.
+ * Returns 1 to retry, 0 if the caller should return *out. */
+static int tls_wait(SeaVM *vm, SSL *ssl, int r, const char *what, SeaValue *out) {
+    int err = SSL_get_error(ssl, r);
+    int ev = err == SSL_ERROR_WANT_READ ? SEA_IO_READ : err == SSL_ERROR_WANT_WRITE ? SEA_IO_WRITE : 0;
+    if (!ev) {
+        sea_io_end(vm);
+        *out = tls_error(vm, what);
+        return 0;
+    }
+    int w = sea_io_wait(vm, SSL_get_fd(ssl), ev);
+    if (w == SEA_IO_PARK) { *out = SEA_PARK_VAL; return 0; }
+    if (w == SEA_IO_READY) return 1;
+    sea_io_end(vm);
+    ERR_clear_error();
+    *out = sea_make_error_str(vm, w == SEA_IO_TIMEOUT ? "timeout" : "connection closed");
+    return 0;
+}
+
+static SSL *tls_new(SSL_CTX *ctx, int fd) {
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) return NULL;
+    SSL_set_fd(ssl, fd);
+    /* tls_send retries with the same (possibly moved) buffer and accepts
+     * partial writes */
+    SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    return ssl;
+}
+
+/* tls_client(fd, host [, opts]) → conn: client TLS on a connected socket
+ * (no I/O yet; call tls_handshake). opts: verify, sni, cert, key,
+ * min_version. On failure the fd is left open (the caller owns it). */
+static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 2 || !sea_is_int(args[0])) return sea_make_error_str(vm, "tls_client: fd and host expected");
+    int fd = (int)sea_as_int(args[0]);
+    char host[256] = {0};
+    if (!val_to_cstr(args[1], host, sizeof(host))) return sea_make_error_str(vm, "tls_client: bad host");
 
     bool verify      = true;
     char sni[256]    = {0};
     char cert_p[512] = {0};
     char key_p[512]  = {0};
     long min_ver     = TLS1_2_VERSION;
-    int  timeout_ms  = 0;
 
-    if (argc >= 3 && (sea_is_table(args[2]) || sea_is_struct(args[2]))) {
+    if (argc >= 3 && (sea_is_table(args[2]) || sea_is_struct(args[2]) || sea_is_map(args[2]))) {
         SeaValue v;
         if (opts_get(args[2], "verify",      &v)) verify = sea_is_truthy(v);
         if (opts_get(args[2], "sni",         &v)) val_to_cstr(v, sni,    sizeof(sni));
@@ -270,16 +276,13 @@ static SeaValue fn_tls_connect(SeaVM *vm, int argc, SeaValue *args) {
             char mv[32]; val_to_cstr(v, mv, sizeof(mv));
             if (!strcmp(mv, "TLSv1.3") || !strcmp(mv, "1.3")) min_ver = TLS1_3_VERSION;
         }
-        if (opts_get(args[2], "timeout", &v))
-            timeout_ms = sea_is_int(v) ? (int)sea_as_int(v) : (int)sea_as_number(v);
     }
 
     bool    needs_clone = !verify || cert_p[0] || key_p[0] || min_ver != TLS1_2_VERSION;
     SSL_CTX *ctx        = needs_clone ? NULL : get_client_ctx();
-
     if (needs_clone) {
         ctx = SSL_CTX_new(TLS_client_method());
-        if (!ctx) return SEA_NIL_VAL;
+        if (!ctx) return tls_error(vm, "tls_client");
         SSL_CTX_set_min_proto_version(ctx, min_ver);
         if (!verify)
             SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
@@ -290,137 +293,111 @@ static SeaValue fn_tls_connect(SeaVM *vm, int argc, SeaValue *args) {
         if (cert_p[0]) SSL_CTX_use_certificate_chain_file(ctx, cert_p);
         if (key_p[0])  SSL_CTX_use_PrivateKey_file(ctx, key_p, SSL_FILETYPE_PEM);
     }
+    if (!ctx) return tls_error(vm, "tls_client");
 
-    int fd = do_tcp_connect(host, port, timeout_ms);
-    if (fd < 0) { if (needs_clone) SSL_CTX_free(ctx); return SEA_NIL_VAL; }
-
-    SSL *ssl = SSL_new(ctx);
-    /* SSL_new increments ctx's internal refcount, safe to free clone now */
-    if (needs_clone) SSL_CTX_free(ctx);
-    if (!ssl) { close(fd); return SEA_NIL_VAL; }
+    SSL *ssl = tls_new(ctx, fd);
+    if (needs_clone) SSL_CTX_free(ctx);   /* SSL_new holds its own reference */
+    if (!ssl) return tls_error(vm, "tls_client");
 
     const char *sni_name = sni[0] ? sni : host;
-    SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, sni_name);
     if (verify) SSL_set1_host(ssl, sni_name);
-
-    if (SSL_connect(ssl) <= 0) {
-        SSL_free(ssl); close(fd);
-        return SEA_NIL_VAL;
-    }
+    SSL_set_connect_state(ssl);
     return PACK_PTR(ssl);
 }
 
-static SeaValue fn_tls_read(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
-    SSL *ssl = UNPACK(args[0], SSL*);
-
-    /* Read exactly n bytes */
-    if (argc >= 2 && sea_is_int(args[1])) {
-        int n = (int)sea_as_int(args[1]);
-        if (n <= 0) return make_str("", 0);
-        char *buf = malloc((size_t)n);
-        if (!buf) return SEA_NIL_VAL;
-        int total = 0;
-        while (total < n) {
-            int r = SSL_read(ssl, buf + total, n - total);
-            if (r <= 0) break;
-            total += r;
-        }
-        SeaValue v = make_str(buf, (size_t)total);
-        free(buf);
-        return v;
-    }
-
-    /* Read until EOF/close */
-    Buf b; buf_init(&b);
-    char tmp[8192]; int r;
-    while ((r = SSL_read(ssl, tmp, (int)sizeof(tmp))) > 0)
-        buf_push(&b, tmp, (size_t)r);
-    SeaValue v = make_str(b.data ? b.data : "", b.len);
-    buf_free(&b);
-    return v;
+/* tls_server(ctx, fd) → conn: server TLS on an accepted socket (no I/O). */
+static SeaValue fn_tls_server(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 2 || !sea_is_int(args[0]) || !sea_is_int(args[1]))
+        return sea_make_error_str(vm, "tls_server: ctx and fd expected");
+    SSL *ssl = tls_new(UNPACK(args[0], SSL_CTX*), (int)sea_as_int(args[1]));
+    if (!ssl) return tls_error(vm, "tls_server");
+    SSL_set_accept_state(ssl);
+    return PACK_PTR(ssl);
 }
 
-/* Read a full HTTP request over TLS: headers + body (based on Content-Length).
- * Mirrors read_http_request_buf() in http_native.c but uses SSL_read. */
-static SeaValue fn_tls_read_request(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+/* tls_handshake(conn [, timeout_ms]) → true */
+static SeaValue fn_tls_handshake(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || !sea_is_int(args[0])) return sea_make_error_str(vm, "tls_handshake: conn expected");
     SSL *ssl = UNPACK(args[0], SSL*);
-
-    Buf buf; buf_init(&buf);
-    char tmp[8192];
-
-    while (buf.len < (1u << 20)) {
-        int n = SSL_read(ssl, tmp, (int)sizeof(tmp));
-        if (n <= 0) break;
-        buf_push(&buf, tmp, (size_t)n);
-
-        /* Find end of headers */
-        const char *hdr_end = (const char*)memmem(buf.data, buf.len, "\r\n\r\n", 4);
-        if (!hdr_end) continue;
-
-        size_t body_start = (size_t)(hdr_end - buf.data) + 4;
-        size_t body_have  = buf.len - body_start;
-        size_t body_need  = 0;
-
-        /* Scan headers for Content-Length */
-        for (const char *scan = buf.data; scan < hdr_end; ) {
-            size_t rem = (size_t)(hdr_end - scan);
-            if (rem >= 15 && strncasecmp(scan, "content-length:", 15) == 0) {
-                const char *v = scan + 15;
-                while (v < hdr_end && (*v == ' ' || *v == '\t')) v++;
-                body_need = (size_t)strtoul(v, NULL, 10);
-                break;
-            }
-            const char *nl = (const char*)memmem(scan, rem, "\r\n", 2);
-            if (!nl) break;
-            scan = nl + 2;
-        }
-
-        /* Read remaining body bytes */
-        while (body_have < body_need) {
-            size_t want = body_need - body_have;
-            int m = SSL_read(ssl, tmp, (int)(want < sizeof(tmp) ? want : sizeof(tmp)));
-            if (m <= 0) break;
-            buf_push(&buf, tmp, (size_t)m);
-            body_have += (size_t)m;
-        }
-        break;
+    SeaIoCall *io = sea_io_begin(vm, opt_timeout(argc, args, 1));
+    if (io->closed) { sea_io_end(vm); return sea_make_error_str(vm, "connection closed"); }
+    for (;;) {
+        ERR_clear_error();
+        int r = SSL_do_handshake(ssl);
+        if (r == 1) { sea_io_end(vm); return SEA_TRUE_VAL; }
+        SeaValue out;
+        if (!tls_wait(vm, ssl, r, "TLS handshake failed", &out)) return out;
     }
-
-    SeaValue r = make_str(buf.data ? buf.data : "", buf.len);
-    buf_free(&buf);
-    return r;
 }
 
-static SeaValue fn_tls_write(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+/* tls_recv(conn, max [, timeout_ms]) → string ("" at the end of the stream) */
+static SeaValue fn_tls_recv(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || !sea_is_int(args[0])) return sea_make_error_str(vm, "tls_recv: conn expected");
+    SSL *ssl = UNPACK(args[0], SSL*);
+    int max = (argc >= 2 && sea_is_int(args[1]) && sea_as_int(args[1]) > 0) ? (int)sea_as_int(args[1]) : 65536;
+    if (max > (1 << 24)) max = 1 << 24;
+    SeaIoCall *io = sea_io_begin(vm, opt_timeout(argc, args, 2));
+    if (io->closed) { sea_io_end(vm); return sea_make_error_str(vm, "connection closed"); }
+    char stackbuf[16384];
+    char *buf = max <= (int)sizeof stackbuf ? stackbuf : malloc((size_t)max);
+    if (!buf) { sea_io_end(vm); return sea_make_error_str(vm, "tls_recv: out of memory"); }
+    SeaValue out;
+    for (;;) {
+        ERR_clear_error();
+        int r = SSL_read(ssl, buf, max);
+        if (r > 0) { sea_io_end(vm); out = make_str(buf, (size_t)r); break; }
+        int err = SSL_get_error(ssl, r);
+        if (err == SSL_ERROR_ZERO_RETURN ||
+            (err == SSL_ERROR_SYSCALL && ERR_peek_error() == 0)) {   /* peer went away */
+            sea_io_end(vm);
+            ERR_clear_error();
+            out = make_str("", 0);
+            break;
+        }
+        if (!tls_wait(vm, ssl, r, "TLS read failed", &out)) break;
+    }
+    if (buf != stackbuf) free(buf);
+    return out;
+}
+
+/* tls_send(conn, data [, timeout_ms]) → bytes written (all of data).
+ * io->progress holds the bytes already written across parks. */
+static SeaValue fn_tls_send(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 2 || !sea_is_int(args[0])) return sea_make_error_str(vm, "tls_send: conn and data expected");
     SeaString *str = sea_value_get_flat_string(args[1]);
-    if (!str) return SEA_NIL_VAL;
+    if (!str) return sea_make_error_str(vm, "tls_send: string expected");
     SSL *ssl = UNPACK(args[0], SSL*);
-    const char *data = str->data;
-    int total = (int)str->len;
-    for (int sent = 0; sent < total; ) {
-        int n = SSL_write(ssl, data + sent, total - sent);
-        if (n <= 0) break;
-        sent += n;
+    SeaIoCall *io = sea_io_begin(vm, opt_timeout(argc, args, 2));
+    SeaValue out;
+    if (io->closed) {
+        sea_io_end(vm);
+        out = sea_make_error_str(vm, "connection closed");
+    } else for (;;) {
+        size_t sent = (size_t)io->progress;
+        if (sent >= str->len) { sea_io_end(vm); out = sea_int_val((int64_t)str->len); break; }
+        size_t chunk = str->len - sent;
+        if (chunk > (1u << 30)) chunk = 1u << 30;
+        ERR_clear_error();
+        int r = SSL_write(ssl, str->data + sent, (int)chunk);
+        if (r > 0) { io->progress += r; continue; }
+        if (!tls_wait(vm, ssl, r, "TLS write failed", &out)) break;
     }
     sea_obj_release(&str->obj);
-    return SEA_NIL_VAL;
+    return out;
 }
 
+/* tls_close(conn): best-effort close_notify (never waits), free, close. */
 static SeaValue fn_tls_close(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
     SSL *ssl = UNPACK(args[0], SSL*);
     int fd = SSL_get_fd(ssl);
+    ERR_clear_error();
     SSL_shutdown(ssl);
+    ERR_clear_error();
     SSL_free(ssl);
-    if (fd >= 0) close(fd);
+    if (fd >= 0) sea_netpoll_close(fd);
     return SEA_NIL_VAL;
 }
 
@@ -454,7 +431,7 @@ static SeaValue fn_server_new(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 1) return SEA_NIL_VAL;
     SeaValue opts_v = args[0];
-    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v) && !sea_is_map(opts_v)) return SEA_NIL_VAL;
 
     char cert[512] = {0}, key[512] = {0}, ca[512] = {0};
     long min_ver = TLS1_2_VERSION;
@@ -495,34 +472,6 @@ static SeaValue fn_server_free(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
     SSL_CTX_free(UNPACK(args[0], SSL_CTX*));
     return SEA_NIL_VAL;
-}
-
-static SeaValue fn_server_listen(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 1) return SEA_NIL_VAL;
-    int port = sea_is_int(args[0]) ? (int)sea_as_int(args[0]) : (int)sea_as_number(args[0]);
-    int fd = do_tcp_listen(port);
-    return fd >= 0 ? sea_int_val(fd) : SEA_NIL_VAL;
-}
-
-static SeaValue fn_server_accept(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 2 || !sea_is_int(args[0]) || !sea_is_int(args[1])) return SEA_NIL_VAL;
-    SSL_CTX *ctx = UNPACK(args[0], SSL_CTX*);
-    int server_fd = (int)sea_as_int(args[1]);
-
-    struct sockaddr_storage sa; socklen_t sl = sizeof(sa);
-    int fd = accept(server_fd, (struct sockaddr*)&sa, &sl);
-    if (fd < 0) return SEA_NIL_VAL;
-
-    SSL *ssl = SSL_new(ctx);
-    if (!ssl) { close(fd); return SEA_NIL_VAL; }
-    SSL_set_fd(ssl, fd);
-    if (SSL_accept(ssl) <= 0) {
-        SSL_free(ssl); close(fd);
-        return SEA_NIL_VAL;
-    }
-    return PACK_PTR(ssl);
 }
 
 /* =========================================================================
@@ -715,7 +664,7 @@ static SeaValue fn_cert_self_signed(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
     SeaValue opts_v = args[1];
-    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v) && !sea_is_map(opts_v)) return SEA_NIL_VAL;
 
     EVP_PKEY *key = UNPACK(args[0], EVP_PKEY*);
     long days = 365; bool is_ca = false;
@@ -774,7 +723,7 @@ static SeaValue fn_cert_sign(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 4 || !sea_is_int(args[0]) || !sea_is_int(args[1]) || !sea_is_int(args[2]))
         return SEA_NIL_VAL;
     SeaValue opts_v = args[3];
-    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v) && !sea_is_map(opts_v)) return SEA_NIL_VAL;
 
     X509_REQ *csr      = UNPACK(args[0], X509_REQ*);
     EVP_PKEY *ca_key   = UNPACK(args[1], EVP_PKEY*);
@@ -825,7 +774,7 @@ static SeaValue fn_key_generate(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 1) return SEA_NIL_VAL;
     SeaValue opts_v = args[0];
-    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v) && !sea_is_map(opts_v)) return SEA_NIL_VAL;
 
     char type[16]  = "rsa";
     int  bits      = 2048;
@@ -954,7 +903,7 @@ static SeaValue fn_csr_new(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
     SeaValue opts_v = args[1];
-    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v) && !sea_is_map(opts_v)) return SEA_NIL_VAL;
 
     EVP_PKEY *key = UNPACK(args[0], EVP_PKEY*);
     X509_REQ *req = X509_REQ_new();
@@ -1439,11 +1388,12 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     SeaTable *mod = sea_mod_new();
 
     /* TLS client */
-    sea_mod_set(mod, "tls_connect",   fn_tls_connect);
-    sea_mod_set(mod, "tls_read",         fn_tls_read);
-    sea_mod_set(mod, "tls_read_request", fn_tls_read_request);
-    sea_mod_set(mod, "tls_write",        fn_tls_write);
-    sea_mod_set(mod, "tls_close",        fn_tls_close);
+    sea_mod_set(mod, "tls_client",    fn_tls_client);
+    sea_mod_set(mod, "tls_server",    fn_tls_server);
+    sea_mod_set(mod, "tls_handshake", fn_tls_handshake);
+    sea_mod_set(mod, "tls_recv",      fn_tls_recv);
+    sea_mod_set(mod, "tls_send",      fn_tls_send);
+    sea_mod_set(mod, "tls_close",     fn_tls_close);
     sea_mod_set(mod, "tls_peer_cert", fn_tls_peer_cert);
     sea_mod_set(mod, "tls_version",   fn_tls_version);
     sea_mod_set(mod, "tls_cipher",    fn_tls_cipher);
@@ -1451,8 +1401,6 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     /* TLS server */
     sea_mod_set(mod, "server_new",    fn_server_new);
     sea_mod_set(mod, "server_free",   fn_server_free);
-    sea_mod_set(mod, "server_listen", fn_server_listen);
-    sea_mod_set(mod, "server_accept", fn_server_accept);
 
     /* Certificate */
     sea_mod_set(mod, "cert_load_file",   fn_cert_load_file);

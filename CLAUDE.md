@@ -79,6 +79,7 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
 3. Each directory in `SEA_PATH` (colon-separated env var)
 
 Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `xml`, `parser` (native `.so`), `http`, `ssl`, `jwt` (Sea + native) and `flags` (pure Sea) — see `docs/libs.md`.
+TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.
 
 **Require paths are relative to the requiring file**: a lib's own examples use `"../libname"`; files under `examples/<name>/` reach a library as `"../../libs/json/json"`.
 
@@ -92,6 +93,18 @@ the compiler delete a live write — a silent miscompilation (Bugs 10 and 14 in
 and if the JIT gets a helper for it, declare what the helper writes in `op_regs()`
 (`src/sea_jit.c`). Check with `make test-dwe` (`SEA_DWE_CHECK=1` turns eliminated
 writes into a visible poison value; `SEA_NO_DWE=1` disables elimination).
+
+## Natives That Wait (netpoller)
+
+A native that waits on a socket or timer must not block its scheduler thread.
+It must go through `src/sea_netpoll.h`: `sea_io_begin` → `sea_io_wait` → return
+`SEA_PARK_VAL` on `SEA_IO_PARK` → `sea_io_end` when done. The VM then re-executes
+the whole `CALL` when the goroutine wakes, so the native must be **idempotent up
+to the wait**: keep partial progress in `vm->io_call` (`progress`, `aux[]`), not
+in locals, and allocate nothing before the last possible park. Close sockets with
+`sea_netpoll_close(fd)` so parked waiters wake. The usage pattern is in the
+header comment, and `src/sea_lib_net.c` and `libs/ssl/ssl_native.c` are worked
+examples. Plain blocking calls (file I/O, `getaddrinfo`) still hold the thread.
 
 ## Keeping `docs/reference.md` Up-to-date
 

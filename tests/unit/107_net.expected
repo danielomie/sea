@@ -1,0 +1,6 @@
+sleepers:	100	true
+echoes:	50
+read timeout:	true	timeout
+refused:	true
+peer:	true
+close wakes reader:	true

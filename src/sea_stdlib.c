@@ -431,4 +431,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_sync_register(vm);
     sea_lib_time_register(vm);
     sea_lib_gc_register(vm);
+    sea_lib_net_register(vm);
 }

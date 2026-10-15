@@ -42,6 +42,12 @@ struct SeaGoroutine {
      * before that. Whichever side arrives second pushes it on a run queue, so
      * the goroutine never runs on two workers at once. Accessed atomically. */
     int           park_state;
+
+    /* Netpoller wait (sea_netpoll.c, guarded by its lock) */
+    bool          io_waiting;
+    int           io_fd;           /* fd waited on, -1 = deadline only */
+    int64_t       io_deadline;     /* 0 = none */
+    int           io_heap;         /* index in the deadline heap, -1 = none */
 };
 
 #define GORO_PARK_RUNNING 0

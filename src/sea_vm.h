@@ -4,6 +4,7 @@
 #include "sea_object.h"
 #include "sea_chunk.h"
 #include "sea_table.h"
+#include "sea_netpoll.h"
 
 /* Forward declare SeaShared (defined in sea_sched.h) */
 typedef struct SeaShared SeaShared;
@@ -30,7 +31,32 @@ struct SeaUpvalue {
     SeaValue   *location;  // points into register file while open
     SeaValue    closed;    // value stored here when closed
     SeaUpvalue *next;      // linked list of all open upvalues
+    int         lock;      // spinlock: stores and the close of a shared upvalue
 };
+
+/* Read an upvalue's value. Another goroutine may close it at the same moment
+ * (moving the value from the register into `closed` and clearing the
+ * register): if the location changed under the read, read again. (A read
+ * that raced with the owner reusing the register after the close is one of
+ * those: its value is discarded. TSAN reports that read; it is benign.) */
+static inline SeaValue sea_upvalue_get(SeaUpvalue *up) {
+    for (;;) {
+        SeaValue *loc = __atomic_load_n(&up->location, __ATOMIC_ACQUIRE);
+        SeaValue v = __atomic_load_n(loc, __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&up->location, __ATOMIC_ACQUIRE) == loc) return v;
+    }
+}
+static inline void sea_upvalue_lock(SeaUpvalue *up) {
+    while (__atomic_exchange_n(&up->lock, 1, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&up->lock, __ATOMIC_RELAXED)) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+        }
+}
+static inline void sea_upvalue_unlock(SeaUpvalue *up) {
+    __atomic_store_n(&up->lock, 0, __ATOMIC_RELEASE);
+}
 
 // Closure = chunk + captured upvalues
 struct SeaClosure {
@@ -118,6 +144,12 @@ struct SeaVM {
     /* Cycle collector (sea_gc.c): this goroutine's possible cycle roots and
      * statistics. A collection runs at a safe point once gc_nroots reaches
      * gc_threshold. */
+    /* Netpoller (sea_netpoll.h): the I/O state of the native call in
+     * progress (kept across a park), and how many C-level calls back into
+     * the VM are active (sea_vm_call; a native below one cannot park). */
+    SeaIoCall   io_call;
+    int         native_depth;
+
     SeaObject **gc_roots;
     uint32_t    gc_nroots, gc_cap, gc_threshold;
     bool        gc_running;

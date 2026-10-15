@@ -108,6 +108,17 @@ then on its count is updated atomically. A value crosses when it is sent on a
 channel, passed to `go f(...)`, stored in a global, or captured by a closure a
 goroutine runs. Code that never shares a value never pays for atomics.
 
+Atomic counts keep objects alive, but they do not make **contents** safe to
+update from several goroutines at once. Two goroutines writing the same table,
+map or array without a lock is a data race. Writing a global from goroutines is
+one too: globals have no lock yet. Guard such state with `sync.mutex`, or keep
+it in one goroutine and talk to it over channels. Captured variables (upvalues)
+shared between goroutines are the exception: writing and closing one takes a
+per-upvalue spinlock (`sea_upvalue_lock`), and reads retry if the upvalue was
+closed under them (`sea_upvalue_get`, both in `sea_vm.h`), so a closure never
+sees a freed value. A read-modify-write
+such as `n = n + 1` is still two steps and needs a mutex to be atomic.
+
 ---
 
 ## How the VM keeps the counts right
@@ -187,6 +198,7 @@ into the closure's upvalue and clears the register.
 | `defer` | the entry retains the function; the arguments move into it; released after the deferred call |
 | `go f(...)` | the goroutine retains `f`; the arguments move into it; released when it finishes |
 | Open upvalues | the open list holds a reference, so a closure freed early cannot leave a dangling entry |
+| Parked native call | a native that returns `SEA_PARK_VAL` (netpoller) is re-run from the start on wake-up, so it must not have taken or released references before parking; its args stay in their registers until then |
 
 ---
 
@@ -203,6 +215,10 @@ C functions registered with `sea_vm_register_native` / `sea_mod_set`:
 - **`sea_vm_call(vm, fn, args, argc)`**: the arguments are borrowed, and the result is
   owned. Release it if you do not keep or return it.
 - **`sea_open`** returns the module table owned (as created by `sea_mod_new`).
+- **A native that parks** (returns `SEA_PARK_VAL` after `sea_io_wait`, see
+  `src/sea_netpoll.h`) is called again from the top when the goroutine wakes.
+  Allocate its result only after the last wait, and keep partial progress in
+  `vm->io_call`.
 
 ```c
 static SeaValue fn_first(SeaVM *vm, int argc, SeaValue *args) {

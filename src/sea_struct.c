@@ -1,4 +1,6 @@
 #include "sea_struct.h"
+#include "sea_string.h"
+#include <string.h>
 #include "sea_memory.h"
 
 static void val_retain(SeaValue v) {
@@ -101,46 +103,47 @@ void sea_struct_init_field_borrow(SeaStruct *s, SeaString *key, SeaValue v) {
         s->building_remaining = -1;
 }
 
+/* Field names are interned constants, so a constant key matches by pointer.
+ * A key built at run time (s[k] with k from string ops) is a different
+ * object with the same bytes: compare contents when the pointers miss. */
+static int struct_find(SeaStruct *s, SeaString *key) {
+    SeaString **names = sea_struct_names(s);
+    for (uint32_t i = 0; i < s->field_count; i++)
+        if (names[i] == key) return (int)i;
+    if (sea_string_is_interned(key)) return -1;   /* interned: pointer is identity */
+    for (uint32_t i = 0; i < s->field_count; i++)
+        if (names[i] && names[i]->len == key->len &&
+            memcmp(names[i]->data, key->data, key->len) == 0) return (int)i;
+    return -1;
+}
+
 SeaValue sea_struct_get(SeaStruct *s, SeaString *key) {
-    SeaString **names  = sea_struct_names(s);
-    SeaValue   *values = sea_struct_values(s);
-    for (uint32_t i = 0; i < s->field_count; i++) {
-        if (names[i] == key)
-            return values[i];
-    }
-    return SEA_NIL_VAL;
+    int i = struct_find(s, key);
+    return i >= 0 ? sea_struct_values(s)[i] : SEA_NIL_VAL;
 }
 
 bool sea_struct_set(SeaStruct *s, SeaString *key, SeaValue v) {
-    SeaString **names  = sea_struct_names(s);
-    SeaValue   *values = sea_struct_values(s);
-    for (uint32_t i = 0; i < s->field_count; i++) {
-        if (names[i] == key) {
-            sea_store_barrier(&s->obj, v);
-            SeaValue old = values[i];
-            val_retain(v);
-            values[i] = v;
-            val_release(old);   /* after the store (as SETLOCAL) */
-            return true;
-        }
-    }
-    return false;
+    int i = struct_find(s, key);
+    if (i < 0) return false;
+    SeaValue *values = sea_struct_values(s);
+    sea_store_barrier(&s->obj, v);
+    SeaValue old = values[i];
+    val_retain(v);
+    values[i] = v;
+    val_release(old);   /* after the store (as SETLOCAL) */
+    return true;
 }
 
 /* As sea_struct_set, taking over the caller's reference to v. */
 bool sea_struct_set_move(SeaStruct *s, SeaString *key, SeaValue v) {
-    SeaString **names  = sea_struct_names(s);
-    SeaValue   *values = sea_struct_values(s);
-    for (uint32_t i = 0; i < s->field_count; i++) {
-        if (names[i] == key) {
-            sea_store_barrier(&s->obj, v);
-            SeaValue old = values[i];
-            values[i] = v;
-            val_release(old);
-            return true;
-        }
-    }
-    return false;
+    int i = struct_find(s, key);
+    if (i < 0) return false;
+    SeaValue *values = sea_struct_values(s);
+    sea_store_barrier(&s->obj, v);
+    SeaValue old = values[i];
+    values[i] = v;
+    val_release(old);
+    return true;
 }
 
 bool sea_struct_next(SeaStruct *s, uint32_t *iter, SeaValue *k, SeaValue *v) {

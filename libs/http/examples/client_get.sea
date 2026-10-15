@@ -1,7 +1,7 @@
 -- client_get.sea — HTTP GET example
--- Usage: bin/sea run libs/http/examples/client_get.sea
+-- Usage: bin/sea libs/http/examples/client_get.sea
 
-local http = require("./libs/http/http")
+local http = require("../http")
 
 local url = "http://httpbin.org/get"
 

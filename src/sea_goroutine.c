@@ -32,6 +32,10 @@ SeaGoroutine* sea_goroutine_spawn(SeaVM *parent, SeaValue fn, SeaValue *args, in
     g->block_val         = SEA_NIL_VAL;
     g->has_pending_recv  = false;
     g->park_state        = GORO_PARK_RUNNING;
+    g->io_waiting        = false;
+    g->io_fd             = -1;
+    g->io_deadline       = 0;
+    g->io_heap           = -1;
 
     if (argc > 0) {
         g->args = SEA_ALLOC_N(SeaValue, argc);

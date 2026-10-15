@@ -12,7 +12,7 @@
 --   curl -k https://localhost:8443/ping
 --   curl -k -X POST -d '{"msg":"hello"}' https://localhost:8443/echo
 
-local http = require("./libs/http/http")
+local http = require("../http")
 
 local cert = os.args[1] or "cert.pem"
 local key  = os.args[2] or "key.pem"

@@ -1,410 +1,541 @@
 /*
- * libs/http/http_native.c — Sea HTTP library: TCP transport + HTTP parsers.
+ * libs/http/http_native.c — HTTP/1.1 parsing and encoding helpers for http.sea.
  *
- * TLS is handled by the ssl lib (libs/ssl/ssl_native.so); this module
- * provides only raw TCP and HTTP parsing consumed by http.sea.
- * Build:  cd libs/http && make
+ * Sockets come from the built-in `net` module and TLS from the ssl lib; this
+ * module only parses and encodes, strictly (RFC 9110/9112), so a malformed or
+ * ambiguous message is rejected rather than guessed at.
+ * Build:  make -C libs/http
  *
- * Module functions:
- *   tcp_connect(host, port [, timeout_ms]) → fd  or nil
- *   tcp_listen(port)                       → fd  or nil
- *   tcp_accept(fd)                         → cfd or nil
- *   net_read(fd)                           → string (reads until EOF)
- *   net_write(fd, data)                    → nil
- *   net_close(fd)                          → nil
- *   read_request(fd)                       → raw HTTP request string
- *   parse_response(raw)                    → table {status, ok, body, headers}
- *   parse_request(raw)                     → table {method, path, body, headers}
- *   url_decode(s)                          → percent-decoded string
+ *   parse_request_head(buf [, max])   → nil (incomplete) | head | {error=code, message}
+ *   parse_response_head(buf [, max])  → nil (incomplete) | head | {error=code, message}
+ *       head: {method, target, version | version, status, reason;
+ *              headers (lowercase names; repeats joined with ", ",
+ *              set-cookie with "\n"), head_len (bytes, incl. the blank line),
+ *              content_length (-1 if absent), chunked, keep_alive,
+ *              expect_continue}
+ *   chunked_scan(data [, max])  → bytes of a complete chunked body at the start
+ *                                 of data | 0 (incomplete) | -1 (malformed) |
+ *                                 -2 (larger than max)
+ *   chunked_decode(data)        → the decoded body (data holds a complete one)
+ *   url_decode(s [, plus])      → percent-decoded string ('+' → ' ' unless plus=false)
+ *   url_encode(s)               → percent-encoded (RFC 3986 unreserved kept)
+ *   http_date()                 → current date, IMF-fixdate ("Sun, 06 Nov 1994 08:49:37 GMT")
+ *   base64(s)                   → base64 encoding
+ *   monotonic_ms()              → monotonic clock, milliseconds
+ *   valid_token(s)              → true if s is an HTTP token (header name, method)
+ *   valid_field_value(s)        → true if s has no CR, LF or other control bytes
  */
 
 #include "sea.h"
 #include "sea_rope.h"
 
-#include <errno.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include <time.h>
 
-/* ---- Dynamic buffer ------------------------------------------------------- */
+/* ---- Small helpers -------------------------------------------------------- */
 
-typedef struct { char *data; size_t len; size_t cap; } Buf;
-
-static void buf_init(Buf *b) { b->data = NULL; b->len = 0; b->cap = 0; }
-static void buf_free(Buf *b) { free(b->data); buf_init(b); }
-
-static int buf_push(Buf *b, const char *s, size_t n) {
-    if (b->len + n + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap : 4096;
-        while (nc < b->len + n + 1) nc *= 2;
-        char *p = realloc(b->data, nc);
-        if (!p) return 0;
-        b->data = p; b->cap = nc;
-    }
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = '\0';
-    return 1;
-}
-
-static const char *mem_find4(const char *data, size_t len,
-                              char a, char b, char c, char d) {
-    if (len < 4) return NULL;
-    for (size_t i = 0; i <= len - 4; i++)
-        if (data[i]==a && data[i+1]==b && data[i+2]==c && data[i+3]==d)
-            return data + i;
-    return NULL;
-}
-
-/* ---- TCP helpers ---------------------------------------------------------- */
-
-static int do_tcp_connect(const char *host, const char *port, int timeout_ms) {
-    struct addrinfo hints = {0};
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res;
-    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
-    int fd = -1;
-    for (struct addrinfo *p = res; p; p = p->ai_next) {
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        if (timeout_ms > 0) {
-            struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000L };
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        }
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        close(fd); fd = -1;
-    }
-    freeaddrinfo(res);
-    return fd;
-}
-
-static int do_tcp_listen(int port) {
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
-    if (fd >= 0) {
-        int no6only = 0, reuse = 1;
-        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no6only, sizeof(no6only));
-        setsockopt(fd, SOL_SOCKET,   SO_REUSEADDR, &reuse,  sizeof(reuse));
-        struct sockaddr_in6 sa = {0};
-        sa.sin6_family = AF_INET6;
-        sa.sin6_addr   = in6addr_any;
-        sa.sin6_port   = htons((uint16_t)port);
-        if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 &&
-            listen(fd, 128) == 0)
-            return fd;
-        close(fd); fd = -1;
-    }
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int reuse = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    struct sockaddr_in sa4 = {0};
-    sa4.sin_family      = AF_INET;
-    sa4.sin_addr.s_addr = INADDR_ANY;
-    sa4.sin_port        = htons((uint16_t)port);
-    if (bind(fd, (struct sockaddr*)&sa4, sizeof(sa4)) < 0 ||
-        listen(fd, 128) < 0) {
-        close(fd); return -1;
-    }
-    return fd;
-}
-
-/* ---- Sea string/table helpers --------------------------------------------- */
-
-static void tbl_set_str(SeaTable *t, const char *key,
-                        const char *data, size_t len) {
-    SeaString *s = sea_string_intern(data, len);
+static void tbl_set_buf(SeaTable *t, const char *key, const char *data, size_t len) {
+    SeaString *s = sea_string_new(data, len);
     sea_table_set_str(t, key, sea_obj_val(&s->obj));
     sea_obj_release(&s->obj);
 }
 
-/* ---- HTTP parsers (keep in C: performance-critical, binary-safe) ---------- */
-
-static SeaValue do_parse_response(const char *data, size_t len) {
-    SeaTable *t    = sea_table_new(TABLE_MAP);
-    SeaTable *hdrs = sea_table_new(TABLE_MAP);
-    const char *p = data, *end = data + len;
-
-    int code = 0;
-    const char *sp = memchr(p, ' ', (size_t)(end - p));
-    if (sp && sp + 4 <= end) code = (int)strtol(sp + 1, NULL, 10);
-    sea_table_set_str(t, "status", sea_int_val(code));
-    sea_table_set_str(t, "ok",     sea_bool_val(code >= 200 && code < 300));
-
-    const char *nl = mem_find4(p, (size_t)(end - p), '\r', '\n', 0, 0);
-    if (!nl) nl = memchr(p, '\n', (size_t)(end - p));
-    p = nl ? nl + (nl[1] == '\n' ? 2 : 1) : end;
-
-    while (p < end) {
-        if (p[0] == '\r' || p[0] == '\n') {
-            p += (p[0] == '\r' && p + 1 < end && p[1] == '\n') ? 2 : 1;
-            break;
-        }
-        const char *colon = memchr(p, ':', (size_t)(end - p));
-        const char *eol   = mem_find4(p, (size_t)(end - p), '\r', '\n', 0, 0);
-        if (!eol) eol = memchr(p, '\n', (size_t)(end - p));
-        if (!eol) eol = end;
-        const char *next = eol + (eol < end && eol[0] == '\r' ? 2 : 1);
-        if (colon && colon < eol) {
-            size_t klen = (size_t)(colon - p);
-            char key[256];
-            if (klen < sizeof(key)) {
-                memcpy(key, p, klen); key[klen] = '\0';
-                for (size_t i = 0; i < klen; i++)
-                    key[i] = (char)(key[i] >= 'A' && key[i] <= 'Z'
-                                    ? key[i] | 0x20 : key[i]);
-                const char *vs = colon + 1;
-                while (vs < eol && (*vs == ' ' || *vs == '\t')) vs++;
-                size_t vlen = (size_t)(eol - vs);
-                while (vlen && (vs[vlen-1] == ' ' || vs[vlen-1] == '\r')) vlen--;
-                tbl_set_str(hdrs, key, vs, vlen);
-            }
-        }
-        p = next;
-    }
-    sea_table_set_str(t, "headers", sea_obj_val(&hdrs->obj));
-    sea_obj_release(&hdrs->obj);
-    tbl_set_str(t, "body", p, (size_t)(end - p));
+static SeaValue error_tbl(int code, const char *msg) {
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    sea_table_set_str(t, "error", sea_int_val(code));
+    tbl_set_buf(t, "message", msg, strlen(msg));
     return sea_obj_val(&t->obj);
 }
 
-static SeaValue do_parse_request(const char *data, size_t len) {
-    SeaTable *t    = sea_table_new(TABLE_MAP);
-    SeaTable *hdrs = sea_table_new(TABLE_MAP);
-    const char *p = data, *end = data + len;
+/* tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+ *         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA */
+static bool is_tchar(unsigned char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return true;
+    return c && strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
 
-    const char *sp1  = memchr(p, ' ', (size_t)(end - p));
-    const char *eol1 = mem_find4(p, (size_t)(end - p), '\r', '\n', 0, 0);
-    if (!eol1) eol1 = memchr(p, '\n', (size_t)(end - p));
-    if (!eol1) eol1 = end;
+static bool is_token(const char *s, size_t n) {
+    if (n == 0) return false;
+    for (size_t i = 0; i < n; i++) if (!is_tchar((unsigned char)s[i])) return false;
+    return true;
+}
 
-    if (sp1 && sp1 < eol1) {
-        tbl_set_str(t, "method", p, (size_t)(sp1 - p));
-        p = sp1 + 1;
-        const char *sp2 = memchr(p, ' ', (size_t)(eol1 - p));
-        if (!sp2) sp2 = eol1;
-        tbl_set_str(t, "path", p, (size_t)(sp2 - p));
-    } else {
-        tbl_set_str(t, "method", "UNKNOWN", 7);
-        tbl_set_str(t, "path",   "/",       1);
+/* field-value bytes: VCHAR, obs-text, SP, HTAB — no CR/LF/other controls */
+static bool is_field_value(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
     }
-    p = eol1 + (eol1 < end && eol1[0] == '\r' ? 2 : 1);
+    return true;
+}
 
+static SeaString *arg_str(int argc, SeaValue *args, int i) {
+    return argc > i ? sea_value_get_flat_string(args[i]) : NULL;
+}
+
+/* Find the end of the head: offset just past the blank line (CRLFCRLF or
+ * LFLF), or 0 if not there yet. */
+static size_t head_end(const char *d, size_t n) {
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (d[i] != '\n') continue;
+        if (d[i + 1] == '\n') return i + 2;
+        if (d[i + 1] == '\r' && i + 2 < n && d[i + 2] == '\n') return i + 3;
+    }
+    return 0;
+}
+
+/* Next line in [p, end): returns its length without CR/LF and sets *next. */
+static size_t next_line(const char *p, const char *end, const char **next) {
+    const char *nl = memchr(p, '\n', (size_t)(end - p));
+    if (!nl) { *next = end; return (size_t)(end - p); }
+    *next = nl + 1;
+    size_t len = (size_t)(nl - p);
+    if (len && p[len - 1] == '\r') len--;
+    return len;
+}
+
+/* Header block → table + framing facts. Returns 0 or an HTTP error code
+ * with *msg set. */
+typedef struct {
+    int64_t content_length;   /* -1 = none */
+    bool    chunked, has_te;
+    bool    conn_close, conn_keep_alive;
+    bool    expect_continue;
+} Framing;
+
+static int parse_headers(const char *p, const char *end, SeaTable *hdrs, Framing *f, const char **msg) {
+    f->content_length = -1;
     while (p < end) {
-        if (p[0] == '\r' || p[0] == '\n') {
-            p += (p[0] == '\r' && p + 1 < end && p[1] == '\n') ? 2 : 1;
-            break;
+        const char *next;
+        size_t len = next_line(p, end, &next);
+        if (len == 0) break;                         /* the blank line */
+        if (p[0] == ' ' || p[0] == '\t') { *msg = "obsolete header line folding"; return 400; }
+        const char *colon = memchr(p, ':', len);
+        if (!colon || !is_token(p, (size_t)(colon - p))) { *msg = "malformed header line"; return 400; }
+        size_t klen = (size_t)(colon - p);
+        if (klen > 255) { *msg = "header name too long"; return 431; }
+        char key[256];
+        for (size_t i = 0; i < klen; i++) {
+            char c = p[i];
+            key[i] = (c >= 'A' && c <= 'Z') ? (char)(c | 0x20) : c;
         }
-        const char *colon = memchr(p, ':', (size_t)(end - p));
-        const char *eol   = mem_find4(p, (size_t)(end - p), '\r', '\n', 0, 0);
-        if (!eol) eol = memchr(p, '\n', (size_t)(end - p));
-        if (!eol) eol = end;
-        const char *next = eol + (eol < end && eol[0] == '\r' ? 2 : 1);
-        if (colon && colon < eol) {
-            size_t klen = (size_t)(colon - p);
-            char key[256];
-            if (klen < sizeof(key)) {
-                memcpy(key, p, klen); key[klen] = '\0';
-                for (size_t i = 0; i < klen; i++)
-                    key[i] = (char)(key[i] >= 'A' && key[i] <= 'Z'
-                                    ? key[i] | 0x20 : key[i]);
-                const char *vs = colon + 1;
-                while (vs < eol && (*vs == ' ' || *vs == '\t')) vs++;
-                size_t vlen = (size_t)(eol - vs);
-                while (vlen && (vs[vlen-1] == ' ' || vs[vlen-1] == '\r')) vlen--;
-                tbl_set_str(hdrs, key, vs, vlen);
+        key[klen] = '\0';
+        const char *vs = colon + 1, *ve = p + len;
+        while (vs < ve && (*vs == ' ' || *vs == '\t')) vs++;
+        while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+        size_t vlen = (size_t)(ve - vs);
+        if (!is_field_value(vs, vlen)) { *msg = "invalid byte in header value"; return 400; }
+
+        if (!strcmp(key, "content-length")) {
+            if (vlen == 0 || vlen > 18) { *msg = "invalid Content-Length"; return 400; }
+            int64_t v = 0;
+            for (size_t i = 0; i < vlen; i++) {
+                if (vs[i] < '0' || vs[i] > '9') { *msg = "invalid Content-Length"; return 400; }
+                v = v * 10 + (vs[i] - '0');
             }
+            if (f->content_length >= 0 && f->content_length != v) {
+                *msg = "conflicting Content-Length headers"; return 400;
+            }
+            f->content_length = v;
+        } else if (!strcmp(key, "transfer-encoding")) {
+            if (f->has_te || vlen != 7 || strncasecmp(vs, "chunked", 7) != 0) {
+                *msg = "unsupported Transfer-Encoding"; return 501;
+            }
+            f->has_te = f->chunked = true;
+        } else if (!strcmp(key, "connection")) {
+            /* comma-separated options */
+            const char *q = vs;
+            while (q < ve) {
+                const char *c = memchr(q, ',', (size_t)(ve - q));
+                const char *oe = c ? c : ve;
+                while (q < oe && (*q == ' ' || *q == '\t')) q++;
+                const char *te = oe;
+                while (te > q && (te[-1] == ' ' || te[-1] == '\t')) te--;
+                size_t ol = (size_t)(te - q);
+                if (ol == 5 && !strncasecmp(q, "close", 5)) f->conn_close = true;
+                if (ol == 10 && !strncasecmp(q, "keep-alive", 10)) f->conn_keep_alive = true;
+                q = c ? c + 1 : ve;
+            }
+        } else if (!strcmp(key, "expect")) {
+            if (vlen == 12 && !strncasecmp(vs, "100-continue", 12)) f->expect_continue = true;
+        }
+
+        /* store: repeats are joined (", "; set-cookie keeps one per line) */
+        SeaValue old;
+        if (sea_table_get_str(hdrs, key, &old) && sea_is_string(old)) {
+            SeaString *os = SEA_AS_STRING(old);
+            const char *sep = strcmp(key, "set-cookie") ? ", " : "\n";
+            size_t sl = strlen(sep);
+            size_t total = os->len + sl + vlen;
+            char *buf = malloc(total);
+            if (!buf) { *msg = "out of memory"; return 500; }
+            memcpy(buf, os->data, os->len);
+            memcpy(buf + os->len, sep, sl);
+            memcpy(buf + os->len + sl, vs, vlen);
+            tbl_set_buf(hdrs, key, buf, total);
+            free(buf);
+        } else {
+            tbl_set_buf(hdrs, key, vs, vlen);
         }
         p = next;
     }
-    sea_table_set_str(t, "headers", sea_obj_val(&hdrs->obj));
-    sea_obj_release(&hdrs->obj);
-    tbl_set_str(t, "body", p, (size_t)(end > p ? end - p : 0));
-    return sea_obj_val(&t->obj);
-}
-
-/* Two-phase read: headers first, then body based on Content-Length. */
-static Buf read_http_request_buf(int fd) {
-    Buf buf; buf_init(&buf);
-    char tmp[8192];
-    while (buf.len < (1u << 20)) {
-        ssize_t n = read(fd, tmp, sizeof(tmp));
-        if (n <= 0) break;
-        buf_push(&buf, tmp, (size_t)n);
-        const char *hdr_end = mem_find4(buf.data, buf.len, '\r','\n','\r','\n');
-        if (!hdr_end) continue;
-        size_t body_start = (size_t)(hdr_end - buf.data) + 4;
-        size_t body_have  = buf.len - body_start;
-        size_t body_need  = 0;
-        for (const char *scan = buf.data; scan < hdr_end; ) {
-            size_t rem = (size_t)(hdr_end - scan);
-            if (rem >= 15 && strncasecmp(scan, "content-length:", 15) == 0) {
-                const char *v = scan + 15;
-                while (v < hdr_end && (*v == ' ' || *v == '\t')) v++;
-                body_need = (size_t)strtoul(v, NULL, 10);
-                break;
-            }
-            const char *nl = mem_find4(scan, rem, '\r','\n',0,0);
-            if (!nl) nl = memchr(scan, '\n', rem);
-            if (!nl) break;
-            scan = nl + (nl[1] == '\n' ? 2 : 1);
-        }
-        while (body_have < body_need) {
-            size_t want = body_need - body_have;
-            ssize_t m = read(fd, tmp, want < sizeof(tmp) ? want : sizeof(tmp));
-            if (m <= 0) break;
-            buf_push(&buf, tmp, (size_t)m);
-            body_have += (size_t)m;
-        }
-        break;
+    if (f->chunked && f->content_length >= 0) {
+        *msg = "both Content-Length and Transfer-Encoding";   /* request smuggling */
+        return 400;
     }
-    return buf;
+    return 0;
 }
 
-/* ---- Exported Sea functions ----------------------------------------------- */
+static void set_framing(SeaTable *t, const Framing *f, bool keep_alive) {
+    sea_table_set_str(t, "content_length", sea_int_val(f->content_length));
+    sea_table_set_str(t, "chunked", sea_bool_val(f->chunked));
+    sea_table_set_str(t, "keep_alive", sea_bool_val(keep_alive));
+    sea_table_set_str(t, "expect_continue", sea_bool_val(f->expect_continue));
+}
 
-static SeaValue fn_tcp_connect(SeaVM *vm, int argc, SeaValue *args) {
+static int64_t opt_max(int argc, SeaValue *args, int i, int64_t def) {
+    if (argc > i && sea_is_int(args[i]) && sea_as_int(args[i]) > 0) return sea_as_int(args[i]);
+    return def;
+}
+
+/* ---- Heads ---------------------------------------------------------------- */
+
+static SeaValue fn_parse_request_head(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    if (argc < 2) return SEA_NIL_VAL;
-    SeaString *host = sea_value_get_flat_string(args[0]);
-    SeaString *port = sea_value_get_flat_string(args[1]);
-    if (!host || !port) { if (host) sea_obj_release(&host->obj); if (port) sea_obj_release(&port->obj); return SEA_NIL_VAL; }
-    int timeout_ms = 0;
-    if (argc >= 3 && sea_is_int(args[2]))
-        timeout_ms = (int)sea_as_int(args[2]);
-    int fd = do_tcp_connect(host->data, port->data, timeout_ms);
-    sea_obj_release(&host->obj);
-    sea_obj_release(&port->obj);
-    return fd >= 0 ? sea_int_val(fd) : SEA_NIL_VAL;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return error_tbl(400, "no data");
+    int64_t max = opt_max(argc, args, 1, 65536);
+    const char *d = s->data;
+    size_t n = s->len;
+    /* tolerate empty lines before the request line (RFC 9112 2.2) */
+    size_t skip = 0;
+    while (skip < n && (d[skip] == '\r' || d[skip] == '\n')) skip++;
+    size_t he = head_end(d + skip, n - skip);
+    SeaValue result;
+    if (!he) {
+        result = (int64_t)(n - skip) > max ? error_tbl(431, "request header too large") : SEA_NIL_VAL;
+        sea_obj_release(&s->obj);
+        return result;
+    }
+    if ((int64_t)he > max) { sea_obj_release(&s->obj); return error_tbl(431, "request header too large"); }
+
+    const char *p = d + skip, *end = d + skip + he, *next;
+    size_t ll = next_line(p, end, &next);
+    const char *sp1 = memchr(p, ' ', ll);
+    const char *sp2 = sp1 ? memchr(sp1 + 1, ' ', ll - (size_t)(sp1 + 1 - p)) : NULL;
+    if (!sp1 || !sp2 || !is_token(p, (size_t)(sp1 - p))) {
+        sea_obj_release(&s->obj);
+        return error_tbl(400, "malformed request line");
+    }
+    const char *tg = sp1 + 1;
+    size_t tl = (size_t)(sp2 - tg);
+    const char *ver = sp2 + 1;
+    size_t vl = ll - (size_t)(ver - p);
+    if (tl == 0 || !is_field_value(tg, tl) || memchr(tg, ' ', tl) || memchr(tg, '\t', tl)) {
+        sea_obj_release(&s->obj);
+        return error_tbl(400, "malformed request target");
+    }
+    if (vl != 8 || strncmp(ver, "HTTP/1.", 7) != 0 || (ver[7] != '0' && ver[7] != '1')) {
+        sea_obj_release(&s->obj);
+        return error_tbl(505, "HTTP version not supported");
+    }
+    bool http11 = ver[7] == '1';
+
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    SeaTable *hdrs = sea_table_new(TABLE_MAP);
+    Framing f = {0};
+    const char *msg = NULL;
+    int code = parse_headers(next, end, hdrs, &f, &msg);
+    if (code) {
+        sea_obj_release(&hdrs->obj);
+        sea_obj_release(&t->obj);
+        sea_obj_release(&s->obj);
+        return error_tbl(code, msg);
+    }
+    tbl_set_buf(t, "method", p, (size_t)(sp1 - p));
+    tbl_set_buf(t, "target", tg, tl);
+    tbl_set_buf(t, "version", ver, vl);
+    sea_table_set_str(t, "headers", sea_obj_val(&hdrs->obj));
+    sea_obj_release(&hdrs->obj);
+    sea_table_set_str(t, "head_len", sea_int_val((int64_t)(skip + he)));
+    bool ka = http11 ? !f.conn_close : (f.conn_keep_alive && !f.conn_close);
+    set_framing(t, &f, ka);
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&t->obj);
+}
+
+static SeaValue fn_parse_response_head(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return error_tbl(502, "no data");
+    int64_t max = opt_max(argc, args, 1, 1 << 20);
+    size_t he = head_end(s->data, s->len);
+    if (!he) {
+        SeaValue r = (int64_t)s->len > max ? error_tbl(502, "response header too large") : SEA_NIL_VAL;
+        sea_obj_release(&s->obj);
+        return r;
+    }
+    const char *p = s->data, *end = s->data + he, *next;
+    size_t ll = next_line(p, end, &next);
+    /* HTTP/1.x SP 3DIGIT [SP reason] */
+    if (ll < 12 || strncmp(p, "HTTP/1.", 7) != 0 || p[8] != ' ' ||
+        p[9] < '1' || p[9] > '5' || p[10] < '0' || p[10] > '9' || p[11] < '0' || p[11] > '9' ||
+        (ll > 12 && p[12] != ' ')) {
+        sea_obj_release(&s->obj);
+        return error_tbl(502, "malformed status line");
+    }
+    int status = (p[9] - '0') * 100 + (p[10] - '0') * 10 + (p[11] - '0');
+    bool http11 = p[7] == '1';
+
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    SeaTable *hdrs = sea_table_new(TABLE_MAP);
+    Framing f = {0};
+    const char *msg = NULL;
+    int code = parse_headers(next, end, hdrs, &f, &msg);
+    if (code) {
+        sea_obj_release(&hdrs->obj);
+        sea_obj_release(&t->obj);
+        sea_obj_release(&s->obj);
+        return error_tbl(502, msg);
+    }
+    tbl_set_buf(t, "version", p, 8);
+    sea_table_set_str(t, "status", sea_int_val(status));
+    tbl_set_buf(t, "reason", ll > 13 ? p + 13 : "", ll > 13 ? ll - 13 : 0);
+    sea_table_set_str(t, "headers", sea_obj_val(&hdrs->obj));
+    sea_obj_release(&hdrs->obj);
+    sea_table_set_str(t, "head_len", sea_int_val((int64_t)he));
+    bool ka = http11 ? !f.conn_close : (f.conn_keep_alive && !f.conn_close);
+    set_framing(t, &f, ka);
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&t->obj);
+}
+
+/* ---- Chunked transfer coding ---------------------------------------------- */
+
+/* Walk a chunked body at d[0..n): returns the bytes it occupies if complete,
+ * 0 if more data is needed, -1 if malformed, -2 if the decoded size > max.
+ * If out != NULL, appends the chunk data to it (decode pass). */
+typedef struct { char *data; size_t len, cap; } Out;
+
+static int out_push(Out *o, const char *s, size_t n) {
+    if (o->len + n > o->cap) {
+        size_t nc = o->cap ? o->cap * 2 : 4096;
+        while (nc < o->len + n) nc *= 2;
+        char *p = realloc(o->data, nc);
+        if (!p) return 0;
+        o->data = p; o->cap = nc;
+    }
+    memcpy(o->data + o->len, s, n);
+    o->len += n;
+    return 1;
+}
+
+static int64_t chunked_walk(const char *d, size_t n, int64_t max, Out *out) {
+    size_t pos = 0;
+    int64_t total = 0;
+    for (;;) {
+        /* chunk-size [ ; extensions ] CRLF */
+        const char *nl = memchr(d + pos, '\n', n - pos);
+        if (!nl) return (n - pos) > 1024 ? -1 : 0;
+        size_t line_end = (size_t)(nl - d);
+        size_t i = pos;
+        int64_t size = 0;
+        int digits = 0;
+        while (i < line_end) {
+            char c = d[i];
+            int v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+                    (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (v < 0) break;
+            if (++digits > 15) return -1;
+            size = size * 16 + v;
+            i++;
+        }
+        if (digits == 0) return -1;
+        while (i < line_end && (d[i] == ' ' || d[i] == '\t')) i++;
+        if (i < line_end && d[i] != ';' && !(d[i] == '\r' && i + 1 == line_end)) return -1;
+        pos = line_end + 1;
+        if (size == 0) {
+            /* trailer fields until an empty line */
+            for (;;) {
+                const char *tl = memchr(d + pos, '\n', n - pos);
+                if (!tl) return (n - pos) > 8192 ? -1 : 0;
+                size_t len = (size_t)(tl - (d + pos));
+                if (len && d[pos + len - 1] == '\r') len--;
+                pos = (size_t)(tl - d) + 1;
+                if (len == 0) return (int64_t)pos;
+            }
+        }
+        total += size;
+        if (total > max) return -2;
+        if ((int64_t)(n - pos) < size + 1) return 0;   /* data + LF at least */
+        if (out && !out_push(out, d + pos, (size_t)size)) return -1;
+        pos += (size_t)size;
+        if (d[pos] == '\r') {
+            if (pos + 1 >= n) return 0;
+            pos++;
+        }
+        if (d[pos] != '\n') return -1;
+        pos++;
+    }
+}
+
+static SeaValue fn_chunked_scan(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return sea_int_val(-1);
+    int64_t r = chunked_walk(s->data, s->len, opt_max(argc, args, 1, INT64_MAX / 2), NULL);
+    sea_obj_release(&s->obj);
+    return sea_int_val(r);
+}
+
+static SeaValue fn_chunked_decode(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return SEA_NIL_VAL;
+    Out o = {0};
+    int64_t r = chunked_walk(s->data, s->len, INT64_MAX / 2, &o);
+    sea_obj_release(&s->obj);
+    SeaValue v = r > 0 ? sea_obj_val(&sea_string_new(o.data ? o.data : "", o.len)->obj) : SEA_NIL_VAL;
+    free(o.data);
+    return v;
+}
+
+/* ---- Encoding helpers ----------------------------------------------------- */
+
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
 static SeaValue fn_url_decode(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    if (argc < 1) return SEA_NIL_VAL;
-    SeaString *s = sea_value_get_flat_string(args[0]);
+    SeaString *s = arg_str(argc, args, 0);
     if (!s) return SEA_NIL_VAL;
-    const char *in  = s->data;
-    size_t      n   = s->len;
-    char       *out = (char*)malloc(n + 1);
+    bool plus = !(argc > 1 && sea_is_bool(args[1]) && !sea_as_bool(args[1]));
+    char *out = malloc(s->len + 1);
     if (!out) { sea_obj_release(&s->obj); return SEA_NIL_VAL; }
-    size_t outlen = 0;
-    for (size_t i = 0; i < n; ) {
-        if (in[i] == '%' && i + 2 < n) {
-            char hex[3] = { in[i+1], in[i+2], '\0' };
-            char *end;
-            long v = strtol(hex, &end, 16);
-            if (end == hex + 2) { out[outlen++] = (char)v; i += 3; continue; }
+    size_t o = 0;
+    for (size_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        if (c == '%' && i + 2 < s->len &&
+            hexval(s->data[i + 1]) >= 0 && hexval(s->data[i + 2]) >= 0) {
+            out[o++] = (char)(hexval(s->data[i + 1]) * 16 + hexval(s->data[i + 2]));
+            i += 2;
+        } else {
+            out[o++] = (plus && c == '+') ? ' ' : c;
         }
-        out[outlen++] = (in[i] == '+') ? ' ' : in[i];
-        i++;
     }
-    out[outlen] = '\0';
     sea_obj_release(&s->obj);
-    SeaValue r = sea_obj_val(&sea_string_new(out, outlen)->obj);
+    SeaValue r = sea_obj_val(&sea_string_new(out, o)->obj);
     free(out);
     return r;
 }
 
-static SeaValue fn_tcp_listen(SeaVM *vm, int argc, SeaValue *args) {
+static SeaValue fn_url_encode(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    if (argc < 1) return SEA_NIL_VAL;
-    int port = sea_is_int(args[0]) ? (int)sea_as_int(args[0])
-                                   : (int)sea_as_number(args[0]);
-    signal(SIGPIPE, SIG_IGN);
-    int fd = do_tcp_listen(port);
-    return fd >= 0 ? sea_int_val(fd) : SEA_NIL_VAL;
-}
-
-static SeaValue fn_tcp_accept(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
-    struct sockaddr_storage sa; socklen_t sl = sizeof(sa);
-    int cfd = accept((int)sea_as_int(args[0]), (struct sockaddr*)&sa, &sl);
-    return cfd >= 0 ? sea_int_val(cfd) : SEA_NIL_VAL;
-}
-
-static SeaValue fn_net_read(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
-    int fd = (int)sea_as_int(args[0]);
-    Buf b; buf_init(&b);
-    char tmp[8192]; ssize_t n;
-    while ((n = read(fd, tmp, sizeof(tmp))) > 0)
-        buf_push(&b, tmp, (size_t)n);
-    SeaValue r = sea_obj_val(&sea_string_new(b.data ? b.data : "", b.len)->obj);
-    buf_free(&b);
-    return r;
-}
-
-static SeaValue fn_net_write(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
-    SeaString *str = sea_value_get_flat_string(args[1]);
-    if (!str) return SEA_NIL_VAL;
-    int fd = (int)sea_as_int(args[0]);
-    const char *data = str->data;
-    size_t len = str->len;
-    for (size_t sent = 0; sent < len; ) {
-        ssize_t n = write(fd, data + sent, len - sent);
-        if (n <= 0) break;
-        sent += (size_t)n;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) {
+        if (argc > 0 && (sea_is_int(args[0]) || sea_is_number(args[0]))) {
+            SeaString *t = sea_vm_tostring(vm, args[0]);
+            return sea_obj_val(&t->obj);
+        }
+        return SEA_NIL_VAL;
     }
-    sea_obj_release(&str->obj);
-    return SEA_NIL_VAL;
-}
-
-static SeaValue fn_net_close(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc >= 1 && sea_is_int(args[0]))
-        close((int)sea_as_int(args[0]));
-    return SEA_NIL_VAL;
-}
-
-static SeaValue fn_read_request(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
-    Buf buf = read_http_request_buf((int)sea_as_int(args[0]));
-    SeaValue r = sea_obj_val(&sea_string_new(buf.data ? buf.data : "", buf.len)->obj);
-    buf_free(&buf);
-    return r;
-}
-
-static SeaValue fn_parse_response(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
-    SeaString *str = argc >= 1 ? sea_value_get_flat_string(args[0]) : NULL;
-    if (!str) {
-        SeaTable *t = sea_table_new(TABLE_MAP);
-        SeaTable *h = sea_table_new(TABLE_MAP);
-        sea_table_set_str(t, "status", sea_int_val(0));
-        sea_table_set_str(t, "ok",     sea_bool_val(false));
-        tbl_set_str(t, "body",  "", 0);
-        tbl_set_str(t, "error", "empty response", 14);
-        sea_table_set_str(t, "headers", sea_obj_val(&h->obj));
-        sea_obj_release(&h->obj);
-        return sea_obj_val(&t->obj);
+    static const char hx[] = "0123456789ABCDEF";
+    char *out = malloc(s->len * 3 + 1);
+    if (!out) { sea_obj_release(&s->obj); return SEA_NIL_VAL; }
+    size_t o = 0;
+    for (size_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        } else {
+            out[o++] = '%';
+            out[o++] = hx[c >> 4];
+            out[o++] = hx[c & 15];
+        }
     }
-    SeaValue r = do_parse_response(str->data, str->len);
-    sea_obj_release(&str->obj);
+    sea_obj_release(&s->obj);
+    SeaValue r = sea_obj_val(&sea_string_new(out, o)->obj);
+    free(out);
     return r;
 }
 
-static SeaValue fn_parse_request(SeaVM *vm, int argc, SeaValue *args) {
+static SeaValue fn_http_date(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm; (void)argc; (void)args;
+    char buf[64];
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    static const char *days[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *mons[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    snprintf(buf, sizeof buf, "%s, %02d %s %04d %02d:%02d:%02d GMT",
+             days[tm.tm_wday], tm.tm_mday, mons[tm.tm_mon], tm.tm_year + 1900,
+             tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return sea_obj_val(&sea_string_from_cstr(buf)->obj);
+}
+
+static SeaValue fn_base64(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    if (argc < 1) return SEA_NIL_VAL;
-    SeaString *str = sea_value_get_flat_string(args[0]);
-    if (!str) return SEA_NIL_VAL;
-    SeaValue r = do_parse_request(str->data, str->len);
-    sea_obj_release(&str->obj);
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return SEA_NIL_VAL;
+    static const char tb[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t n = s->len, olen = 4 * ((n + 2) / 3);
+    char *out = malloc(olen + 1);
+    if (!out) { sea_obj_release(&s->obj); return SEA_NIL_VAL; }
+    const unsigned char *d = (const unsigned char*)s->data;
+    size_t o = 0, i = 0;
+    for (; i + 2 < n; i += 3) {
+        out[o++] = tb[d[i] >> 2];
+        out[o++] = tb[((d[i] & 3) << 4) | (d[i + 1] >> 4)];
+        out[o++] = tb[((d[i + 1] & 15) << 2) | (d[i + 2] >> 6)];
+        out[o++] = tb[d[i + 2] & 63];
+    }
+    if (i < n) {
+        out[o++] = tb[d[i] >> 2];
+        if (i + 1 < n) {
+            out[o++] = tb[((d[i] & 3) << 4) | (d[i + 1] >> 4)];
+            out[o++] = tb[(d[i + 1] & 15) << 2];
+        } else {
+            out[o++] = tb[(d[i] & 3) << 4];
+            out[o++] = '=';
+        }
+        out[o++] = '=';
+    }
+    sea_obj_release(&s->obj);
+    SeaValue r = sea_obj_val(&sea_string_new(out, o)->obj);
+    free(out);
     return r;
+}
+
+static SeaValue fn_monotonic_ms(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm; (void)argc; (void)args;
+    return sea_int_val(sea_now_ms());
+}
+
+static SeaValue fn_valid_token(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return SEA_FALSE_VAL;
+    bool ok = is_token(s->data, s->len);
+    sea_obj_release(&s->obj);
+    return sea_bool_val(ok);
+}
+
+static SeaValue fn_valid_field_value(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    SeaString *s = arg_str(argc, args, 0);
+    if (!s) return SEA_FALSE_VAL;
+    bool ok = is_field_value(s->data, s->len);
+    sea_obj_release(&s->obj);
+    return sea_bool_val(ok);
 }
 
 /* ---- Module entry point --------------------------------------------------- */
@@ -412,15 +543,16 @@ static SeaValue fn_parse_request(SeaVM *vm, int argc, SeaValue *args) {
 SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     (void)vm;
     SeaTable *mod = sea_mod_new();
-    sea_mod_set(mod, "tcp_connect",    fn_tcp_connect);
-    sea_mod_set(mod, "tcp_listen",     fn_tcp_listen);
-    sea_mod_set(mod, "tcp_accept",     fn_tcp_accept);
-    sea_mod_set(mod, "net_read",       fn_net_read);
-    sea_mod_set(mod, "net_write",      fn_net_write);
-    sea_mod_set(mod, "net_close",      fn_net_close);
-    sea_mod_set(mod, "read_request",   fn_read_request);
-    sea_mod_set(mod, "parse_response", fn_parse_response);
-    sea_mod_set(mod, "parse_request",  fn_parse_request);
-    sea_mod_set(mod, "url_decode",     fn_url_decode);
+    sea_mod_set(mod, "parse_request_head",  fn_parse_request_head);
+    sea_mod_set(mod, "parse_response_head", fn_parse_response_head);
+    sea_mod_set(mod, "chunked_scan",        fn_chunked_scan);
+    sea_mod_set(mod, "chunked_decode",      fn_chunked_decode);
+    sea_mod_set(mod, "url_decode",          fn_url_decode);
+    sea_mod_set(mod, "url_encode",          fn_url_encode);
+    sea_mod_set(mod, "http_date",           fn_http_date);
+    sea_mod_set(mod, "base64",              fn_base64);
+    sea_mod_set(mod, "monotonic_ms",        fn_monotonic_ms);
+    sea_mod_set(mod, "valid_token",         fn_valid_token);
+    sea_mod_set(mod, "valid_field_value",   fn_valid_field_value);
     return sea_obj_val(&mod->obj);
 }

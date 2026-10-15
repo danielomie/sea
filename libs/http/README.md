@@ -1,124 +1,110 @@
 # libs/http
 
-HTTP and HTTPS client + HTTP server for Sea.
-
-The library is split into two layers:
+HTTP/1.1 client and server for Sea, with HTTPS through `libs/ssl`.
 
 | Layer | File | Role |
 |-------|------|------|
-| Transport | `http_native.c` → `http_native.so` | TCP/TLS sockets, HTTP parsing (C) |
-| Logic | `http.sea` | URL parsing, request building, public API (Sea) |
+| Sockets | built-in `net` module | Non-blocking TCP: a wait parks only its goroutine (netpoller) |
+| TLS | `libs/ssl` | OpenSSL over `net` sockets |
+| Parsing | `http_native.c` → `http_native.so` | Strict request/response head parsers, chunked coding, URL coding, dates (C, no OpenSSL) |
+| API | `http.sea` | Client (pool, redirects), server (keep-alive, limits), router, helpers |
 
-`require("./libs/http/http")` loads `http.sea` first; `http.sea` then loads
-`http_native` (resolves to `http_native.so` in the same directory).
+The full reference (every function, option and field) is in
+[docs/libs.md](../../docs/libs.md#http).
 
 ## Build
 
 ```sh
-cd libs/http
-make          # produces http_native.so
+make -C libs/http     # http_native.so
+make -C libs/ssl      # needed for https:// and the tls option (OpenSSL 3 headers)
+make -C libs/json     # needed for http.json, opts.json and req:json()
 ```
 
-Requires OpenSSL 3.x headers and libraries (`libssl-dev` / `openssl-devel`).
+`require` paths are relative to the requiring file, e.g.
+`require("../../libs/http/http")` from `examples/<name>/`.
 
-## Client API
-
-### `http.get(url) → response`
+## Client
 
 ```sea
-local http = require("./libs/http/http")
-local r = http.get("https://example.com/api")
-print(r.status, r.ok)
-print(r.body)
+local http = require("../http")
+
+local r = http.get("https://api.example.com/items", {
+    query = { page = 2 }, timeout = 5000,
+    headers = { ["Authorization"] = "Bearer TOKEN" },
+})
+if r.ok then
+    print(r:json().total)
+else
+    print("failed:", r.status, r.error)   -- status 0 = network/TLS/timeout error
+end
+
+http.post(url, nil, nil, { json = { name = "sea" } })      -- JSON body
+http.post(url, nil, nil, { form = { q = "a b" } })         -- urlencoded form
+http.request("PATCH", url, { body = "...", content_type = "text/plain" })
 ```
 
-### `http.post(url, body [, content_type]) → response`
+Connections are kept alive and pooled per host. Redirects are followed (5 hops
+by default). Chunked responses are decoded. `verify = false` skips certificate
+checks.
+
+## Server
 
 ```sea
-local r = http.post("https://api.example.com/data",
-                    '{"key":"value"}',
-                    "application/json")
+local http = require("../http")
+
+local srv = http.listen(8080, function(req)
+    -- req.method, req.path (no query), req.query, req.headers, req.body,
+    -- req.cookies, req.remote_addr, req:json()
+    return http.json({ hello = req.query["name"] or "world" })
+end, { log = true })
+
+print("listening on", srv.port)
+srv.wait()            -- or srv.close() from another goroutine
 ```
 
-`content_type` defaults to `"application/octet-stream"` when omitted.
+`http.serve(port, handler, opts)` does the same and blocks. Each connection runs
+in its own goroutine; keep-alive, pipelining, chunked request bodies,
+`Expect: 100-continue` and HEAD are handled. Defaults: 30 s read timeout,
+60 s idle timeout, 64 KB of headers, 10 MB of body, 1000 requests per
+connection. Malformed or smuggling-shaped requests are rejected with 400/501/505.
 
-### `http.request(method, url [, body [, content_type [, headers]]]) → response`
+A handler returns `{status, body, headers}` (or a plain string). Helpers:
+`http.text`, `http.html`, `http.json`, `http.redirect`, `http.set_cookie`,
+`http.static(dir)`. A `nil` or invalid response becomes a 500.
 
-Full control — custom method and headers:
+HTTPS: pass `tls = { cert = "cert.pem", key = "key.pem" }` (add `ca` to require
+client certificates).
 
-```sea
-local r = http.request("PATCH", "https://api.example.com/item/1",
-    '{"active":true}',
-    "application/json",
-    { ["Authorization"] = "Bearer TOKEN" })
-```
-
-### Response object
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | number | HTTP status code (0 on connection error) |
-| `ok` | bool | `true` when `200 ≤ status < 300` |
-| `body` | string | Response body |
-| `headers` | table | Response headers (lowercase keys) |
-| `error` | string | Error message when `status == 0` |
-
-## Server API
-
-### `http.serve(port, handler)`
-
-Blocks forever. `handler(req)` receives a request table and must return a
-response table.
+## Router
 
 ```sea
-http.serve(8080, function(req)
-    print(req.method .. " " .. req.path)
-    if req.method == "GET" and req.path == "/" then
-        return { status = 200, body = "Hello, Sea!\n" }
-    end
-    return { status = 404, body = "Not Found\n" }
+local r = http.router()
+r.use(function(req, next)
+    local resp = next(req)
+    resp.headers["X-Served-By"] = "sea"
+    return resp
 end)
+r.get("/users/:id", function(req) return http.json({ id = req.params["id"] }) end)
+r.get("/files/*", function(req) return http.text(req.params["*"]) end)
+local api = r.group("/api", { auth_mw })
+api.post("/items", create_item)
+http.serve(8080, r)
 ```
 
-### Request object
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `method` | string | `"GET"`, `"POST"`, … |
-| `path` | string | Request path (e.g. `"/api/v1"`) |
-| `headers` | table | Request headers (lowercase keys) |
-| `body` | string | Request body |
-
-### Response object (returned by handler)
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | number | HTTP status code (default `200`) |
-| `body` | string | Response body (default `""`) |
-| `headers` | table | Extra headers. When absent, `Content-Type: text/plain` is sent |
-
-## TLS / HTTPS
-
-HTTPS is handled transparently — just use an `https://` URL. Certificate
-verification is enabled by default using the system CA bundle
-(`SSL_VERIFY_PEER` + hostname check via `SSL_set1_host`). SNI is set
-automatically.
-
-The `http_native` C layer manages a single shared `SSL_CTX` (initialized once
-with `pthread_once`).
+404 when nothing matches, 405 with `Allow` when only the method differs, HEAD
+falls back to GET routes.
 
 ## Examples
 
 ```sh
-# HTTPS GET + POST
-bin/sea libs/http/examples/client_https.sea
-
-# Plain HTTP GET
 bin/sea libs/http/examples/client_get.sea
-
-# Plain HTTP POST
-bin/sea libs/http/examples/client_post.sea
-
-# Echo server (run in one terminal, curl in another)
-bin/sea libs/http/examples/server_echo.sea
+bin/sea libs/http/examples/server_router.sea   # then: curl localhost:8080/...
 ```
+
+`client_get`, `client_post`, `client_https`, `server_hello`, `server_echo`,
+`server_router`, `server_https` (needs `cert.pem`/`key.pem`; see the file header).
+
+## Tests
+
+`tests/unit/108_http_lib.sea` (client + server over loopback) and
+`tests/unit/107_net.sea` (the `net` module).

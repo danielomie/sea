@@ -17,7 +17,7 @@
 --   curl http://localhost:8080/admin/stats                  # → 401
 --   curl -H "Authorization: Bearer secret" http://localhost:8080/admin/stats
 
-local http = require("./libs/http/http")
+local http = require("../http")
 
 local router = http.router()
 
@@ -85,7 +85,7 @@ router.get("/users/:id", function(req)
 end)
 
 router.delete("/users/:id", { require_auth }, function(req)
-    users[req.params["id"]] = nil
+    del users[req.params["id"]]
     return { status=204, body="" }
 end)
 

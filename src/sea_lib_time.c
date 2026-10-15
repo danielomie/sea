@@ -1,4 +1,5 @@
 #include "sea_stdlib.h"
+#include "sea_netpoll.h"
 #include "sea_string.h"
 #include "sea_table.h"
 #include "sea_memory.h"
@@ -261,9 +262,18 @@ static SeaValue time_unix_fn(SeaVM *vm, int argc, SeaValue *args) {
 }
 
 static SeaValue time_sleep_fn(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
     if (argc < 1) return SEA_NIL_VAL;
     int64_t ns = arg_ns(args[0]);
+    /* In a goroutine, a sleep of 1 ms or more parks it (the worker thread
+     * runs other goroutines meanwhile) instead of blocking the thread. The
+     * deadline is kept in the VM's I/O call, so the re-run after waking
+     * finishes the same sleep (sea_netpoll.h). */
+    if (vm->goroutine && vm->native_depth == 0 && (ns >= TIME_MS || vm->io_call.active)) {
+        sea_io_begin(vm, ns / TIME_MS);
+        if (sea_io_wait(vm, -1, 0) == SEA_IO_PARK) return SEA_PARK_VAL;
+        sea_io_end(vm);
+        return SEA_NIL_VAL;
+    }
     if (ns > 0) {
         struct timespec ts;
         ts.tv_sec  = (time_t)(ns / TIME_SEC);

@@ -415,6 +415,47 @@ print(os.args[2])                 -- "world"
 
 ---
 
+## Module: `net`
+
+TCP sockets. Sockets are non-blocking and every wait goes through the netpoller:
+inside a goroutine, a call that has to wait **parks only that goroutine** (its
+scheduler thread runs other goroutines meanwhile); on the main thread it blocks.
+Thousands of idle connections therefore cost no threads. Sockets are plain
+integer fds. Failures return an error value (`is_error(x)`, `x.message`); a timeout's
+message is `"timeout"`. Timeouts are in milliseconds; omitted or `nil` means wait forever.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `net.connect` | `connect(host, port [, timeout]) → fd \| error` | Resolve `host` and connect (tries each address; TCP_NODELAY on). DNS resolution itself still blocks |
+| `net.listen` | `listen(port [, host [, backlog]]) → fd \| error` | Bind and listen (SO_REUSEADDR). `port` 0 picks a free port; `host` defaults to all interfaces |
+| `net.accept` | `accept(fd [, timeout]) → fd \| error` | Wait for and accept one connection |
+| `net.read` | `read(fd, max [, timeout]) → string \| error` | Up to `max` bytes as soon as any arrive; `""` at end of stream |
+| `net.write` | `write(fd, data [, timeout]) → int \| error` | Write all of `data` (the timeout applies to each wait); returns `len(data)` |
+| `net.close` | `close(fd)` | Close; a goroutine waiting on `fd` wakes with an error |
+| `net.local_port` | `local_port(fd) → int` | Port the socket is bound to |
+| `net.peer` | `peer(fd) → string` | `"ip:port"` of the remote end |
+
+`SIGPIPE` is ignored once the module is loaded, so writing to a closed peer
+returns an error instead of killing the process.
+
+```sea
+local lfd = net.listen(0)
+local port = net.local_port(lfd)
+go (function()
+    local c = net.accept(lfd)
+    net.write(c, "echo: " .. net.read(c, 1024, 5000))
+    net.close(c)
+end)()
+local fd = net.connect("127.0.0.1", port, 2000)
+net.write(fd, "hi")
+print(net.read(fd, 1024, 2000))   -- echo: hi
+net.close(fd)
+```
+
+Higher-level: `libs/ssl` (TLS over these sockets) and `libs/http` — see [libs.md](libs.md).
+
+---
+
 ## Module: `time`
 
 ### Duration constants
@@ -437,7 +478,7 @@ print(os.args[2])                 -- "world"
 | `time.now` | `now() → Time` | Current wall-clock time |
 | `time.unix` | `unix(sec [, ns]) → Time` | Construct a Time from Unix seconds + optional nanoseconds |
 | `time.time` | `time() → int` | Current Unix timestamp in seconds (raw integer) |
-| `time.sleep` | `sleep(ns)` | Sleep for `ns` nanoseconds |
+| `time.sleep` | `sleep(ns)` | Sleep for `ns` nanoseconds. In a goroutine it parks only that goroutine (the scheduler thread keeps running others); on the main thread it blocks |
 | `time.clock` | `clock() → number` | CPU time in seconds since program start |
 | `time.since` | `since(t) → number` | Nanoseconds elapsed since Time `t` |
 | `time.until` | `until(t) → number` | Nanoseconds until Time `t` |
@@ -738,6 +779,12 @@ select
         -- non-blocking fallback
 end
 ```
+
+Goroutines run on a pool of scheduler threads (one per CPU). Blocking on a
+channel, `time.sleep` and every wait in the `net` module park the goroutine
+without holding its thread. Other blocking calls — file I/O, `io.read`, DNS
+lookups, a native library that blocks — do hold the thread, so enough of them at
+once can stall the other goroutines.
 
 ---
 

@@ -2,13 +2,13 @@
 -- Responds with "Hello, World!" to every request.
 --
 -- Usage:
---   bin/sea run libs/http/examples/server_hello.sea
+--   bin/sea libs/http/examples/server_hello.sea
 --
 -- Test with:
 --   curl http://localhost:8080/
 --   curl http://localhost:8080/foo
 
-local http = require("./libs/http/http")
+local http = require("../http")
 
 http.serve(8080, function(req)
     print(req.method .. " " .. req.path)

@@ -186,6 +186,7 @@ static SeaUpvalue* capture_upvalue(SeaVM *vm, SeaValue *location) {
     new_up->obj.refcount = 2;
     new_up->location = location;
     new_up->closed = SEA_NIL_VAL;
+    new_up->lock = 0;
     new_up->next = up;
     if (prev) prev->next = new_up;
     else vm->open_upvalues = new_up;
@@ -215,13 +216,19 @@ static void close_upvalues(SeaVM *vm, SeaValue *from) {
         /* Copy the live value into the upvalue's own storage, then publish the
          * new location with release semantics: a goroutine on another thread
          * reading through this upvalue (acquire) then sees the copied value. */
+        /* The register's reference moves into the upvalue (docs/memory.md),
+         * and the register is cleared so nothing releases it a second time
+         * (the loop variable of the next iteration, a return's cleanup).
+         * A shared upvalue may be stored into by another goroutine meanwhile:
+         * the lock keeps the move whole, and readers retry if the location
+         * changed under them (sea_upvalue_get). */
+        bool shared = __atomic_load_n(&up->obj.refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT;
+        if (shared) sea_upvalue_lock(up);
         SeaValue *slot = up->location;
         up->closed = *slot;
         __atomic_store_n(&up->location, &up->closed, __ATOMIC_RELEASE);
-        /* The register's reference moves into the upvalue (docs/memory.md):
-         * nil the register so nothing releases it a second time (the loop
-         * variable of the next iteration, a return's cleanup). */
-        *slot = SEA_NIL_VAL;
+        __atomic_store_n(slot, SEA_NIL_VAL, __ATOMIC_RELEASE);
+        if (shared) sea_upvalue_unlock(up);
         /* Remove from the open chain and drop the list's reference (frees the
          * upvalue, and the value it now owns, if no closure holds it). */
         vm->open_upvalues = up->next;
@@ -534,8 +541,11 @@ bool sea_vm_goroutine_init(SeaVM *vm, SeaValue fn, SeaValue *args, int argc) {
     SeaClosure *cl = (SeaClosure*)obj;
     if (cl->is_native) {
         /* `go print("x")`: no bytecode frame — just run the C function here;
-         * it borrows the (owned) arguments, released after */
+         * it borrows the (owned) arguments, released after. No frame to
+         * resume, so it cannot park: native_depth makes I/O block. */
+        vm->native_depth++;
         vm->regs[0] = call_native(vm, cl, argc, args);
+        vm->native_depth--;
         for (int i = 0; i < argc; i++) vm_release_val(args[i]);
         return false;
     }
@@ -1222,8 +1232,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
     lbl_LOAD_UP: {
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i), b = SEA_INSTR_B(i);
-        SeaUpvalue *up = frame->closure->upvalues[b];
-        REG(a) = *__atomic_load_n(&up->location, __ATOMIC_ACQUIRE);   /* see close_upvalues */
+        REG(a) = sea_upvalue_get(frame->closure->upvalues[b]);   /* see close_upvalues */
         DISPATCH();
     }
     lbl_STORE_UP: {
@@ -1232,13 +1241,23 @@ static int vm_run(SeaVM *vm, int base_frame) {
         SeaUpvalue *up = frame->closure->upvalues[b];
         /* A value stored into an upvalue other goroutines can see must be
          * shared too (same rule as channel sends / global writes). */
-        if (SEA_UNLIKELY(__atomic_load_n(&up->obj.refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT))
-            sea_val_mark_shared(REG(a));
         /* the upvalue (or, while open, the captured local) owns its value */
-        SeaValue *slot = __atomic_load_n(&up->location, __ATOMIC_ACQUIRE);
-        SeaValue old = *slot;
         vm_retain_val(REG(a));
-        *slot = REG(a);
+        SeaValue old;
+        if (SEA_UNLIKELY(__atomic_load_n(&up->obj.refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT)) {
+            sea_val_mark_shared(REG(a));
+            /* other goroutines may store into it, or close it, at the same
+             * time: under the lock each old value is released exactly once */
+            sea_upvalue_lock(up);
+            SeaValue *slot = up->location;
+            old = *slot;
+            __atomic_store_n(slot, REG(a), __ATOMIC_RELEASE);
+            sea_upvalue_unlock(up);
+        } else {
+            SeaValue *slot = up->location;
+            old = *slot;
+            *slot = REG(a);
+        }
         vm_release_val(old);
         DISPATCH();
     }
@@ -2006,6 +2025,13 @@ static int vm_run(SeaVM *vm, int base_frame) {
             SeaClosure *cl = (SeaClosure*)sea_as_obj(fn_val);
             if (cl->is_native) {
                 SeaValue result = call_native(vm, cl, argc, &REG(a+1));
+                if (SEA_UNLIKELY(result == SEA_PARK_VAL)) {
+                    /* the native is waiting for I/O (sea_netpoll.h): park,
+                     * and run this CALL again when the goroutine resumes —
+                     * its arguments stay where they are */
+                    frame->ip = ip - 1;
+                    return SEA_SUSPENDED;
+                }
                 native_call_done(base, a, b, argc, result);
             } else {
                 SeaChunk *callee_chunk = cl->chunk;
@@ -2559,6 +2585,8 @@ static int vm_run(SeaVM *vm, int base_frame) {
             SeaChannel *sch = SEA_AS_CHANNEL(REG(ch_reg));
 
             if (is_send) {
+                /* as OP_CHAN_SEND: whoever receives may run on another thread */
+                sea_val_mark_shared(REG(val_reg));
                 if (sea_chan_try_send(sch, REG(val_reg))) { sel_winner = k; break; }
             } else {
                 SeaValue rv = SEA_NIL_VAL;
@@ -3286,17 +3314,25 @@ int sea_jit_get_table2(SeaVM *vm, SeaValue *base, int a, int b, int c) {
 
 /* OP_LOAD_UP / OP_STORE_UP: R[a] = UpV[b] / UpV[b] = R[a]. */
 int sea_jit_load_up(SeaCallFrame *frame, SeaValue *base, int a, int b) {
-    base[a] = *__atomic_load_n(&frame->closure->upvalues[b]->location, __ATOMIC_ACQUIRE);
+    base[a] = sea_upvalue_get(frame->closure->upvalues[b]);
     return 0;
 }
 int sea_jit_store_up(SeaCallFrame *frame, SeaValue *base, int a, int b) {
     SeaUpvalue *up = frame->closure->upvalues[b];
-    if (__atomic_load_n(&up->obj.refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT)
-        sea_val_mark_shared(base[a]);   /* as lbl_STORE_UP */
-    SeaValue *slot = __atomic_load_n(&up->location, __ATOMIC_ACQUIRE);
-    SeaValue old = *slot;
-    vm_retain_val(base[a]);
-    *slot = base[a];
+    vm_retain_val(base[a]);                                   /* as lbl_STORE_UP */
+    SeaValue old;
+    if (__atomic_load_n(&up->obj.refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT) {
+        sea_val_mark_shared(base[a]);
+        sea_upvalue_lock(up);
+        SeaValue *slot = up->location;
+        old = *slot;
+        __atomic_store_n(slot, base[a], __ATOMIC_RELEASE);
+        sea_upvalue_unlock(up);
+    } else {
+        SeaValue *slot = up->location;
+        old = *slot;
+        *slot = base[a];
+    }
     vm_release_val(old);
     return 0;
 }
@@ -3419,8 +3455,13 @@ SeaValue sea_vm_call(SeaVM *vm, SeaValue fn_val, SeaValue *args, int argc) {
     }
 
     SeaClosure *cl = (SeaClosure*)obj;
+    /* Called from C: the C frames cannot be suspended, so natives below this
+     * point block instead of parking (sea_netpoll.h). */
     if (cl->is_native) {
-        return call_native(vm, cl, argc, args);
+        vm->native_depth++;
+        SeaValue r = call_native(vm, cl, argc, args);
+        vm->native_depth--;
+        return r;
     }
     if (vm->frame_count >= SEA_MAX_CALL_DEPTH) {
         sea_vm_error_noreturn(vm, "call stack overflow");
@@ -3464,6 +3505,8 @@ SeaValue sea_vm_call(SeaVM *vm, SeaValue fn_val, SeaValue *args, int argc) {
     }
 
     int saved_frame = vm->frame_count - 1;  // frame to return to
+    vm->native_depth++;
     vm_run(vm, saved_frame);
+    vm->native_depth--;
     return fbase[0];   /* the RETURN left the first result (+1) here */
 }
