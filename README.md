@@ -39,8 +39,15 @@ for i = 1, 6 do print(<-results) end
 
 ## Quick start
 
-Requirements: GCC, GNU Make, pthreads. The JIT additionally needs the libgccjit
-headers (`libgccjit-13-dev` or similar).
+**Platform: Linux on x86-64 only, for now.** The netpoller and the `net`
+module use `epoll`, `eventfd` and `accept4` (Linux), and the interpreter loop
+pins its hot variables to x86-64 registers (`r13`/`r14`). macOS, the BSDs and
+ARM (aarch64) are not supported yet.
+
+Requirements: GCC (computed goto, register variables), GNU Make, pthreads,
+readline (or build with `make noreadline`). The JIT additionally needs the
+libgccjit headers (`libgccjit-13-dev` or similar). Native libraries have their
+own: OpenSSL 3 for `libs/ssl`, zlib for `libs/http`.
 
 ```sh
 make                              # build bin/sea
