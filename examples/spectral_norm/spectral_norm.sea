@@ -1,0 +1,80 @@
+--
+-- Spectral Norm em Sea
+--
+-- Calcula a norma espectral da matriz infinita A(i,j) = 1/((i+j)(i+j+1)/2 + i + 1)
+-- pelo método da potência: 10 iterações de u ← AᵀA·u.
+--
+-- Demonstra:
+--   - Funções numéricas pequenas chamadas milhões de vezes (o JIT compila e chama
+--     direto no código nativo)
+--   - float_array passado como parâmetro (o JIT usa type feedback para acessá-lo
+--     inline mesmo sem saber o tipo em tempo de compilação)
+--
+--   bin/sea examples/spectral_norm/spectral_norm.sea [n]
+--   bin/sea-jit --jit examples/spectral_norm/spectral_norm.sea [n]
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║   Spectral Norm (método da potência)     ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local function A(i, j)
+    local ij = i + j
+    return 1.0 / (ij * (ij + 1) // 2 + i + 1)
+end
+
+-- out = A · v
+local function mul_Av(v, out, n)
+    for i = 0, n - 1 do
+        local s = 0.0
+        for j = 0, n - 1 do s = s + A(i, j) * v[j] end
+        out[i] = s
+    end
+end
+
+-- out = Aᵀ · v
+local function mul_Atv(v, out, n)
+    for i = 0, n - 1 do
+        local s = 0.0
+        for j = 0, n - 1 do s = s + A(j, i) * v[j] end
+        out[i] = s
+    end
+end
+
+-- out = AᵀA · v
+local function mul_AtAv(v, out, tmp, n)
+    mul_Av(v, tmp, n)
+    mul_Atv(tmp, out, n)
+end
+
+local function vec(n, x)
+    local v = float_array(n)
+    for i = 0, n - 1 do v[] = x end
+    return v
+end
+
+local N = 400
+if len(os.args) > 1 then N = tonumber(os.args[1]) end
+
+local u = vec(N, 1.0)
+local v = vec(N, 0.0)
+local tmp = vec(N, 0.0)
+
+local t0 = time.now()
+for it = 1, 10 do
+    mul_AtAv(u, v, tmp, N)
+    mul_AtAv(v, u, tmp, N)
+end
+
+local vBv = 0.0
+local vv = 0.0
+for i = 0, N - 1 do
+    vBv = vBv + u[i] * v[i]
+    vv = vv + v[i] * v[i]
+end
+local ms = time.since(t0) / 1e6
+
+printf("n = %d\n", N)
+printf("norma espectral ≈ %.9f\n", math.sqrt(vBv / vv))
+printf("tempo: %.0f ms\n", ms)

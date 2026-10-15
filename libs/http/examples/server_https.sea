@@ -1,0 +1,46 @@
+-- server_https.sea — HTTPS server example using http.serve with TLS.
+--
+-- Requires a certificate and private key. Generate a self-signed one with:
+--   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+--               -days 365 -nodes -subj "/CN=localhost"
+--
+-- Usage:
+--   bin/sea libs/http/examples/server_https.sea [cert.pem] [key.pem] [port]
+--
+-- Test with:
+--   curl -k https://localhost:8443/
+--   curl -k https://localhost:8443/ping
+--   curl -k -X POST -d '{"msg":"hello"}' https://localhost:8443/echo
+
+local http = require("./libs/http/http")
+
+local cert = os.args[1] or "cert.pem"
+local key  = os.args[2] or "key.pem"
+local port = tonumber(os.args[3]) or 8443
+
+http.serve(port, function(req)
+    print(req.method .. " " .. req.path)
+
+    if req.path == "/ping" then
+        return {
+            status  = 200,
+            body    = '{"pong":true}' .. "\n",
+            headers = { ["Content-Type"] = "application/json" },
+        }
+    end
+
+    if req.method == "POST" and req.path == "/echo" then
+        return {
+            status  = 200,
+            body    = req.body,
+            headers = { ["Content-Type"] = req.headers["content-type"] or "text/plain" },
+        }
+    end
+
+    local body = "Sea HTTPS Server\n\nRoutes:\n  GET  /ping    health check\n  POST /echo    echo body\n"
+    return {
+        status  = 200,
+        body    = body,
+        headers = { ["Content-Type"] = "text/plain; charset=utf-8" },
+    }
+end, { tls = { cert = cert, key = key } })

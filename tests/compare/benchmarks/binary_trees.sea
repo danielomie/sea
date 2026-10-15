@@ -1,0 +1,42 @@
+local function make_tree(depth)
+    if depth == 0 then
+        return {left=nil, right=nil}
+    end
+    return {left=make_tree(depth-1), right=make_tree(depth-1)}
+end
+
+local function tree_sum(t)
+    if t.left == nil then return 1 end
+    return 1 + tree_sum(t.left) + tree_sum(t.right)
+end
+
+local MIN_DEPTH = 4
+local MAX_DEPTH = 16
+
+local stretch_depth = MAX_DEPTH + 1
+local stretch = make_tree(stretch_depth)
+local stretch_check = tree_sum(stretch)
+
+local long_lived = make_tree(MAX_DEPTH)
+
+local total = 0
+local depth = MIN_DEPTH
+while depth <= MAX_DEPTH do
+    local iters = 1
+    local d = MAX_DEPTH - depth + MIN_DEPTH
+    while d > 0 do
+        iters = iters * 2
+        d = d - 1
+    end
+    local check = 0
+    for i = 1, iters do
+        local t = make_tree(depth)
+        check = check + tree_sum(t)
+    end
+    total = total + check
+    depth = depth + 2
+end
+
+print(stretch_check)
+print(tree_sum(long_lived))
+print(total)

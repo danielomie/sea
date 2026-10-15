@@ -1,0 +1,16 @@
+deferred
+0
+x now:	2
+x at defer:	1
+multi	7	14	end
+99
+built: 41/42
+8
+loop body done
+loop defer	3
+loop defer	2
+loop defer	1
+in method
+hello	deferred	from	box
+1	2	3	4	5	6	7	8
+closure sees	6

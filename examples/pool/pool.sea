@@ -1,0 +1,145 @@
+--
+-- Simulação de Pool de Conexões com Banco de Dados
+--
+-- Demonstra o uso de goroutines + canais para implementar um pool que limita
+-- o número máximo de conexões simultâneas ao banco. Centenas de clientes
+-- chegam ao mesmo tempo; apenas MAX_CONN ficam ativos ao mesmo tempo — os
+-- demais ficam suspensos na fila (sem consumir threads do SO) até abrir vaga.
+--
+-- NOTA: o runtime usa N = nproc threads de SO como workers. Para que o pool
+-- seja o verdadeiro gargalo (e não o número de workers), configure:
+--   MAX_CONN  ≤  número de CPUs disponíveis
+-- Por padrão usamos MAX_CONN = 3 numa máquina de 4+ núcleos.
+--
+-- Módulos disponíveis como globais: os, math, sync
+--
+
+-- ─── Configuração ────────────────────────────────────────────────────────────
+local MAX_CONN  = 3     -- máximo de conexões simultâneas ao banco
+local N_CLIENTS = 700   -- total de requisições concorrentes (tente 500, 1000…)
+local PROC_MIN  = 50    -- tempo mínimo de processamento por query (ms)
+local PROC_MAX  = 100   -- tempo máximo de processamento por query (ms)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+math.randomseed(time.time())
+
+print("╔══════════════════════════════════════════╗")
+print("║   Simulação: Pool de Conexões com DB     ║")
+print("╚══════════════════════════════════════════╝")
+print("  Pool size  (MAX_CONN) : " .. MAX_CONN)
+print("  Requisições (clientes): " .. N_CLIENTS)
+print("  Tempo por query        : " .. PROC_MIN .. " – " .. PROC_MAX .. " ms")
+print("")
+print("Disparando " .. N_CLIENTS .. " requisições simultâneas...")
+
+-- Semáforo implementado com canal pré-carregado.
+-- Receber do canal = adquirir uma vaga no pool.
+-- Enviar de volta  = liberar a vaga.
+local pool = chan(MAX_CONN)
+for i = 1, MAX_CONN do
+    pool <- true
+end
+
+-- Canal de resultados: cada goroutine envia seu waited_ms (inteiro).
+local wait_ch = chan(N_CLIENTS)
+
+local wg = sync.waitgroup()
+wg.add(wg, N_CLIENTS)
+
+local wall_start = time.now()
+
+-- IMPORTANTE: spawn_time é registrado ANTES do `go`, no momento em que a
+-- requisição chega ao sistema — assim waited_ms inclui tanto o tempo na fila
+-- do scheduler quanto o tempo bloqueado no semáforo do pool.
+for i = 1, N_CLIENTS do
+    local spawn_time = time.now()
+
+    go (function()
+        -- ── Aguarda vaga no pool ──────────────────────────────────────────
+        -- Se o pool está cheio a goroutine suspende aqui (sem ocupar worker).
+        local _slot = <-pool
+
+        local waited_ms = time.milliseconds(time.since(spawn_time))
+
+        -- ── Simula execução da query (PROC_MIN – PROC_MAX ms) ─────────────
+        local proc_ms = math.random(PROC_MIN, PROC_MAX)
+        time.sleep(proc_ms * time.Millisecond)
+
+        -- ── Devolve a vaga ao pool ────────────────────────────────────────
+        pool <- true
+
+        wait_ch <- waited_ms
+        wg.done(wg)
+    end)()
+end
+
+wg.wait(wg)
+local wall_ms = time.milliseconds(time.since(wall_start))
+close(wait_ch)
+
+-- ─── Coleta de estatísticas ──────────────────────────────────────────────────
+local total_served  = 0
+local total_waited  = 0   -- conexões com waited_ms > 0
+local sum_wait_all  = 0
+local sum_wait_q    = 0   -- soma apenas de quem waited_ms > 0
+local max_wait      = 0
+local min_wait_q    = -1
+
+for w in wait_ch do
+    total_served = total_served + 1
+    sum_wait_all = sum_wait_all + w
+    if w > 0 then
+        total_waited = total_waited + 1
+        sum_wait_q   = sum_wait_q + w
+        if w > max_wait then max_wait = w end
+        if min_wait_q < 0 or w < min_wait_q then min_wait_q = w end
+    end
+end
+
+if min_wait_q < 0 then min_wait_q = 0 end
+
+local immediate = total_served - total_waited
+
+local avg_wait_all = 0
+local avg_wait_q   = 0
+if total_served > 0 then
+    avg_wait_all = sum_wait_all / total_served
+end
+if total_waited > 0 then
+    avg_wait_q = sum_wait_q / total_waited
+end
+
+-- Tempo médio teórico de processamento
+local avg_proc_theory = (PROC_MIN + PROC_MAX) / 2
+
+-- Throughput: conexões por segundo
+local throughput = 0
+if wall_ms > 0 then
+    throughput = (total_served * 1000) / wall_ms
+end
+
+-- Utilização estimada do pool (carga de trabalho / capacidade)
+local utilization = 0
+if wall_ms > 0 then
+    utilization = (total_served * avg_proc_theory * 100) / (MAX_CONN * wall_ms)
+end
+
+print("")
+print("═══════════════════════════════════════════")
+print("  RESULTADO")
+print("═══════════════════════════════════════════")
+print("  Conexões atendidas             : " .. total_served)
+print("  Conexões sem espera (imediatas): " .. immediate)
+print("  Conexões que aguardaram        : " .. total_waited)
+print("───────────────────────────────────────────")
+print("  Espera média (todas)           : " .. avg_wait_all .. " ms")
+print("  Espera média (quem esperou)    : " .. avg_wait_q   .. " ms")
+print("  Espera mínima (quem esperou)   : " .. min_wait_q   .. " ms")
+print("  Espera máxima                  : " .. max_wait     .. " ms")
+print("───────────────────────────────────────────")
+print("  Proc. médio (teórico)          : " .. avg_proc_theory .. " ms")
+print("  Throughput                     : " .. throughput .. " conn/s")
+print("  Utilização estimada do pool    : " .. utilization .. " %")
+print("───────────────────────────────────────────")
+print("  Tempo total (wall clock)       : " .. wall_ms .. " ms")
+print("═══════════════════════════════════════════")

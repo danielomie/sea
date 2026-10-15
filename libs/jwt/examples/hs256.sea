@@ -1,0 +1,53 @@
+-- examples/hs256.sea — JWT com algoritmo HMAC-SHA256
+-- Run: bin/sea libs/jwt/examples/hs256.sea
+
+local jwt = require("../jwt")
+
+local SECRET = "meu-segredo-super-secreto"
+
+-- assina
+local token = jwt.sign(
+    { sub = "user:42", name = "Alice", role = "admin" },
+    SECRET,
+    { alg = "HS256", exp = 3600, iss = "myapp" }
+)
+print("Token:")
+print(token)
+print("")
+
+-- decode sem verificação
+local header, payload = jwt.decode(token)
+print("Header:  alg=" .. header.alg .. " typ=" .. header.typ)
+print("Subject: " .. payload.sub)
+print("Name:    " .. payload.name)
+print("Issuer:  " .. payload.iss)
+print("")
+
+-- verifica (deve passar)
+local claims, err = jwt.verify(token, SECRET)
+if claims then
+    print("Verificado OK — sub=" .. claims.sub)
+else
+    print("Erro: " .. err)
+end
+
+-- verifica com secret errado (deve falhar)
+local bad, err2 = jwt.verify(token, "segredo-errado")
+if bad then
+    print("ERRO: deveria ter falhado!")
+else
+    print("Rejeitado corretamente: " .. err2)
+end
+
+-- HS384 e HS512
+for i = 0, 1 do
+    local algs = {"HS384", "HS512"}
+    local alg = algs[i]
+    local t = jwt.sign({ sub = "test" }, SECRET, { alg = alg })
+    local c, e = jwt.verify(t, SECRET)
+    if c then
+        print(alg .. " OK")
+    else
+        print(alg .. " FALHOU: " .. e)
+    end
+end

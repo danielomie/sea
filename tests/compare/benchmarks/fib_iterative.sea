@@ -1,0 +1,9 @@
+local a = 0
+local b = 1
+local mod = 1000000007
+for i = 2, 1000000 do
+    local c = (a + b) % mod
+    a = b
+    b = c
+end
+print(b)

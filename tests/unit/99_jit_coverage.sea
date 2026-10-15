@@ -1,0 +1,121 @@
+-- JIT coverage for for-in, closures, goroutines and channels. Under
+-- `make test-jit` every chunk below is compiled at its first loop back-edge;
+-- the output must match the interpreter exactly.
+
+-- 1. for-in over every container kind, in hot loops
+local arr = []
+for i = 0, 999 do arr[] = i end
+local s1 = 0
+for i, v in arr do s1 = s1 + i + v end
+local tbl = {}
+for i = 1, 200 do tbl["k" .. i] = i end
+local s2 = 0
+local n2 = 0
+for k, v in tbl do s2 = s2 + v; n2 = n2 + 1 end
+local mp = [=]
+for i = 1, 200 do mp[i] = i * 2 end
+local s3 = 0
+for k, v in mp do s3 = s3 + k + v end
+local st = {alpha = 1, beta = 2, gamma = 3}
+local s4 = 0
+for k, v in st do s4 = s4 + v end
+print("for-in", s1, s2, n2, s3, s4)
+
+-- 2. closures created in a loop (the loop variable itself is shared across
+--    iterations in Sea, so copy it into a per-iteration local)
+local fns = []
+for i = 1, 50 do
+    local j = i
+    fns[] = function(x) return x + j end
+end
+local s5 = 0
+for i = 0, len(fns) - 1 do s5 = s5 + fns[i](1) end
+print("closures", s5)
+
+-- 3. closure over a local, hot loop, then a multi-value return copied down
+local function make(n)
+    local count = n
+    local inc = function() count = count + 1; return count end
+    local acc = 0
+    for i = 1, 1000 do acc = acc + i end
+    return inc, acc
+end
+local inc, acc = make(10)
+print("captured", inc(), inc(), acc)
+
+-- 4. producer/consumer goroutines with channels in hot loops
+local ch = chan(16)
+local done = chan(1)
+go (function()
+    for i = 1, 2000 do ch <- i end
+    close(ch)
+end)()
+go (function()
+    local total = 0
+    for v in ch do total = total + v end
+    done <- total
+end)()
+print("channels", <-done)
+
+-- 5. unbuffered ping-pong (direct handoff while parked)
+local ping = chan()
+local pong = chan()
+go (function()
+    for i = 1, 500 do
+        local v = <-ping
+        pong <- v * 2
+    end
+end)()
+local s6 = 0
+for i = 1, 500 do
+    ping <- i
+    s6 = s6 + <-pong
+end
+print("ping-pong", s6)
+
+-- 6. go in a loop
+local results = chan(100)
+for i = 1, 100 do
+    local j = i
+    go (function() results <- j end)()
+end
+local s7 = 0
+for i = 1, 100 do s7 = s7 + <-results end
+print("spawned", s7)
+
+-- 7. array for-in edge cases (inline JIT path): empty, one variable, and an
+--    array that grows while being iterated (length is re-read every step)
+local empty = []
+local ne = 0
+for i, v in empty do ne = ne + 1 end
+local one = []
+for i = 1, 10 do one[] = i * 10 end
+local idxsum = 0
+for i in one do idxsum = idxsum + i end
+local grow = []
+grow[] = 1
+local steps = 0
+for i, v in grow do
+    steps = steps + 1
+    if len(grow) < 100 then grow[] = v + 1 end
+end
+print("array edges", ne, idxsum, steps, len(grow))
+
+-- 8. generic GET/SET_TABLE on typed arrays and maps (the compiler can't see
+--    the type of a parameter); long enough for type feedback to be recorded
+--    before the default JIT threshold compiles the loop
+local function fill_and_sum(xs, n)
+    for i = 0, n - 1 do xs[i] = i * 2 end
+    local s = 0
+    for r = 1, 20 do
+        for i = 0, n - 1 do s = s + xs[i] end
+    end
+    return s
+end
+local fa = float_array(500)
+local ia = int_array(500)
+for i = 0, 499 do fa[] = 0.0 end
+for i = 0, 499 do ia[] = 0 end
+local m8 = [=]
+for i = 0, 499 do m8[i] = 0 end
+print("typed/map via params", fill_and_sum(fa, 500), fill_and_sum(ia, 500), fill_and_sum(m8, 500))

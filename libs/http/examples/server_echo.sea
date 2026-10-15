@@ -1,0 +1,77 @@
+-- server_echo.sea — HTTP server with simple routing and request echo.
+--
+-- Routes:
+--   GET  /        greeting + usage
+--   GET  /ping    { "pong": true }
+--   POST /echo    echoes the request body
+--   GET  /count   request counter
+--   *             404
+--
+-- Usage:
+--   bin/sea run libs/http/examples/server_echo.sea
+--
+-- Test with:
+--   curl http://localhost:8080/
+--   curl http://localhost:8080/ping
+--   curl -X POST -d "hello sea" http://localhost:8080/echo
+--   curl http://localhost:8080/count
+--   curl http://localhost:8080/unknown
+
+local http = require("./libs/http/http")
+
+local counter = 0
+
+http.serve(8080, function(req)
+    counter = counter + 1
+    print("[" .. counter .. "] " .. req.method .. " " .. req.path)
+
+    -- GET /
+    if req.method == "GET" and req.path == "/" then
+        local body = "Sea HTTP Server\n\n" ..
+                     "Routes:\n" ..
+                     "  GET  /        this page\n" ..
+                     "  GET  /ping    health check\n" ..
+                     "  POST /echo    echo body\n" ..
+                     "  GET  /count   request counter\n"
+        return {
+            status  = 200,
+            body    = body,
+            headers = { ["Content-Type"] = "text/plain; charset=utf-8" },
+        }
+    end
+
+    -- GET /ping
+    if req.method == "GET" and req.path == "/ping" then
+        return {
+            status  = 200,
+            body    = '{"pong":true}' .. "\n",
+            headers = { ["Content-Type"] = "application/json" },
+        }
+    end
+
+    -- POST /echo
+    if req.method == "POST" and req.path == "/echo" then
+        local ct = req.headers["content-type"] or "text/plain"
+        return {
+            status  = 200,
+            body    = req.body,
+            headers = { ["Content-Type"] = ct, ["X-Echo"] = "true" },
+        }
+    end
+
+    -- GET /count
+    if req.method == "GET" and req.path == "/count" then
+        return {
+            status  = 200,
+            body    = "requests: " .. counter .. "\n",
+            headers = { ["Content-Type"] = "text/plain" },
+        }
+    end
+
+    -- 404 fallback
+    return {
+        status  = 404,
+        body    = "404 Not Found: " .. req.path .. "\n",
+        headers = { ["Content-Type"] = "text/plain" },
+    }
+end)

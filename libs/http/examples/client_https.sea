@@ -1,0 +1,37 @@
+-- client_https.sea — HTTPS GET and POST example
+-- Usage: bin/sea libs/http/examples/client_https.sea
+
+local http = require("./libs/http/http")
+
+-- HTTPS GET
+local url = "https://httpbin.org/get"
+print("GET " .. url)
+local r = http.get(url)
+print("Status : " .. r.status)
+print("ok     : " .. tostring(r.ok))
+print("--- body ---")
+print(r.body)
+print("")
+
+-- HTTPS POST with JSON
+local post_url = "https://httpbin.org/post"
+local payload  = '{"lang":"sea","version":"1.0"}'
+print("POST " .. post_url)
+local p = http.post(post_url, payload, "application/json")
+print("Status : " .. p.status)
+print("ok     : " .. tostring(p.ok))
+print("--- body ---")
+print(p.body)
+print("")
+
+-- Custom request with extra headers
+local req_url = "https://httpbin.org/headers"
+print("GET " .. req_url .. " (custom headers)")
+local h = http.request("GET", req_url, nil, nil, {
+    ["X-Custom-Header"] = "hello",
+    ["Accept-Language"] = "en-US",
+})
+print("Status : " .. h.status)
+print("ok     : " .. tostring(h.ok))
+print("--- body ---")
+print(h.body)

@@ -1,0 +1,83 @@
+local p = require("../parser")
+
+-- Test 1: basic local declaration with binop
+local r = p.parse("local x = 1 + 2\n")
+assert(r.ok, "test1: expected ok")
+assert(r.ast.type == "block", "test1: expected block, got " .. r.ast.type)
+local stmt = r.ast.stmts[0]
+assert(stmt.type == "local", "test1: expected local, got " .. stmt.type)
+assert(stmt.names[0] == "x", "test1: expected name x")
+local binop = stmt.values[0]
+assert(binop.type == "binop", "test1: expected binop")
+assert(binop.op == "+", "test1: expected +, got " .. binop.op)
+assert(binop.left.value == 1, "test1: left should be 1")
+assert(binop.right.value == 2, "test1: right should be 2")
+print("test1 ok: local binop")
+
+-- Test 2: function definition (parsed as assign: add = function(...))
+r = p.parse("function add(a, b)\n  return a + b\nend\n")
+assert(r.ok, "test2: " .. (r.error or ""))
+local fn_stmt = r.ast.stmts[0]
+assert(fn_stmt.type == "assign", "test2: expected assign, got " .. fn_stmt.type)
+assert(fn_stmt.targets[0].name == "add", "test2: target should be add")
+local fn = fn_stmt.values[0]
+assert(fn.type == "func", "test2: expected func")
+assert(len(fn.params) == 2, "test2: expected 2 params")
+assert(fn.params[0].name == "a", "test2: param0 should be a")
+assert(fn.params[1].name == "b", "test2: param1 should be b")
+print("test2 ok: function definition")
+
+-- Test 3: if statement
+r = p.parse("if x > 0 then\n  y = 1\nelse\n  y = 0\nend\n")
+assert(r.ok, "test3: " .. (r.error or ""))
+local if_stmt = r.ast.stmts[0]
+assert(if_stmt.type == "if", "test3: expected if")
+assert(if_stmt.cond.type == "binop", "test3: cond should be binop")
+assert(if_stmt.cond.op == ">", "test3: cond op should be >")
+assert(if_stmt.then_body.type == "block", "test3: then should be block")
+assert(if_stmt.else_body.type == "block", "test3: else should be block")
+print("test3 ok: if/else")
+
+-- Test 4: for loop
+r = p.parse("for i = 0, 9 do\n  print(i)\nend\n")
+assert(r.ok, "test4: " .. (r.error or ""))
+local for_stmt = r.ast.stmts[0]
+assert(for_stmt.type == "for_num", "test4: expected for_num")
+assert(for_stmt.var == "i", "test4: var should be i")
+assert(for_stmt.step == nil, "test4: step should be nil")
+print("test4 ok: for_num")
+
+-- Test 5: parse error
+r = p.parse("local = bad syntax\n")
+assert(not r.ok, "test5: expected error")
+assert(r.error != nil, "test5: error should not be nil")
+assert(r.line != nil, "test5: line should not be nil")
+print("test5 ok: parse error -> " .. r.error)
+
+-- Test 6: nested field access and method call
+r = p.parse("local v = obj.field:method(1, 2)\n")
+assert(r.ok, "test6: " .. (r.error or ""))
+local mc = r.ast.stmts[0].values[0]
+assert(mc.type == "method_call", "test6: expected method_call, got " .. mc.type)
+assert(mc.method == "method", "test6: method name wrong")
+assert(len(mc.args) == 2, "test6: expected 2 args")
+print("test6 ok: method call")
+
+-- Test 7: string literal
+r = p.parse("local s = \"hello world\"\n")
+assert(r.ok, "test7: " .. (r.error or ""))
+local sv = r.ast.stmts[0].values[0]
+assert(sv.type == "string", "test7: expected string node")
+assert(sv.value == "hello world", "test7: value mismatch")
+print("test7 ok: string literal")
+
+-- Test 8: boolean and nil literals
+r = p.parse("local a, b = true, nil\n")
+assert(r.ok, "test8: " .. (r.error or ""))
+local loc = r.ast.stmts[0]
+assert(loc.values[0].type == "bool", "test8: expected bool")
+assert(loc.values[0].value == true, "test8: value should be true")
+assert(loc.values[1].type == "nil", "test8: expected nil node")
+print("test8 ok: bool and nil")
+
+print("all tests passed")

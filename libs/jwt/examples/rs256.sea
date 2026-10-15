@@ -1,0 +1,45 @@
+-- examples/rs256.sea — JWT com algoritmo RSA-SHA256
+--
+-- Gere as chaves antes de rodar:
+--   openssl genrsa -out private.pem 2048
+--   openssl rsa -in private.pem -pubout -out public.pem
+--
+-- Run: bin/sea libs/jwt/examples/rs256.sea private.pem public.pem
+
+local jwt = require("../jwt")
+
+local priv_path = os.args[1] or "private.pem"
+local pub_path  = os.args[2] or "public.pem"
+
+local priv_key = os.readfile(priv_path)
+local pub_key  = os.readfile(pub_path)
+
+if not priv_key or not pub_key then
+    print("Uso: bin/sea libs/jwt/examples/rs256.sea private.pem public.pem")
+    os.exit(1)
+end
+
+-- assina com chave privada
+local token = jwt.sign(
+    { sub = "user:99", role = "service" },
+    priv_key,
+    { alg = "RS256", exp = 7200, iss = "auth-service" }
+)
+print("Token RS256:")
+print(token)
+print("")
+
+-- verifica com chave pública
+local claims, err = jwt.verify(token, pub_key)
+if claims then
+    print("Verificado OK — sub=" .. claims.sub .. "  iss=" .. claims.iss)
+else
+    print("Erro: " .. err)
+end
+
+-- chave pública errada deve rejeitar
+local bad_key = os.readfile(priv_path)  -- chave privada ≠ pública no verify
+local bad, err2 = jwt.verify(token, bad_key)
+if not bad then
+    print("Rejeitado corretamente com chave errada: " .. err2)
+end

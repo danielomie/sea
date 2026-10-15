@@ -1,0 +1,120 @@
+--
+-- Contagem de Palavras em Sea
+--
+-- Demonstra:
+--   - Tokenização de texto byte a byte (string.byte / string.sub)
+--   - Frequências em map; ordenação com merge sort sobre array de structs
+--   - Leitura de arquivo com io.scanner quando um caminho é passado
+--
+--   bin/sea examples/word_count/word_count.sea              (texto embutido)
+--   bin/sea examples/word_count/word_count.sea arquivo.txt  (arquivo próprio)
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║   Contagem de Palavras                   ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local TEXTO = []
+TEXTO[] = "No meio do caminho tinha uma pedra"
+TEXTO[] = "tinha uma pedra no meio do caminho"
+TEXTO[] = "tinha uma pedra"
+TEXTO[] = "no meio do caminho tinha uma pedra."
+TEXTO[] = "Nunca me esquecerei desse acontecimento"
+TEXTO[] = "na vida de minhas retinas tão fatigadas."
+TEXTO[] = "Nunca me esquecerei que no meio do caminho"
+TEXTO[] = "tinha uma pedra"
+TEXTO[] = "tinha uma pedra no meio do caminho"
+TEXTO[] = "no meio do caminho tinha uma pedra."
+
+local lines = TEXTO
+local fonte = "poema embutido (Carlos Drummond de Andrade)"
+if len(os.args) > 1 then
+    local sc = io.scanner(os.args[1])
+    if sc == nil then
+        print("não foi possível abrir " .. os.args[1])
+        os.exit(1)
+    end
+    lines = []
+    while io.scan(sc) do lines[] = io.scan_text(sc) end
+    io.close(sc)
+    fonte = os.args[1]
+end
+
+-- Letras ASCII, dígitos e bytes >= 128 (acentos em UTF-8) fazem parte da palavra.
+local function is_word_byte(b)
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or
+           (b >= 97 and b <= 122) or b >= 128
+end
+
+local function words_of(line, out)
+    local n = string.len(line)
+    local start = 0
+    for i = 1, n + 1 do
+        local inside = i <= n and is_word_byte(string.byte(line, i))
+        if inside and start == 0 then
+            start = i
+        elseif not inside and start > 0 then
+            out[] = string.lower(string.sub(line, start, i - 1))
+            start = 0
+        end
+    end
+end
+
+local freq = [=]
+local total = 0
+for _, line in lines do
+    local ws = []
+    words_of(line, ws)
+    for _, w in ws do
+        local c, ok = freq[w]
+        if ok then freq[w] = c + 1 else freq[w] = 1 end
+        total = total + 1
+    end
+end
+
+-- merge sort estável: mais frequente primeiro, empate em ordem alfabética
+local function before(x, y)
+    if x.count ~= y.count then return x.count > y.count end
+    return x.word < y.word
+end
+
+local function merge_sort(arr)
+    local n = len(arr)
+    if n <= 1 then return arr end
+    local mid = n // 2
+    local left = []
+    local right = []
+    for i = 0, mid - 1 do left[] = arr[i] end
+    for i = mid, n - 1 do right[] = arr[i] end
+    left = merge_sort(left)
+    right = merge_sort(right)
+    local out = []
+    local i = 0
+    local j = 0
+    while i < len(left) and j < len(right) do
+        if before(right[j], left[i]) then
+            out[] = right[j]; j = j + 1
+        else
+            out[] = left[i]; i = i + 1
+        end
+    end
+    while i < len(left) do out[] = left[i]; i = i + 1 end
+    while j < len(right) do out[] = right[j]; j = j + 1 end
+    return out
+end
+
+local entries = []
+for w, c in freq do entries[] = {word = w, count = c} end
+entries = merge_sort(entries)
+
+printf("fonte: %s\n", fonte)
+printf("%d palavras, %d distintas\n\n", total, len(entries))
+
+local top = math.min(10, len(entries))
+local maior = entries[0].count
+for i = 0, top - 1 do
+    local e = entries[i]
+    local barra = string.rep("█", (e.count * 30) // maior)
+    printf("  %2d. %-10s %3d  %s\n", i + 1, e.word, e.count, barra)
+end

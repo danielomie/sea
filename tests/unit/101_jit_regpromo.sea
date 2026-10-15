@@ -1,0 +1,92 @@
+-- Register promotion (JIT Fase 4): VM registers live in native locals inside
+-- compiled loops and are synced with the frame only at helper calls, bailouts,
+-- suspension and return. Each case below breaks if a sync point is missing.
+
+-- 1. a closure mutates a captured local; the loop reads it after every call
+local function upvalue_loop()
+    local x = 0
+    local inc = function() x = x + 1 end
+    local s = 0
+    for i = 1, 1000 do
+        inc()
+        s = s + x
+    end
+    return s, x
+end
+local u1, u2 = upvalue_loop()
+print("upvalue", u1, u2)
+
+-- 2. bailout mid-loop (int -> float) with several live promoted registers
+local function bail_mid()
+    local a, b, c = 0, 0, 0
+    for i = 1, 2000 do
+        a = a + 1
+        b = b + 2
+        if i == 1000 then c = 0.5 end
+        c = c + 1
+    end
+    return a, b, c
+end
+local b1, b2, b3 = bail_mid()
+print("bail", b1, b2, b3)
+
+-- 3. helper writing two registers (GET_TABLE2 via `v, ok = t[k]`)
+local function two_results()
+    local m = [=]
+    for i = 1, 100 do m[i] = i * 3 end
+    local hits, sum = 0, 0
+    for i = 1, 150 do
+        local v, ok = m[i]
+        if ok then hits = hits + 1; sum = sum + v end
+    end
+    return hits, sum
+end
+local g1, g2 = two_results()
+print("get2", g1, g2)
+
+-- 4. calls in a hot loop: args spilled, result reloaded, other locals intact
+local function add3(p, q, r) return p + q + r end
+local function call_loop()
+    local keep1, keep2 = 7, 11
+    local s = 0
+    for i = 1, 5000 do
+        s = s + add3(i, keep1, keep2)
+    end
+    return s, keep1, keep2
+end
+local c1, c2, c3 = call_loop()
+print("calls", c1, c2, c3)
+
+-- 5. field and global access inside the loop (helpers read/write registers)
+counter_r = 0
+local function fields()
+    local p = {}
+    p.v = 1
+    local s = 0
+    for i = 1, 3000 do
+        p.v = p.v + 1
+        counter_r = counter_r + 1
+        s = s + p.v
+    end
+    return s, p.v, counter_r
+end
+local f1, f2, f3 = fields()
+print("fields", f1, f2, f3)
+
+-- 6. nested loops with many live registers and a multi-value return
+local function many()
+    local r1, r2, r3, r4, r5, r6 = 1, 2, 3, 4, 5, 6
+    for i = 1, 300 do
+        for j = 1, 10 do
+            r1 = r1 + r2 % 7
+            r2 = r2 + r3 % 5
+            r3 = r3 + r4 % 3
+            r4 = r4 + r5 % 2
+            r5 = r5 + r6 % 11
+            r6 = r6 + j
+        end
+    end
+    return r1, r2, r3, r4, r5, r6
+end
+local m1, m2, m3, m4, m5, m6 = many()
+print("many", m1, m2, m3, m4, m5, m6)

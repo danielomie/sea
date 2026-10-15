@@ -1,0 +1,24 @@
+local W = 400
+local H = 400
+local MAXITER = 200
+
+local count = 0
+for py = 0, H-1 do
+    local ci = (py / H) * 2.0 - 1.0
+    for px = 0, W-1 do
+        local cr = (px / W) * 3.5 - 2.5
+        local zr = 0.0
+        local zi = 0.0
+        local n = 0
+        while n < MAXITER do
+            local zr2 = zr * zr
+            local zi2 = zi * zi
+            if zr2 + zi2 > 4.0 then break end
+            zi = 2.0 * zr * zi + ci
+            zr = zr2 - zi2 + cr
+            n = n + 1
+        end
+        if n == MAXITER then count = count + 1 end
+    end
+end
+print(count)

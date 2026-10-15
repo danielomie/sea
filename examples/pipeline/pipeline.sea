@@ -1,0 +1,107 @@
+--
+-- Pipeline de Processamento Paralelo
+--
+-- Três estágios conectados por canais:
+--
+--   [Source] ──jobs──▶ [Worker 1] ──╮
+--                      [Worker 2] ──╪──results──▶ [Sink]
+--                      [Worker N] ──╯
+--
+-- O Source emite N_JOBS tarefas; cada Worker processa uma tarefa por vez
+-- (simula I/O pesado com os.sleep); o Sink agrega os resultados.
+--
+-- O programa roda o pipeline 3 vezes (1 / 2 / 4 workers) e mede o speedup.
+--
+
+local N_JOBS  = 40   -- número de tarefas
+local WORK_MS = 50   -- ms por tarefa (simula I/O pesado: rede, disco, etc.)
+
+-- Executa o pipeline com `n_workers` workers paralelos.
+-- Retorna: soma dos resultados, contagem, tempo em ms.
+local function run_pipeline(n_workers)
+    local t_start = time.now()
+
+    -- Canais totalmente bufferizados para desacoplar os estágios
+    local jobs    = chan(N_JOBS)      -- Source → Workers
+    local results = chan(N_JOBS)      -- Workers → Sink
+    local done    = chan(n_workers)   -- Workers → Conector (sinalização de fim)
+
+    -- ── Estágio 1: Source ────────────────────────────────────────────────────
+    -- Emite N_JOBS tarefas e fecha o canal.
+    -- Como jobs é totalmente bufferizado, o Source completa sem bloquear.
+    go (function()
+        for i = 1, N_JOBS do
+            jobs <- i
+        end
+        close(jobs)
+    end)()
+
+    -- ── Estágio 2: Workers ───────────────────────────────────────────────────
+    -- Cada worker consome tarefas até o canal fechar, processa e emite resultado.
+    -- Com N workers, até N tarefas rodam em paralelo.
+    for w = 1, n_workers do
+        go (function()
+            for job in jobs do
+                time.sleep(WORK_MS * time.Millisecond)  -- simula latência de I/O
+                results <- (job * job)      -- f(job) = job²
+            end
+            done <- true                    -- avisa que terminou
+        end)()
+    end
+
+    -- ── Conector ─────────────────────────────────────────────────────────────
+    -- Espera todos os workers e fecha results para que o Sink saiba que acabou.
+    -- Fica SUSPENSA no canal (não ocupa thread do SO enquanto aguarda).
+    go (function()
+        for i = 1, n_workers do
+            local _ = <-done
+        end
+        close(results)
+    end)()
+
+    -- ── Estágio 3: Sink ──────────────────────────────────────────────────────
+    -- Agrega resultados. O for-in termina quando results é fechado.
+    local sum   = 0
+    local count = 0
+    for r in results do
+        sum   = sum + r
+        count = count + 1
+    end
+
+    return sum, count, time.milliseconds(time.since(t_start))
+end
+
+-- Formata speedup com 1 casa decimal: e.g. 39 → "3.9x"
+local function fmt_speedup(t_ref, t_cur)
+    local sp = math.floor(t_ref * 10 / t_cur)   -- ex: 39
+    local i  = math.floor(sp / 10)              -- parte inteira: 3
+    local d  = sp - i * 10                      -- decimal: 9
+    return i .. "." .. d .. "x"
+end
+
+-- Soma esperada: Σ i² para i=1..N = N*(N+1)*(2N+1)/6
+local expected = N_JOBS * (N_JOBS + 1) * (2 * N_JOBS + 1) / 6
+
+print("╔══════════════════════════════════════════╗")
+print("║   Pipeline de Processamento Paralelo     ║")
+print("╚══════════════════════════════════════════╝")
+print("  Tarefas  : " .. N_JOBS)
+print("  Trabalho : " .. WORK_MS .. " ms / tarefa  (simula I/O)")
+print("  f(x) = x²   soma esperada = " .. expected)
+print("")
+
+local s1, n1, t1 = run_pipeline(1)
+print("  [1 worker ]  " .. n1 .. " jobs  soma=" .. s1 .. "  " .. t1 .. " ms")
+
+local s2, n2, t2 = run_pipeline(2)
+print("  [2 workers]  " .. n2 .. " jobs  soma=" .. s2 .. "  " .. t2 .. " ms  speedup=" .. fmt_speedup(t1, t2))
+
+local s4, n4, t4 = run_pipeline(4)
+print("  [4 workers]  " .. n4 .. " jobs  soma=" .. s4 .. "  " .. t4 .. " ms  speedup=" .. fmt_speedup(t1, t4))
+
+print("")
+if s1 == expected and s2 == expected and s4 == expected then
+    print("  Resultados: CORRETOS ✓")
+else
+    print("  Resultados: DIVERGÊNCIA ✗  esperado=" .. expected)
+end

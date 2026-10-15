@@ -1,0 +1,65 @@
+-- Test: object-oriented programming via structs
+-- Factory pattern: all methods defined inside the struct literal
+
+local function new_point(x, y)
+    local self
+    self = {
+        x = x,
+        y = y,
+        to_string = function()
+            return "(" .. self.x .. ", " .. self.y .. ")"
+        end,
+        distance_to = function(other)
+            local dx = self.x - other.x
+            local dy = self.y - other.y
+            return math.sqrt(dx*dx + dy*dy)
+        end,
+        translate = function(dx, dy)
+            self.x = self.x + dx
+            self.y = self.y + dy
+        end,
+    }
+    return self
+end
+
+local p1 = new_point(0, 0)
+local p2 = new_point(3, 4)
+print(p1.to_string())       -- (0, 0)
+print(p2.to_string())       -- (3, 4)
+print(p1.distance_to(p2))   -- 5
+
+p1.translate(1, 1)
+print(p1.to_string())       -- (1, 1)
+
+-- stack implementation using a dynamic table (map) for items + methods
+local function new_stack()
+    local items = []
+    local self = {}          -- empty → TABLE_MAP (dynamic)
+    function self.push(v) items[] = v end
+    function self.pop()
+        local n = len(items)
+        if n == 0 then return nil end
+        local v = items[n-1]
+        del items[n-1]
+        return v
+    end
+    function self.peek()
+        local n = len(items)
+        if n == 0 then return nil end
+        return items[n-1]
+    end
+    function self.size() return len(items) end
+    function self.empty() return len(items) == 0 end
+    return self
+end
+
+local s = new_stack()
+print(s.empty())  -- true
+s.push(1)
+s.push(2)
+s.push(3)
+print(s.size())   -- 3
+print(s.peek())   -- 3
+print(s.pop())    -- 3
+print(s.size())   -- 2
+print(s.empty())  -- false

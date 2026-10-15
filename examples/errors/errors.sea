@@ -1,0 +1,112 @@
+--
+-- Tratamento de Erros em Sea
+--
+-- Demonstra as três camadas do sistema de erros:
+--
+--   1. error() / is_error() / ?   → erros como valores (soft errors)
+--   2. defer                      → cleanup garantido (LIFO)
+--   3. panic + recover            → erros fatais capturáveis
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Tratamento de Erros em Sea          ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── 1. error() e propagação com ? ────────────────────────────────────────────
+print("── 1. Erros como valores ────────────────────")
+
+local function parse_positivo(s)
+    local n = tonumber(s)
+    if n == nil then return error("'" .. s .. "' não é número") end
+    if n <= 0   then return error("esperado positivo, got " .. s) end
+    return n
+end
+
+local function raiz(s)
+    local n = parse_positivo(s)?   -- propaga o erro para o chamador
+    return math.sqrt(n)
+end
+
+local casos = {"9", "25", "0", "abc", "-4"}
+for i = 0, len(casos) - 1 do
+    local r = raiz(casos[i])
+    if is_error(r) then
+        print("  raiz('" .. casos[i] .. "') → ERRO: " .. r.message)
+    else
+        print("  raiz('" .. casos[i] .. "') → " .. r)
+    end
+end
+print("")
+
+-- ── 2. defer — cleanup garantido ─────────────────────────────────────────────
+print("── 2. defer — cleanup garantido ─────────────")
+
+local function com_recurso(nome, vai_falhar)
+    defer function()
+        print("  [" .. nome .. "] CLOSE recurso")
+    end
+
+    print("  [" .. nome .. "] OPEN recurso")
+
+    if vai_falhar then
+        return error("falha intencional")
+    end
+
+    print("  [" .. nome .. "] trabalho feito")
+    return "ok"
+end
+
+local r1 = com_recurso("conn-A", false)
+print("  → retorno: " .. tostring(r1))
+print("")
+
+local r2 = com_recurso("conn-B", true)
+if is_error(r2) then
+    print("  → ERRO: " .. r2.message)
+end
+print("")
+
+-- Múltiplos defers executam em ordem LIFO
+local function tres_recursos()
+    defer function() print("  [LIFO] close recurso 1") end
+    defer function() print("  [LIFO] close recurso 2") end
+    defer function() print("  [LIFO] close recurso 3") end
+    print("  [LIFO] open recursos 1, 2, 3  → defer executa na ordem reversa:")
+end
+
+tres_recursos()
+print("")
+
+-- ── 3. panic + recover ────────────────────────────────────────────────────────
+print("── 3. panic + recover ───────────────────────")
+
+local function safe_call(descricao, fn)
+    defer function()
+        local e = recover()
+        if e ~= nil then
+            print("  [" .. descricao .. "] PANIC capturado: " .. tostring(e))
+        end
+    end
+    fn()
+end
+
+safe_call("divisao-zero", function()
+    print("  antes do panic")
+    panic("divisão por zero detectada")
+    -- Em Sea, recover() restaura a execução aqui (diferente de Go)
+    print("  (continuação após recover)")
+end)
+print("  safe_call retorna normalmente após panic capturado")
+print("")
+
+safe_call("sem-panic", function()
+    print("  sem panic — recover() retorna nil")
+end)
+print("")
+
+print("── Resumo ───────────────────────────────────")
+print("  error(msg)  → cria valor de erro  (is_error, .message)")
+print("  expr?       → propaga erro para o chamador")
+print("  defer fn()  → cleanup LIFO, executa sempre")
+print("  panic(msg)  → erro fatal; defer + recover() para capturar")

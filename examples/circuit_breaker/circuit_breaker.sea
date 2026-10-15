@@ -1,0 +1,152 @@
+--
+-- Circuit Breaker em Sea
+--
+-- Padrão de resiliência: protege chamadas a serviços instáveis.
+--
+-- Estados:
+--   CLOSED    → chamadas passam; falhas incrementam contador
+--   OPEN      → chamadas rejeitadas imediatamente sem tentar o serviço
+--   HALF_OPEN → uma chamada de teste; se OK → CLOSED, se falha → OPEN
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Circuit Breaker em Sea              ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local CLOSED    = "CLOSED"
+local OPEN      = "OPEN"
+local HALF_OPEN = "HALF_OPEN"
+
+-- Cria um circuit breaker (single-threaded).
+--   threshold  = falhas consecutivas para abrir
+--   timeout_ms = ms que o circuito fica aberto antes de tentar HALF_OPEN
+local function novo_cb(threshold, timeout_ms)
+    local estado    = CLOSED
+    local falhas    = 0
+    local aberto_em = nil
+
+    local function tentar(fn)
+        -- Transição OPEN → HALF_OPEN se timeout expirou
+        if estado == OPEN then
+            local elapsed = time.milliseconds(time.since(aberto_em))
+            if elapsed >= timeout_ms then
+                estado = HALF_OPEN
+                print("  [CB] OPEN → HALF_OPEN (timeout expirou)")
+            else
+                return { ok = false, err = "circuito ABERTO — rejeitado" }
+            end
+        end
+
+        local current = estado
+        local res = fn()   -- resultado: { ok, valor } ou { ok=false, err }
+
+        if res.ok then
+            if current == HALF_OPEN then
+                estado = CLOSED
+                falhas = 0
+                print("  [CB] HALF_OPEN → CLOSED (sucesso)")
+            else
+                falhas = 0
+            end
+            return res
+        else
+            falhas = falhas + 1
+            if current == HALF_OPEN or falhas >= threshold then
+                estado    = OPEN
+                aberto_em = time.now()
+                local razao = current == HALF_OPEN and "HALF_OPEN falhou"
+                              or "threshold=" .. threshold .. " atingido"
+                print("  [CB] → OPEN (" .. razao .. ")")
+            end
+            return res
+        end
+    end
+
+    local function status()
+        return estado .. " (falhas=" .. falhas .. ")"
+    end
+
+    return { tentar = tentar, status = status }
+end
+
+-- Serviço simulado
+local chamadas = 0
+local function servico(falhar)
+    chamadas = chamadas + 1
+    time.sleep(10 * time.Millisecond)
+    if falhar then
+        return { ok = false, err = "serviço indisponível" }
+    end
+    return { ok = true, valor = "resp #" .. chamadas }
+end
+
+local cb = novo_cb(3, 200)
+
+print("── Fase 1: operações normais (threshold=3) ──")
+for i = 1, 3 do
+    local r = cb.tentar(function() return servico(false) end)
+    if r.ok then
+        print("  req " .. i .. " → " .. r.valor)
+    else
+        print("  req " .. i .. " → ERRO: " .. r.err)
+    end
+end
+print("  Status: " .. cb.status())
+print("")
+
+print("── Fase 2: falhas consecutivas → OPEN ───────")
+for i = 4, 6 do
+    local r = cb.tentar(function() return servico(true) end)
+    if r.ok then
+        print("  req " .. i .. " → " .. r.valor)
+    else
+        print("  req " .. i .. " → ERRO: " .. r.err)
+    end
+end
+print("  Status: " .. cb.status())
+print("")
+
+print("── Fase 3: circuito OPEN — rejeição imediata ─")
+for i = 7, 9 do
+    local r = cb.tentar(function() return servico(false) end)
+    if r.ok then
+        print("  req " .. i .. " → " .. r.valor)
+    else
+        print("  req " .. i .. " → REJEITADO: " .. r.err)
+    end
+end
+print("  Status: " .. cb.status())
+print("  (serviço chamado " .. chamadas .. " vezes no total)")
+print("")
+
+print("── Fase 4: aguarda timeout → HALF_OPEN (falha) ─")
+print("  Aguardando 210ms...")
+time.sleep(210 * time.Millisecond)
+
+local r4 = cb.tentar(function() return servico(true) end)
+print("  teste HALF_OPEN → ERRO: " .. r4.err)
+print("  Status: " .. cb.status())
+print("")
+
+print("── Fase 5: novo timeout → HALF_OPEN → CLOSED ───")
+print("  Aguardando 210ms...")
+time.sleep(210 * time.Millisecond)
+
+local r5 = cb.tentar(function() return servico(false) end)
+print("  teste HALF_OPEN → " .. r5.valor)
+print("  Status: " .. cb.status())
+print("")
+
+print("── Fase 6: circuito CLOSED novamente ────────────")
+for i = 1, 3 do
+    local r = cb.tentar(function() return servico(false) end)
+    print("  req → " .. r.valor)
+end
+
+print("")
+print("── Padrão ───────────────────────────────────")
+print("  CLOSED → falhas >= threshold → OPEN")
+print("  OPEN   → timeout expirou     → HALF_OPEN")
+print("  HALF_OPEN → sucesso → CLOSED / falha → OPEN")
+print("  use sync.mutex para tornar thread-safe em contexto concorrente")

@@ -1,0 +1,13 @@
+-- Module: simple math utilities
+local function add(a, b) return a + b end
+local function mul(a, b) return a * b end
+local function factorial(n)
+    if n <= 1 then return 1 end
+    return n * factorial(n - 1)
+end
+
+return {
+    add = add,
+    mul = mul,
+    factorial = factorial,
+}

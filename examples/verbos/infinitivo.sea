@@ -1,0 +1,476 @@
+--
+-- Verbos → Infinitivo (PT-BR)
+--
+-- Converte formas conjugadas de verbos portugueses para o infinitivo.
+-- Estratégia em dois estágios:
+--   1. Dicionário de irregulares (lookup direto, alta confiança)
+--   2. Regras de sufixo para verbos regulares (-ar / -er / -ir)
+--
+-- As regras são tentadas da mais específica (sufixo maior) para a
+-- menos específica, retornando na primeira correspondência.
+--
+
+-- ─── Utilitários de string ───────────────────────────────────────────────────
+
+local function termina_com(s, sufixo)
+    return string.ends_with(s, sufixo)
+end
+
+local function remover_sufixo(s, sufixo)
+    return string.sub(s, 1, len(s) - len(sufixo))
+end
+
+-- ─── Dicionário de irregulares ───────────────────────────────────────────────
+-- Formas conjugadas que não seguem padrão regular → infinitivo
+
+local irreg = map()
+
+-- ser
+irreg["sou"]    = "ser"
+irreg["és"]     = "ser"
+irreg["é"]      = "ser"
+irreg["somos"]  = "ser"
+irreg["sois"]   = "ser"
+irreg["são"]    = "ser"
+irreg["era"]    = "ser"
+irreg["eras"]   = "ser"
+irreg["éramos"] = "ser"
+irreg["eram"]   = "ser"
+irreg["fui"]    = "ser"
+irreg["foste"]  = "ser"
+irreg["foi"]    = "ser"
+irreg["fomos"]  = "ser"
+irreg["foram"]  = "ser"
+irreg["seja"]   = "ser"
+irreg["sejam"]  = "ser"
+irreg["sendo"]  = "ser"
+irreg["sido"]   = "ser"
+
+-- estar
+irreg["estou"]   = "estar"
+irreg["está"]    = "estar"
+irreg["estás"]   = "estar"
+irreg["estamos"] = "estar"
+irreg["estão"]   = "estar"
+irreg["estive"]  = "estar"
+irreg["esteve"]  = "estar"
+irreg["estavam"] = "estar"
+irreg["estava"]  = "estar"
+irreg["estando"] = "estar"
+irreg["estado"]  = "estar"
+
+-- ter
+irreg["tenho"]   = "ter"
+irreg["tens"]    = "ter"
+irreg["tem"]     = "ter"
+irreg["temos"]   = "ter"
+irreg["têm"]     = "ter"
+irreg["tinha"]   = "ter"
+irreg["tive"]    = "ter"
+irreg["teve"]    = "ter"
+irreg["tiveram"] = "ter"
+irreg["tendo"]   = "ter"
+irreg["tido"]    = "ter"
+
+-- ir
+irreg["vou"]   = "ir"
+irreg["vai"]   = "ir"
+irreg["vais"]  = "ir"
+irreg["vamos"] = "ir"
+irreg["vão"]   = "ir"
+irreg["ia"]    = "ir"
+irreg["ias"]   = "ir"
+irreg["indo"]  = "ir"
+-- "foi/foram" → "ser" tem prioridade (adicionados antes); ir usa "foi" também
+-- (ambiguidade real da língua — preferimos "ser" como mais frequente)
+
+-- vir
+irreg["venho"]  = "vir"
+irreg["vens"]   = "vir"
+irreg["vem"]    = "vir"
+irreg["vimos"]  = "vir"
+irreg["vêm"]    = "vir"
+irreg["vim"]    = "vir"
+irreg["veio"]   = "vir"
+irreg["vieram"] = "vir"
+irreg["vinha"]  = "vir"
+irreg["vindo"]  = "vir"
+
+-- fazer
+irreg["faço"]    = "fazer"
+irreg["faz"]     = "fazer"
+irreg["fazemos"] = "fazer"
+irreg["fazem"]   = "fazer"
+irreg["fiz"]     = "fazer"
+irreg["fez"]     = "fazer"
+irreg["fizeram"] = "fazer"
+irreg["fazia"]   = "fazer"
+irreg["fazendo"] = "fazer"
+irreg["feito"]   = "fazer"
+
+-- dar
+irreg["dou"]   = "dar"
+irreg["dá"]    = "dar"
+irreg["damos"] = "dar"
+irreg["dão"]   = "dar"
+irreg["dei"]   = "dar"
+irreg["deu"]   = "dar"
+irreg["deram"] = "dar"
+irreg["dava"]  = "dar"
+irreg["dando"] = "dar"
+irreg["dado"]  = "dar"
+
+-- ver
+irreg["vejo"]  = "ver"
+irreg["vê"]    = "ver"
+irreg["vemos"] = "ver"
+irreg["veem"]  = "ver"
+irreg["vi"]    = "ver"
+irreg["viu"]   = "ver"
+irreg["viram"] = "ver"
+irreg["via"]   = "ver"
+irreg["vendo"] = "ver"
+irreg["visto"] = "ver"
+
+-- poder
+irreg["posso"]   = "poder"
+irreg["podes"]   = "poder"
+irreg["pode"]    = "poder"
+irreg["podemos"] = "poder"
+irreg["podem"]   = "poder"
+irreg["pude"]    = "poder"
+irreg["pôde"]    = "poder"
+irreg["puderam"] = "poder"
+irreg["podia"]   = "poder"
+irreg["podendo"] = "poder"
+
+-- querer
+irreg["quero"]    = "querer"
+irreg["queres"]   = "querer"
+irreg["quer"]     = "querer"
+irreg["queremos"] = "querer"
+irreg["querem"]   = "querer"
+irreg["quis"]     = "querer"
+irreg["quiseram"] = "querer"
+irreg["queria"]   = "querer"
+irreg["querendo"] = "querer"
+
+-- saber
+irreg["sei"]      = "saber"
+irreg["sabe"]     = "saber"
+irreg["sabemos"]  = "saber"
+irreg["sabem"]    = "saber"
+irreg["soube"]    = "saber"
+irreg["souberam"] = "saber"
+irreg["sabia"]    = "saber"
+irreg["sabendo"]  = "saber"
+
+-- dizer
+irreg["digo"]     = "dizer"
+irreg["diz"]      = "dizer"
+irreg["dizemos"]  = "dizer"
+irreg["dizem"]    = "dizer"
+irreg["disse"]    = "dizer"
+irreg["disseram"] = "dizer"
+irreg["dizia"]    = "dizer"
+irreg["dizendo"]  = "dizer"
+irreg["dito"]     = "dizer"
+
+-- trazer
+irreg["trago"]     = "trazer"
+irreg["traz"]      = "trazer"
+irreg["trazemos"]  = "trazer"
+irreg["trazem"]    = "trazer"
+irreg["trouxe"]    = "trazer"
+irreg["trouxeram"] = "trazer"
+irreg["trazia"]    = "trazer"
+irreg["trazendo"]  = "trazer"
+irreg["trazido"]   = "trazer"
+
+-- pôr
+irreg["ponho"]   = "pôr"
+irreg["põe"]     = "pôr"
+irreg["pomos"]   = "pôr"
+irreg["põem"]    = "pôr"
+irreg["pus"]     = "pôr"
+irreg["pôs"]     = "pôr"
+irreg["puseram"] = "pôr"
+irreg["punha"]   = "pôr"
+irreg["pondo"]   = "pôr"
+irreg["posto"]   = "pôr"
+
+-- particípios -IR ambíguos com -ido (confundiriam com -ER pela regra geral)
+irreg["partido"] = "partir"
+irreg["dormido"] = "dormir"
+irreg["subido"]  = "subir"
+irreg["saído"]   = "sair"
+irreg["caído"]   = "cair"
+irreg["seguido"] = "seguir"
+irreg["pedido"]  = "pedir"
+irreg["sentido"] = "sentir"
+irreg["vestido"] = "vestir"
+irreg["surgido"] = "surgir"
+
+-- ─── Regras de sufixo (verbos regulares) ─────────────────────────────────────
+-- Cada regra: { sufixo, terminação_do_infinitivo, descrição }
+-- Ordenadas do sufixo mais longo para o mais curto (prioridade correta).
+
+local regras = array()
+
+local function regra(suf, term, desc)
+    local r = {sufixo=suf, terminacao=term, descricao=desc}
+    push(regras, r)
+end
+
+-- gerúndio (alta confiança)
+regra("ando", "ar", "gerúndio -AR")
+regra("endo", "er", "gerúndio -ER")
+regra("indo", "ir", "gerúndio -IR")
+
+-- futuro do indicativo
+regra("aremos", "ar", "futuro 1pp -AR")
+regra("eremos", "er", "futuro 1pp -ER")
+regra("iremos", "ir", "futuro 1pp -IR")
+regra("arão",   "ar", "futuro 3pp -AR")
+regra("erão",   "er", "futuro 3pp -ER")
+regra("irão",   "ir", "futuro 3pp -IR")
+regra("arei",   "ar", "futuro 1ps -AR")
+regra("erei",   "er", "futuro 1ps -ER")
+regra("irei",   "ir", "futuro 1ps -IR")
+regra("arás",   "ar", "futuro 2ps -AR")
+regra("erás",   "er", "futuro 2ps -ER")
+regra("irás",   "ir", "futuro 2ps -IR")
+regra("ará",    "ar", "futuro 3ps -AR")
+regra("erá",    "er", "futuro 3ps -ER")
+regra("irá",    "ir", "futuro 3ps -IR")
+
+-- pretérito perfeito
+regra("aram", "ar", "pret. perf. 3pp -AR")
+regra("eram", "er", "pret. perf. 3pp -ER")
+regra("iram", "ir", "pret. perf. 3pp -IR")
+regra("aste", "ar", "pret. perf. 2ps -AR")
+regra("este", "er", "pret. perf. 2ps -ER")
+regra("iste", "ir", "pret. perf. 2ps -IR")
+regra("ou",   "ar", "pret. perf. 3ps -AR")
+regra("eu",   "er", "pret. perf. 3ps -ER")
+regra("iu",   "ir", "pret. perf. 3ps -IR")
+regra("ei",   "ar", "pret. perf. 1ps -AR")
+
+-- imperfeito do indicativo
+regra("avam",  "ar", "imperf. 3pp -AR")
+regra("avas",  "ar", "imperf. 2ps -AR")
+regra("ava",   "ar", "imperf. 3ps -AR")
+regra("íamos", "ir", "imperf. 1pp -IR")
+regra("íeis",  "ir", "imperf. 2pp -IR")
+regra("iam",   "ir", "imperf. 3pp -IR")
+
+-- particípio passado
+regra("ados", "ar", "part. passado -AR plural")
+regra("adas", "ar", "part. passado -AR plural fem.")
+regra("idos", "er", "part. passado -ER/-IR plural")
+regra("ado",  "ar", "part. passado -AR")
+regra("ido",  "er", "part. passado -ER/-IR")
+
+-- presente do indicativo
+regra("amos", "ar", "presente 1pp -AR")
+regra("emos", "er", "presente 1pp -ER")
+regra("imos", "ir", "presente 1pp -IR")
+regra("ais",  "ar", "presente 2pp -AR")
+regra("eis",  "er", "presente 2pp -ER")
+regra("am",   "ar", "presente 3pp -AR")
+regra("em",   "er", "presente 3pp -ER/-IR")
+regra("as",   "ar", "presente 2ps -AR")
+regra("es",   "er", "presente 2ps -ER/-IR")
+
+-- ─── Função principal ────────────────────────────────────────────────────────
+
+local function para_infinitivo(forma)
+    local v = string.lower(string.trim(forma))
+    if len(v) == 0 then return nil, "vazio" end
+
+    -- 1. Verifica dicionário de irregulares
+    local inf_irreg = irreg[v]
+    if inf_irreg ~= nil then
+        return inf_irreg, "irregular"
+    end
+
+    -- 2. O próprio input já é um infinitivo?
+    if termina_com(v, "ar") or termina_com(v, "er") or termina_com(v, "ir") then
+        if len(v) >= 3 then
+            return v, "já é infinitivo"
+        end
+    end
+
+    -- 3. Tenta regras de sufixo (mais longa primeiro = mais específica)
+    for i = 0, len(regras)-1 do
+        local r = regras[i]
+        if termina_com(v, r.sufixo) then
+            local radical = remover_sufixo(v, r.sufixo)
+            if len(radical) >= 2 then
+                return radical .. r.terminacao, r.descricao
+            end
+        end
+    end
+
+    return nil, "não reconhecido"
+end
+
+-- ─── Testes ──────────────────────────────────────────────────────────────────
+
+local testes = array()
+
+local function t(forma, esperado)
+    push(testes, {forma=forma, esperado=esperado})
+end
+
+-- irregulares
+t("sou",     "ser")
+t("foi",     "ser")
+t("eram",    "ser")
+t("estou",   "estar")
+t("estava",  "estar")
+t("estando", "estar")
+t("tenho",   "ter")
+t("tinha",   "ter")
+t("tido",    "ter")
+t("vou",     "ir")
+t("vão",     "ir")
+t("indo",    "ir")
+t("venho",   "vir")
+t("veio",    "vir")
+t("faço",    "fazer")
+t("fez",     "fazer")
+t("feito",   "fazer")
+t("dou",     "dar")
+t("deu",     "dar")
+t("posso",   "poder")
+t("pôde",    "poder")
+t("quero",   "querer")
+t("quis",    "querer")
+t("sei",     "saber")
+t("soube",   "saber")
+t("digo",    "dizer")
+t("disse",   "dizer")
+t("trago",   "trazer")
+t("trouxe",  "trazer")
+t("ponho",   "pôr")
+t("pôs",     "pôr")
+
+-- regulares — gerúndio
+t("cantando", "cantar")
+t("comendo",  "comer")
+t("partindo", "partir")
+t("falando",  "falar")
+t("bebendo",  "beber")
+t("dormindo", "dormir")
+t("andando",  "andar")
+t("correndo", "correr")
+t("subindo",  "subir")
+
+-- regulares — pretérito perfeito
+t("cantou",   "cantar")
+t("comeu",    "comer")
+t("partiu",   "partir")
+t("cantaram", "cantar")
+t("comeram",  "comer")
+t("partiram", "partir")
+t("falou",    "falar")
+t("bebeu",    "beber")
+
+-- regulares — futuro
+t("cantará",  "cantar")
+t("comerá",   "comer")
+t("partirá",  "partir")
+t("cantarão", "cantar")
+t("comerão",  "comer")
+t("partirão", "partir")
+t("cantarei", "cantar")
+t("comerei",  "comer")
+
+-- regulares — imperfeito
+t("cantava",  "cantar")
+t("cantavam", "cantar")
+t("dormiam",  "dormir")
+
+-- regulares — particípio
+t("cantado",  "cantar")
+t("comido",   "comer")
+t("partido",  "partir")
+t("cantados", "cantar")
+t("falado",   "falar")
+
+-- regulares — presente
+t("cantamos", "cantar")
+t("comemos",  "comer")
+t("partimos", "partir")
+t("cantam",   "cantar")
+t("comem",    "comer")
+t("cantar",   "cantar")
+t("comer",    "comer")
+t("partir",   "partir")
+
+-- ─── Execução e relatório ────────────────────────────────────────────────────
+
+print("╔══════════════════════════════════════════╗")
+print("║   Verbos → Infinitivo (PT-BR)            ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local acertos = 0
+local erros   = 0
+local total   = len(testes)
+
+for i = 0, total-1 do
+    local tc         = testes[i]
+    local inf, regra_usada = para_infinitivo(tc.forma)
+    local ok         = (inf == tc.esperado)
+
+    if ok then
+        acertos = acertos + 1
+    else
+        erros = erros + 1
+        local got = inf
+        if got == nil then got = "?" end
+        print("  ERRO  " .. tc.forma .. " → " .. got
+              .. "  (esperado: " .. tc.esperado .. ")  [" .. regra_usada .. "]")
+    end
+end
+
+print("")
+print("  Resultado: " .. acertos .. "/" .. total .. " corretos  (" .. erros .. " erros)")
+print("")
+
+-- ─── Demonstração ────────────────────────────────────────────────────────────
+print("───────────────────────────────────────────")
+print("  Exemplos:")
+print("───────────────────────────────────────────")
+
+local demos = array()
+push(demos, "cantando")
+push(demos, "comeram")
+push(demos, "partirão")
+push(demos, "estando")
+push(demos, "foram")
+push(demos, "fazendo")
+push(demos, "correndo")
+push(demos, "dormiam")
+push(demos, "bebeu")
+push(demos, "cantarei")
+push(demos, "partimos")
+push(demos, "trazendo")
+push(demos, "vendo")
+push(demos, "podendo")
+push(demos, "disseram")
+push(demos, "trouxeram")
+push(demos, "querendo")
+push(demos, "souberam")
+
+for i = 0, len(demos)-1 do
+    local forma = demos[i]
+    local inf, desc = para_infinitivo(forma)
+    local resultado = inf
+    if resultado == nil then resultado = "?" end
+    print("  " .. forma .. " → " .. resultado .. "  [" .. desc .. "]")
+end
+
+print("───────────────────────────────────────────")

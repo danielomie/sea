@@ -1,0 +1,69 @@
+-- shimmer_run_demo.sea — demonstra console.shimmer_run
+-- Usage: bin/sea libs/console/examples/shimmer_run_demo.sea
+
+local console = require("./libs/console/console")
+local time    = require("time")
+
+console.writeln("=== shimmer_run demo ===", { bold = true, color = "bright_white" })
+console.writeln("")
+
+-- ---- 1. Retorna um valor simples -------------------------------------------
+console.writeln("1. Retorna valor da função:", { color = "bright_black" })
+console.write("   ")
+
+local soma = console.shimmer_run("Somando 1..10M", function()
+    local s = 0
+    for i = 1, 10000000 do
+        s = s + i
+    end
+    time.sleep(time.second * 2)
+    return s
+end)
+
+console.writeln("resultado = " .. tostring(soma), { color = "bright_green" })
+console.writeln("")
+
+-- ---- 2. Retorna nil (efeito puro) ------------------------------------------
+console.writeln("2. Sem retorno (sleep simulado):", { color = "bright_black" })
+console.write("   ")
+
+console.shimmer_run("Aguardando 1.5s...", function()
+    time.sleep(time.Millisecond * 1500)
+end)
+
+console.writeln("pronto", { color = "bright_green" })
+console.writeln("")
+
+-- ---- 3. Com opts (cor personalizada) ---------------------------------------
+console.writeln("3. Cor personalizada:", { color = "bright_black" })
+console.write("   ")
+
+local msg = console.shimmer_run("Processando arquivo", function()
+    time.sleep(time.Millisecond * 800)
+    return "arquivo.txt lido (42 KB)"
+end, { color = "#f59e0b" })
+
+console.writeln(msg, { color = "bright_green" })
+console.writeln("")
+
+-- ---- 4. Múltiplas etapas encadeadas ----------------------------------------
+console.writeln("4. Etapas encadeadas:", { color = "bright_black" })
+
+local etapas = {
+    { label = "Conectando ao servidor",  dur = 600  },
+    { label = "Baixando dados",          dur = 1000 },
+    { label = "Processando resposta",    dur = 400  },
+}
+
+for i = 0, len(etapas) - 1 do
+    local e = etapas[i]
+    console.write("   ")
+    local ok = console.shimmer_run(e.label, function()
+        time.sleep(time.Millisecond * e.dur)
+        return true
+    end)
+    console.writeln("✓", { color = "bright_green" })
+end
+
+console.writeln("")
+console.writeln("Tudo concluído!", { bold = true, color = "bright_green" })

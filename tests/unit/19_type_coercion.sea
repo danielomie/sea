@@ -1,0 +1,33 @@
+-- Test: type system and coercion
+-- type() function
+print(type(nil))        -- nil
+print(type(true))       -- bool
+print(type(false))      -- bool
+print(type(42))         -- int
+print(type(3.14))       -- number
+print(type("hello"))    -- string
+print(type({}))         -- table
+print(type(print))      -- function
+print(type(error("e"))) -- error
+
+-- tostring
+print(tostring(nil))    -- nil
+print(tostring(true))   -- true
+print(tostring(false))  -- false
+print(tostring(42))     -- 42
+print(tostring(3.14))   -- 3.14
+print(tostring("hi"))   -- hi
+
+-- tonumber
+print(tonumber("42"))     -- 42
+print(tonumber("3.14"))   -- 3.14
+print(tonumber("0xff"))   -- 255
+print(tonumber(100))      -- 100
+print(tonumber(nil))      -- nil
+print(tonumber("abc"))    -- nil
+
+-- truthiness
+if 0 then print("zero is truthy") end       -- zero is truthy
+if "" then print("empty str is truthy") end  -- empty str is truthy
+if nil then print("nil is truthy") else print("nil is falsy") end   -- nil is falsy
+if false then print("false is truthy") else print("false is falsy") end  -- false is falsy

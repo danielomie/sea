@@ -1,0 +1,54 @@
+-- Conditions must test the right register. The dead-write eliminator used to
+-- drop the copy of a condition into a temporary, because it did not know that
+-- conditional jumps read their register (`local v, ok = t[k]; if ok then`
+-- tested a stale register).
+
+local m = [=]
+for i = 1, 5 do m[i] = i * 3 end
+
+-- if on the second result of a two-value lookup
+local hits, sum = 0, 0
+for i = 1, 8 do
+    local v, ok = m[i]
+    if ok then hits = hits + 1; sum = sum + v end
+end
+print("if ok", hits, sum)
+
+-- if not / nil tests
+local misses = 0
+for i = 1, 8 do
+    local v, ok = m[i]
+    if not ok then misses = misses + 1 end
+    if v == nil then misses = misses + 10 end
+end
+print("if not", misses)
+
+-- while on a looked-up flag
+local i = 1
+local walked = 0
+local v, ok = m[i]
+while ok do
+    walked = walked + v
+    i = i + 1
+    v, ok = m[i]
+end
+print("while", walked, i)
+
+-- and / or with looked-up values
+local both, either = 0, 0
+for k = 1, 8 do
+    local a, oka = m[k]
+    local b, okb = m[k + 2]
+    if oka and okb then both = both + 1 end
+    if oka or okb then either = either + 1 end
+end
+print("and/or", both, either)
+
+-- conditions on call results copied into temporaries
+local function even(n) return n % 2 == 0 end
+local evens = 0
+for k = 1, 10 do
+    local e = even(k)
+    if e then evens = evens + 1 end
+end
+print("call cond", evens)

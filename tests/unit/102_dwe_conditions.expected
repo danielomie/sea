@@ -1,0 +1,5 @@
+if ok	5	45
+if not	33
+while	45	6
+and/or	3	5
+call cond	5

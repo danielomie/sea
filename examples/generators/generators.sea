@@ -1,0 +1,190 @@
+--
+-- Geradores, Memoização e Captura de Variáveis em Sea
+--
+-- Demonstra:
+--   - Geradores feitos com closures (estado privado entre chamadas)
+--   - Composição de geradores: map / filter / take
+--   - Memoização genérica com map
+--   - Variável de laço nova a cada iteração: closures e goroutines criadas num
+--     laço guardam o valor daquela iteração (como em Lua 5.4 e Go 1.22)
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║   Geradores e Captura de Variáveis       ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── 1. Geradores ─────────────────────────────────────────────────────────────
+print("── 1. Geradores com closures ────────────────")
+
+-- Um gerador é uma função que devolve o próximo valor, ou nil quando acaba.
+local function range(a, b, step)
+    local cur = a
+    local s = step or 1
+    return function()
+        if cur > b then return nil end
+        local v = cur
+        cur = cur + s
+        return v
+    end
+end
+
+local function fib_gen()
+    local a = 0
+    local b = 1
+    return function()
+        local v = a
+        a, b = b, a + b
+        return v
+    end
+end
+
+local function gmap(gen, f)
+    return function()
+        local v = gen()
+        if v == nil then return nil end
+        return f(v)
+    end
+end
+
+local function gfilter(gen, pred)
+    return function()
+        local v = gen()
+        while v ~= nil and not pred(v) do v = gen() end
+        return v
+    end
+end
+
+local function take(gen, n)
+    local out = []
+    for i = 1, n do
+        local v = gen()
+        if v == nil then break end
+        out[] = tostring(v)
+    end
+    return string.join(out, " ")
+end
+
+print("  range(1, 10, 3):       " .. take(range(1, 10, 3), 100))
+print("  fibonacci (12):        " .. take(fib_gen(), 12))
+print("  quadrados pares:       " .. take(gfilter(gmap(range(1, 100), function(x) return x * x end),
+                                                  function(x) return x % 2 == 0 end), 6))
+-- cada gerador tem estado próprio
+local g1 = fib_gen()
+local g2 = fib_gen()
+g1(); g1(); g1()
+printf("  independentes: g1 → %d, g2 → %d\n", g1(), g2())
+print("")
+
+-- ── 2. Memoização ────────────────────────────────────────────────────────────
+print("── 2. Memoização genérica ───────────────────")
+
+local function memoize(f)
+    local cache = [=]
+    local stats = {hits = 0, misses = 0}
+    local wrapped = function(n)
+        local v, ok = cache[n]
+        if ok then
+            stats.hits = stats.hits + 1
+            return v
+        end
+        stats.misses = stats.misses + 1
+        v = f(n)
+        cache[n] = v
+        return v
+    end
+    return wrapped, stats
+end
+
+-- número de partições de n (recursão com muitos subproblemas repetidos)
+local partitions = nil
+local function count(n, k)
+    if n == 0 then return 1 end
+    if n < 0 or k == 0 then return 0 end
+    return count(n - k, k) + count(n, k - 1)
+end
+local function p_slow(n) return count(n, n) end
+
+local p_fast, st = memoize(function(n)
+    -- p(n) via a recorrência pentagonal de Euler, usando o próprio memo
+    if n < 0 then return 0 end
+    if n == 0 then return 1 end
+    local total = 0
+    local k = 1
+    while true do
+        local g1 = k * (3 * k - 1) // 2
+        local g2 = k * (3 * k + 1) // 2
+        if g1 > n then break end
+        local sign = 1
+        if k % 2 == 0 then sign = -1 end
+        total = total + sign * partitions(n - g1)
+        if g2 <= n then total = total + sign * partitions(n - g2) end
+        k = k + 1
+    end
+    return total
+end)
+partitions = p_fast
+
+printf("  p(20) recursivo simples: %d\n", p_slow(20))
+printf("  p(20) memoizado:         %d\n", p_fast(20))
+printf("  p(200) memoizado:        %d   (acertos %d, cálculos %d)\n",
+       p_fast(200), st.hits, st.misses)
+print("")
+
+-- ── 3. Uma variável por iteração ─────────────────────────────────────────────
+print("── 3. Closures criadas num laço ─────────────")
+
+local handlers = []
+for i = 1, 4 do
+    handlers[] = function() return "handler " .. i end
+end
+local nomes = []
+for _, h in handlers do nomes[] = h() end
+print("  " .. string.join(nomes, ", "))
+
+-- vale também para o for-in (as duas variáveis)
+local cores = {"vermelho", "verde", "azul"}
+local mostra = []
+for idx, cor in cores do
+    mostra[] = function() return idx .. ":" .. cor end
+end
+local partes = []
+for _, f in mostra do partes[] = f() end
+print("  " .. string.join(partes, "  "))
+
+-- e cada iteração ainda pode alterar a sua própria variável
+local contadores = []
+for i = 1, 3 do
+    local inc = function() i = i + 10; return i end
+    contadores[] = inc
+end
+printf("  contadores: %d %d %d  (de novo: %d)\n",
+       contadores[0](), contadores[1](), contadores[2](), contadores[0]())
+print("")
+
+-- ── 4. Goroutines por iteração ───────────────────────────────────────────────
+print("── 4. Goroutines criadas num laço ───────────")
+
+local results = chan(10)
+for i = 1, 5 do
+    go (function()
+        -- cada goroutine vê o seu i, mesmo rodando depois do laço terminar
+        results <- i * i
+    end)()
+end
+local soma = 0
+for i = 1, 5 do soma = soma + <-results end
+printf("  soma dos quadrados de 1..5 calculada em 5 goroutines: %d\n", soma)
+
+-- uma variável capturada pode receber um objeto novo depois da goroutine
+-- começar; ela continua vendo o objeto atual com segurança
+local config = {versao = 1}
+local pronto = chan()
+local lido = chan()
+go (function()
+    local _ = <-pronto
+    lido <- config.versao
+end)()
+config = {versao = 2}
+pronto <- true
+printf("  goroutine leu a configuração versão %d\n", <-lido)

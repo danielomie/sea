@@ -1,0 +1,43 @@
+-- Test: varargs
+local function sum(...)
+    local total = 0
+    for i, v in {...} do
+        total = total + v
+    end
+    return total
+end
+
+print(sum(1, 2, 3))          -- 6
+print(sum(10, 20, 30, 40))   -- 100
+print(sum())                  -- 0
+
+-- pack varargs into table
+local function pack(...)
+    return {...}
+end
+local t = pack(5, 10, 15)
+print(t[0])   -- 5
+print(t[1])   -- 10
+print(t[2])   -- 15
+
+-- pass through varargs
+local function wrap(...)
+    return sum(...)
+end
+print(wrap(1, 2, 3, 4, 5))  -- 15
+
+-- count varargs
+local function count(...)
+    local t = {...}
+    return len(t)
+end
+print(count(1, 2, 3))   -- 3
+print(count())           -- 0
+
+-- mixed fixed + vararg
+local function first_and_rest(first, ...)
+    local rest = {...}
+    return first, len(rest)
+end
+local f, r = first_and_rest(10, 20, 30, 40)
+print(f, r)   -- 10	3

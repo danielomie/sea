@@ -1,0 +1,65 @@
+-- Compiler facts (deferred copies, constants, "is int") must hold on every
+-- path that reaches a use. These used to miscompile silently: a copy
+-- materialized in one branch, a constant or int-ness learned in `then` leaking
+-- into `else`, and a type change in a loop body ignored at the next iteration.
+
+local flag = len(os.args) > 5      -- false at run time, unknown to the compiler
+
+-- deferred copy, assigned in a branch that does not run
+local m = 1
+local i = m
+if flag then i = 99 end
+print("copy", i, m)
+
+-- copy whose source changes in a branch
+local src = 10
+local cp = src
+if flag then src = 20 end
+print("copy src", cp, src)
+
+-- constant learned in `then` must not fold in `else`
+local x = 1.5
+local k = 2
+local y = 0
+if flag then x = 7 else y = x + k end
+print("const", y)
+
+-- int-ness on one path only does not survive the merge
+local v = 1
+if flag then v = 2 else v = 2.5 end
+print("merge", v + k)
+
+-- type change later in a loop body is seen at the next iteration
+local a = 1
+local n = 0
+local r = 0
+while n < 3 do
+    r = a + k
+    a = 1.5
+    n = n + 1
+end
+print("loop", r)
+
+-- the sift-down loop that exposed the copy bug (heap pop on a 1-element heap)
+local prio = []
+local cnt = len(prio)
+local idx = 0
+while true do
+    local l = 2 * idx + 1
+    local mm = idx
+    if l < cnt and prio[l] < prio[mm] then mm = l end
+    if mm == idx then break end
+    idx = mm
+end
+print("sift", idx, len(prio))
+
+-- a captured local changed by a closure call is not a constant
+local cap = 5
+local set = function() cap = 1.5 end
+set()
+print("captured", cap + 1)
+
+-- accumulators keep their fast int path (and stay correct)
+local sum = 0
+for j = 1, 1000 do sum = sum + j end
+print("sum", sum)

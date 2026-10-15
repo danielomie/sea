@@ -1,0 +1,168 @@
+--
+-- Coleções em Sea: Arrays, Maps e Tabelas
+--
+-- Demonstra:
+--   - Array dinâmico: append, índice negativo, del com shift
+--   - Map [=]: qualquer tipo de chave, lookup com ok, iteração, del
+--   - Frequência de palavras: combinando string.split + map
+--   - Tabela dinâmica {} vs struct {k=v,...}
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Coleções em Sea                     ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── 1. Array dinâmico ─────────────────────────────────────────────────────────
+print("── 1. Array dinâmico ────────────────────────")
+
+local a = []
+for i = 1, 5 do a[] = i * 10 end  -- 10 20 30 40 50
+
+print("  len = " .. len(a))
+print("  a[0]  = " .. a[0])    -- 10
+print("  a[-1] = " .. a[-1])   -- 50 (último)
+print("  a[-2] = " .. a[-2])   -- 40
+
+-- del com shift
+del a[1]   -- remove 20, restante: 10 30 40 50
+local partes = []
+for i = 0, len(a) - 1 do partes[] = tostring(a[i]) end
+print("  após del a[1]: " .. string.join(partes, " "))
+
+-- append no final
+a[] = 99
+partes = []
+for i = 0, len(a) - 1 do partes[] = tostring(a[i]) end
+print("  após a[]=99:   " .. string.join(partes, " "))
+
+-- pré-alocado com capacidade
+local b = [20]   -- capacidade inicial 20, len=0
+for i = 0, 9 do b[] = i end
+print("  pré-alocado [20], len após 10 pushes = " .. len(b))
+print("")
+
+-- ── 2. Map [=]: chaves de qualquer tipo ───────────────────────────────────────
+print("── 2. Map [=] ───────────────────────────────")
+
+local m = [=]
+
+-- Chaves de tipos diferentes
+m["nome"]  = "Sea"
+m[1]       = "um"
+m[3.14]    = "pi"
+m[true]    = "sim"
+
+print("  m[\"nome\"] = " .. m["nome"])
+print("  m[1]      = " .. m[1])
+print("  m[3.14]   = " .. m[3.14])
+print("  m[true]   = " .. m[true])
+print("  len       = " .. len(m))
+
+-- Lookup com dois retornos: distingue nil-ausente de nil-armazenado
+m["vazio"] = nil           -- chave existe, valor é nil
+
+local v1, ok1 = m["nome"]
+local v2, ok2 = m["nao-existe"]
+local v3, ok3 = m["vazio"]
+
+print("  m[\"nome\"]:      v=" .. tostring(v1) .. "  ok=" .. tostring(ok1))   -- Sea / true
+print("  m[\"nao-existe\"]:v=" .. tostring(v2) .. " ok=" .. tostring(ok2))   -- nil / false
+print("  m[\"vazio\"]:     v=" .. tostring(v3) .. " ok=" .. tostring(ok3))   -- nil / true
+
+-- del e re-inserção
+del m[1]
+print("  após del m[1]: m[1] existe? " .. tostring((m[1] ~= nil)))
+m[1] = "re-um"
+print("  após re-insert: m[1] = " .. m[1])
+print("")
+
+-- ── 3. Iteração sobre map ─────────────────────────────────────────────────────
+print("── 3. Iteração sobre map ────────────────────")
+
+local notas = [=]
+notas["Alice"] = 9.5
+notas["Bob"]   = 7.2
+notas["Carla"] = 8.8
+notas["Diego"] = 6.1
+
+-- Coleta e ordena (ordem do map não é garantida)
+local nomes = []
+for nome, _ in notas do nomes[] = nome end
+
+-- Bubble sort nos nomes
+for i = 0, len(nomes) - 2 do
+    for j = i + 1, len(nomes) - 1 do
+        if nomes[i] > nomes[j] then
+            local tmp = nomes[i]; nomes[i] = nomes[j]; nomes[j] = tmp
+        end
+    end
+end
+
+local total = 0.0
+local count = 0
+for i = 0, len(nomes) - 1 do
+    local n = nomes[i]
+    local nota = notas[n]
+    print("  " .. string.pad_right(n, 8) .. string.format("%.1f", nota))
+    total = total + nota
+    count = count + 1
+end
+print("  média: " .. string.format("%.2f", total / count))
+print("")
+
+-- ── 4. Frequência de palavras ─────────────────────────────────────────────────
+print("── 4. Frequência de palavras ────────────────")
+
+local texto = "o rato roeu a roupa do rei de roma o rei mandou o rato embora"
+local palavras = string.split(texto, " ")
+local freq = [=]
+
+for i = 0, len(palavras) - 1 do
+    local p = palavras[i]
+    local f, _ = freq[p]
+    if f == nil then f = 0 end
+    freq[p] = f + 1
+end
+
+-- Coleta pares e ordena por frequência decrescente
+local pares = []
+for palavra, cnt in freq do
+    pares[] = {p = palavra, n = cnt}
+end
+
+for i = 0, len(pares) - 2 do
+    for j = i + 1, len(pares) - 1 do
+        if pares[j].n > pares[i].n or
+           (pares[j].n == pares[i].n and pares[j].p < pares[i].p) then
+            local tmp = pares[i]; pares[i] = pares[j]; pares[j] = tmp
+        end
+    end
+end
+
+print("  texto: '" .. texto .. "'")
+for i = 0, math.min(4, len(pares) - 1) do
+    local pair = pares[i]
+    print("  '" .. string.pad_right(pair.p, 8) .. "' : " .. pair.n .. "x")
+end
+print("")
+
+-- ── 5. Tabela {} vs struct {k=v,...} ─────────────────────────────────────────
+print("── 5. Tabela {} vs struct {k=v,...} ─────────")
+
+-- {} vazia é TABLE_MAP: pode receber novos campos dinamicamente
+local dyn = {}
+dyn.x = 1
+dyn.y = 2
+dyn.z = 3
+print("  {} dinâmica: type=" .. type(dyn) .. " x=" .. dyn.x)
+
+-- {k=v,...} com campos é struct: layout fixo, mais eficiente
+local fixed = { x = 1, y = 2, z = 3 }
+print("  {k=v} struct: type=" .. type(fixed) .. " x=" .. fixed.x)
+
+-- Struct não aceita novos campos (tentativa retorna nil):
+local ok_dyn, _ = dyn["w"]   -- dinâmica aceita qualquer campo
+print("  {} antes de set w: " .. tostring(ok_dyn))
+dyn["w"] = 4
+print("  {} após set w: " .. tostring(dyn.w))

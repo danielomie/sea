@@ -1,0 +1,41 @@
+-- decode.sea — json.decode examples
+-- Usage: bin/sea libs/json/examples/decode.sea
+
+local json = require("./libs/json/json")
+
+-- primitives
+print(json.decode("null"))    -- nil  → printed as "nil"
+print(json.decode("true"))    -- true
+print(json.decode("42"))      -- 42
+print(json.decode('"hello"')) -- hello
+
+-- array (returns SeaArray, 0-indexed)
+local arr = json.decode("[10, 20, 30]")
+print(arr[0], arr[1], arr[2])   -- 10  20  30
+print(len(arr))                  -- 3
+
+-- object (returns table)
+local user = json.decode('{"name":"alice","age":30,"active":true}')
+print(user["name"])    -- alice
+print(user["age"])     -- 30
+print(user["active"])  -- true
+
+-- nested
+local resp = json.decode('{"ok":true,"data":{"items":[1,2,3],"total":3}}')
+print(resp["ok"])                    -- true
+print(resp["data"]["total"])         -- 3
+print(resp["data"]["items"][0])      -- 1
+
+-- error handling: returns nil on invalid JSON
+local bad = json.decode("{invalid}")
+print(bad)         -- nil
+print(bad == nil)  -- true
+
+-- round-trip
+local original = { x = 1, y = "hello", flags = {true, false, true} }
+local encoded  = json.encode(original)
+local decoded  = json.decode(encoded)
+print(decoded["x"])        -- 1
+print(decoded["y"])        -- hello
+print(decoded["flags"][0]) -- true
+print(decoded["flags"][2]) -- true

@@ -1,0 +1,3 @@
+forin_map          144.65 ms  (500 iters x 10000 entries)
+forin_table        139.93 ms  (500 iters x 10000 entries)
+forin_array        136.69 ms  (500 iters x 10000 entries)

@@ -1,0 +1,25 @@
+nil
+bool
+bool
+int
+number
+string
+table
+function
+error
+nil
+true
+false
+42
+3.14
+hi
+42
+3.14
+255
+100
+nil
+nil
+zero is truthy
+empty str is truthy
+nil is falsy
+false is falsy

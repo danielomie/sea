@@ -1,0 +1,23 @@
+-- Test: x = nil on an owned local emits OP_RELEASE (no leak, no double-free)
+
+-- Case 1: basic release — owned string freed before end_scope
+local s = tostring(42)
+s = nil
+print("case1 ok")
+
+-- Case 2: array retains element; x = nil drops our local ref only (RC: 2→1)
+local arr = []
+local x = tostring(99)
+arr[] = x      -- RC 1→2
+x = nil        -- OP_RELEASE → RC 2→1; arr still holds it
+print(arr[0])  -- must print "99"
+
+-- Case 3: x = nil on a non-owned local (number) is a plain assign, no crash
+local n = 123
+n = nil
+print("case3 ok")
+
+-- Case 4: x = nil on already-nil is a no-op, no crash
+local z = nil
+z = nil
+print("case4 ok")

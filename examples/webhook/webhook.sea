@@ -1,0 +1,139 @@
+--
+-- Webhook Dispatcher em Sea
+--
+-- Demonstra:
+--   - Fan-out: goroutine por destino, posta payload via http.post
+--   - Retry com backoff exponencial (3 tentativas)
+--   - Coleta de resultados por canal
+--   - sync.waitgroup para aguardar todos os disparos
+--
+-- O servidor mock retorna 500 na 1ª chamada por rota (simula falha transiente)
+-- e 200 nas chamadas seguintes, o que força a lógica de retry a actuar.
+--
+
+local http = require("./libs/http/http")
+local json = require("./libs/json/json")
+
+print("╔══════════════════════════════════════════╗")
+print("║      Webhook Dispatcher em Sea           ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── Servidor mock ─────────────────────────────────────────────────────────────
+-- Retorna 500 na 1ª requisição por rota, 200 nas seguintes.
+local call_mu   = sync.mutex()
+local call_cnt  = [=]   -- path → número de chamadas
+
+local PORT = 18383
+
+local function mock_handler(req)
+    local path = req.path
+    call_mu.acquire(call_mu)
+    local prev, ok = call_cnt[path]
+    local n = (ok and prev or 0) + 1
+    call_cnt[path] = n
+    call_mu.release(call_mu)
+
+    if n == 1 then
+        return {
+            status = 500,
+            body   = '{"error":"server_error","retry":true}' .. "\n",
+            headers = { ["Content-Type"] = "application/json" },
+        }
+    end
+    return {
+        status = 200,
+        body   = '{"ok":true,"path":"' .. path .. '"}' .. "\n",
+        headers = { ["Content-Type"] = "application/json" },
+    }
+end
+
+go (function() http.serve(PORT, mock_handler) end)()
+time.sleep(150 * time.Millisecond)
+print("Servidor mock em http://localhost:" .. PORT)
+print("")
+
+-- ── Webhook sender com retry exponencial ──────────────────────────────────────
+-- Retorna (resultado, nil) ou (nil, mensagem_erro)
+local function send_webhook(url, payload, max_retries)
+    local att = 0
+    while att < max_retries do
+        att = att + 1
+        local r = http.post(url, payload, "application/json")
+        if r.ok then
+            return r, nil
+        end
+        if att < max_retries then
+            local wait_ms = att * 50   -- 50ms, 100ms, 150ms …
+            time.sleep(wait_ms * time.Millisecond)
+        end
+    end
+    return nil, error("max_retries exceeded")
+end
+
+-- ── Dispatcher ────────────────────────────────────────────────────────────────
+local function disparar(label, url, payload, results, wg)
+    go (function()
+        local att_count = 0
+        local att2 = 0
+        while att2 < 3 do
+            att2 = att2 + 1
+            att_count = att2
+            local r = http.post(url, payload, "application/json")
+            if r.ok then
+                results <- { label = label, ok = true, tentativas = att_count }
+                wg.done(wg)
+                return
+            end
+            if att2 < 3 then
+                time.sleep(att2 * 50 * time.Millisecond)
+            end
+        end
+        results <- { label = label, ok = false, tentativas = att_count }
+        wg.done(wg)
+    end)()
+end
+
+-- ── Payload ───────────────────────────────────────────────────────────────────
+local evento = json.encode({ event = "order.created", order_id = 1001 })
+print("Payload: " .. evento)
+print("")
+
+-- ── Fan-out para 3 destinos ───────────────────────────────────────────────────
+print("── Disparando webhooks ──────────────────────")
+local base    = "http://localhost:" .. PORT
+local results = chan(4)
+local wg      = sync.waitgroup()
+
+wg.add(wg, 3)
+disparar("pagamentos", base .. "/hook/payments",  evento, results, wg)
+disparar("pedidos",    base .. "/hook/orders",    evento, results, wg)
+disparar("estoque",    base .. "/hook/inventory", evento, results, wg)
+
+wg.wait(wg)
+close(results)
+print("")
+
+-- ── Resultados ────────────────────────────────────────────────────────────────
+print("── Resultados ───────────────────────────────")
+for res in results do
+    local status = res.ok and "OK " or "ERR"
+    print("  [" .. status .. "] " .. string.pad_right(res.label, 12) ..
+          " tentativas=" .. res.tentativas)
+end
+print("")
+
+-- ── Verifica contadores do mock ────────────────────────────────────────────────
+print("── Chamadas no servidor mock ────────────────")
+for k, v in call_cnt do
+    print("  " .. string.pad_right(k, 20) .. " = " .. v .. " chamada(s)")
+end
+print("")
+
+print("── Padrão ───────────────────────────────────")
+print("  go → fan-out por destino")
+print("  retry: att * 50ms de backoff")
+print("  chan(N) + close → coleta de resultados")
+print("  sync.waitgroup → aguarda todos")
+
+os.exit(0)

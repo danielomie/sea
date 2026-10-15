@@ -1,0 +1,90 @@
+-- Test: error handling
+
+-- 1. error() creates an error value
+local e1 = error("something went wrong")
+assert(is_error(e1), "error() should return an error value")
+assert(type(e1) == "error", "type() of error is 'error'")
+assert(e1.message == "something went wrong", "error.message field")
+
+-- 2. is_error() returns false for non-errors
+assert(is_error(42)    == false, "number is not an error")
+assert(is_error("hi")  == false, "string is not an error")
+assert(is_error(nil)   == false, "nil is not an error")
+assert(is_error(true)  == false, "bool is not an error")
+assert(is_error({})    == false, "table is not an error")
+
+-- 3. error with non-string message
+local e2 = error(99)
+assert(is_error(e2), "error with number message is still error")
+assert(e2.message == 99, "non-string message preserved")
+
+-- 4. Manual error checking with is_error
+local function safe_div(a, b)
+    if b == 0 then
+        return error("division by zero")
+    end
+    return a / b
+end
+
+local ok = safe_div(10, 2)
+assert(not is_error(ok), "successful result is not error")
+-- 10/2 returns a float; compare via arithmetic not literal equality
+assert(ok > 4 and ok < 6, "10 / 2 ≈ 5")
+
+local bad = safe_div(10, 0)
+assert(is_error(bad), "division by zero returns error")
+assert(bad.message == "division by zero", "error message")
+
+-- 5. ? propagation operator: error is returned from the caller
+local function might_fail(x)
+    if x < 0 then
+        return error("negative")
+    end
+    return x * 3
+end
+
+local function compute(x)
+    local v = might_fail(x)?
+    return v + 1
+end
+
+local r1 = compute(4)
+assert(r1 == 13, "compute(4) = 4*3+1 = 13")
+assert(not is_error(r1), "success is not error")
+
+local r2 = compute(-1)
+assert(is_error(r2), "? propagates error to caller")
+assert(r2.message == "negative", "propagated error message preserved")
+
+-- 6. Chained error propagation (error travels up multiple frames)
+local function level1(x)
+    return might_fail(x)?
+end
+local function level2(x)
+    return level1(x)?
+end
+local function level3(x)
+    return level2(x)?
+end
+
+local deep_ok = level3(5)
+assert(deep_ok == 15, "deep call succeeds: 5*3 = 15")
+
+local deep_err = level3(-2)
+assert(is_error(deep_err), "error propagates through 3 levels")
+assert(deep_err.message == "negative", "error message intact after chained propagation")
+
+-- 7. Error from is_error check followed by .message access
+local result_ok  = safe_div(10, 2)
+local result_bad = safe_div(8, 0)
+
+-- Check is_error gates correctly
+if is_error(result_ok) then
+    assert(false, "safe_div(10,2) should not be error")
+end
+if not is_error(result_bad) then
+    assert(false, "safe_div(8,0) should be error")
+end
+assert(result_bad.message == "division by zero", "error message via is_error gate")
+
+print("PASS: error handling")

@@ -1,0 +1,8 @@
+copy	1	1
+copy src	10	10
+const	3.5
+merge	4.5
+loop	3.5
+sift	0	0
+captured	2.5
+sum	500500

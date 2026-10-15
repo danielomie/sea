@@ -1,0 +1,147 @@
+--
+-- Metrics Server em Sea
+--
+-- Servidor HTTP com:
+--   GET  /            página de boas-vindas
+--   GET  /metrics     contagens por endpoint (JSON)
+--   POST /increment   incrementa contador nomeado
+--
+-- Contador compartilhado protegido por sync.mutex.
+-- Múltiplos goroutines de cliente disparam requisições concorrentes.
+--
+
+local http = require("./libs/http/http")
+local json = require("./libs/json/json")
+
+print("╔══════════════════════════════════════════╗")
+print("║      Metrics Server em Sea               ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── Estado compartilhado ─────────────────────────────────────────────────────
+local mu       = sync.mutex()
+local counters = [=]    -- nome → contagem
+local total    = 0
+
+local function incrementar(nome)
+    mu.acquire(mu)
+    local prev, ok = counters[nome]
+    counters[nome] = (ok and prev or 0) + 1
+    total = total + 1
+    mu.release(mu)
+end
+
+-- ── Handler HTTP ─────────────────────────────────────────────────────────────
+local function handler(req)
+    -- GET /
+    if req.method == "GET" and req.path == "/" then
+        return {
+            status = 200,
+            body   = "Metrics Server\nUse POST /increment?name=X  GET /metrics\n",
+            headers = { ["Content-Type"] = "text/plain" },
+        }
+    end
+
+    -- POST /increment  (nome via query ou body)
+    if req.method == "POST" and req.path == "/increment" then
+        local nome = req.body and string.trim(req.body) or "default"
+        if len(nome) == 0 then nome = "default" end
+        incrementar(nome)
+        return {
+            status = 200,
+            body   = '{"ok":true,"counter":"' .. nome .. '"}' .. "\n",
+            headers = { ["Content-Type"] = "application/json" },
+        }
+    end
+
+    -- GET /metrics
+    if req.method == "GET" and req.path == "/metrics" then
+        mu.acquire(mu)
+        local obj = [=]
+        obj["total"] = total
+        local counts = [=]
+        for k, v in counters do
+            counts[k] = v
+        end
+        obj["counters"] = counts
+        mu.release(mu)
+        local body = json.encode(obj) .. "\n"
+        return {
+            status = 200,
+            body   = body,
+            headers = { ["Content-Type"] = "application/json" },
+        }
+    end
+
+    return {
+        status = 404,
+        body   = "404 Not Found\n",
+        headers = { ["Content-Type"] = "text/plain" },
+    }
+end
+
+-- ── Servidor em goroutine (não bloqueia o main) ───────────────────────────────
+local PORT = 18181
+go (function()
+    http.serve(PORT, handler)
+end)()
+
+-- Dá tempo para o servidor iniciar
+time.sleep(100 * time.Millisecond)
+print("Servidor rodando em http://localhost:" .. PORT)
+print("")
+
+-- ── Clientes concorrentes ─────────────────────────────────────────────────────
+print("── Clientes disparando requisições ──────────")
+
+local base = "http://localhost:" .. PORT
+
+-- Verifica rota raiz
+local r0 = http.get(base .. "/")
+print("GET /  → " .. r0.status .. ": " .. string.trim(string.split(r0.body, "\n")[0]))
+
+local wg = sync.waitgroup()
+local N  = 10   -- requisições por contador
+
+-- Incrementa "login" N vezes em paralelo
+local function fire(nome, n)
+    for _ = 1, n do
+        http.post(base .. "/increment", nome, "text/plain")
+    end
+    wg.done(wg)
+end
+
+wg.add(wg, 3)
+go (function() fire("login",    N) end)()
+go (function() fire("search",   N) end)()
+go (function() fire("checkout", N) end)()
+wg.wait(wg)
+
+print("  " .. (N * 3) .. " requisições POST /increment enviadas")
+print("")
+
+-- ── Lê métricas ───────────────────────────────────────────────────────────────
+print("── GET /metrics ─────────────────────────────")
+local rm = http.get(base .. "/metrics")
+print("  status: " .. rm.status)
+if rm.ok then
+    local data = json.decode(rm.body)
+    print("  total: " .. data["total"])
+    local cs = data["counters"]
+    for k, v in cs do
+        print("    " .. string.pad_right(k, 10) .. " = " .. v)
+    end
+end
+print("")
+
+-- ── 404 para rota desconhecida ────────────────────────────────────────────────
+local r404 = http.get(base .. "/unknown")
+print("GET /unknown → " .. r404.status)
+print("")
+
+print("── Padrão ───────────────────────────────────")
+print("  sync.mutex protege counters e total")
+print("  http.serve(port, fn) roda em goroutine separada")
+print("  json.encode(obj) serializa mapa [=] para JSON")
+
+os.exit(0)   -- encerra o processo (server goroutine rodaria para sempre)

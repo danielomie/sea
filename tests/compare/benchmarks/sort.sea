@@ -1,0 +1,28 @@
+-- Generate pseudo-random numbers using LCG
+local nums = []
+local x = 12345
+for i = 1, 10000 do
+    x = (x * 1103515245 + 12345) % 4194304
+    nums[] = x % 100000
+end
+
+-- Insertion sort
+local n = len(nums)
+for i = 1, n-1 do
+    local key = nums[i]
+    local j = i - 1
+    while j >= 0 do
+        local tmp = nums[j]
+        if tmp <= key then break end
+        nums[j+1] = tmp
+        j = j - 1
+    end
+    nums[j+1] = key
+end
+
+-- Verify sorted and print checksum
+local sum = 0
+for i = 0, n-1 do
+    sum = sum + nums[i]
+end
+print(sum)

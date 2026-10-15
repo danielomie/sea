@@ -1,0 +1,145 @@
+--
+-- Módulo time em Sea
+--
+-- Demonstra:
+--   - Construção de Time, acesso a componentes
+--   - Formatação com t.format()
+--   - Aritmética de datas: add, sub, before, after
+--   - Medição de tempo: time.since, time.clock
+--   - Constantes de duração
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Módulo time em Sea                  ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── 1. Constantes de duração ──────────────────────────────────────────────────
+print("── 1. Constantes de duração ─────────────────")
+print("  Nanosecond  = " .. time.Nanosecond)
+print("  Microsecond = " .. time.Microsecond)
+print("  Millisecond = " .. time.Millisecond)
+print("  Second      = " .. time.Second)
+print("  Minute      = " .. time.Minute)
+print("  Hour        = " .. time.Hour)
+print("")
+
+-- ── 2. time.now() e componentes ───────────────────────────────────────────────
+print("── 2. time.now() e componentes ──────────────")
+local now = time.now()
+print("  unix timestamp : " .. now.unix(now))
+print("  ano            : " .. now.year(now))
+print("  mês            : " .. now.month(now))
+print("  dia            : " .. now.day(now))
+print("  hora           : " .. now.hour(now))
+print("  minuto         : " .. now.minute(now))
+print("  segundo        : " .. now.second(now))
+print("  dia da semana  : " .. now.weekday(now) .. "  (0=Dom)")
+print("  dia do ano     : " .. now.yearday(now))
+print("")
+
+-- ── 3. Formatação ─────────────────────────────────────────────────────────────
+print("── 3. Formatação (Go reference time) ────────")
+local t = time.unix(1735689600, 0)   -- 2025-01-01 00:00:00 UTC
+-- Nota: time.format usa timezone local; o Unix timestamp pode mudar com TZ
+print("  YYYY-MM-DD : " .. t.format(t, "2006-01-02"))
+print("  HH:MM:SS   : " .. t.format(t, "15:04:05"))
+print("  completo   : " .. t.format(t, "2006-01-02 15:04:05"))
+print("  now string : " .. now.string(now))
+print("")
+
+-- ── 4. Aritmética de datas ────────────────────────────────────────────────────
+-- Nota: time.add usa nanosegundos; max 48-bit signed int ≈ 140737s ≈ 39h.
+-- Para durações maiores (dias, semanas), use time.unix com segundos.
+print("── 4. Aritmética de datas ───────────────────")
+local base     = time.unix(0, 0)        -- epoch
+local uma_hora = base.add(base, 1 * time.Hour)   -- +1h em nanosegundos (ok)
+local um_dia   = time.unix(86400, 0)              -- +1 dia via unix segundos
+local uma_sem  = time.unix(7 * 24 * 3600, 0)     -- +1 semana via unix segundos
+
+print("  epoch      unix=" .. base.unix(base))
+print("  + 1 hora   unix=" .. uma_hora.unix(uma_hora) .. " s")
+print("  + 1 dia    unix=" .. um_dia.unix(um_dia) .. " s")
+print("  + 1 semana unix=" .. uma_sem.unix(uma_sem) .. " s")
+
+-- Diferença em nanosegundos (safe: 1h = 3.6e12 ns < 2^47)
+local diff_1h = uma_hora.sub(uma_hora, base)
+print("  diff 1h = " .. time.seconds(diff_1h) .. " s = " ..
+      time.minutes(diff_1h) .. " min = " .. time.hours(diff_1h) .. " h")
+
+-- Para diferenças grandes, use unix timestamps diretamente
+local dias_diff = uma_sem.unix(uma_sem) - base.unix(base)
+print("  semana - epoch = " .. dias_diff .. " s = " ..
+      dias_diff // 3600 .. " h = " .. dias_diff // 86400 .. " dias")
+print("")
+
+-- ── 5. Comparação de instantes ────────────────────────────────────────────────
+print("── 5. Comparação de instantes ───────────────")
+local a = time.unix(100, 0)
+local b = time.unix(200, 0)
+print("  a.unix=" .. a.unix(a) .. "  b.unix=" .. b.unix(b))
+print("  a.before(b) = " .. tostring(a.before(a, b)))   -- true
+print("  a.after(b)  = " .. tostring(a.after(a, b)))    -- false
+print("  b.after(a)  = " .. tostring(b.after(b, a)))    -- true
+print("  a.equal(a)  = " .. tostring(a.equal(a, a)))    -- true
+print("  a.equal(b)  = " .. tostring(a.equal(a, b)))    -- false
+print("")
+
+-- ── 6. Medição de elapsed time ────────────────────────────────────────────────
+print("── 6. Medição de elapsed time ───────────────")
+
+local function trabalho_pesado(n)
+    local soma = 0
+    for i = 1, n do
+        soma = soma + math.sqrt(i)
+    end
+    return soma
+end
+
+-- Wall time
+local t_start = time.now()
+local resultado = trabalho_pesado(1000000)
+local wall_ns = time.since(t_start)
+
+-- CPU time
+local cpu_inicio = time.clock()
+trabalho_pesado(1000000)
+local cpu_seg = time.clock() - cpu_inicio
+
+print("  trabalho_pesado(1e6): soma=" .. string.format("%.0f", resultado))
+print("  wall time : " .. string.format("%.1f", time.milliseconds(wall_ns)) .. " ms")
+print("  cpu  time : " .. string.format("%.3f", cpu_seg) .. " s")
+print("")
+
+-- ── 7. time.since para timeouts (padrão) ─────────────────────────────────────
+print("── 7. Padrão: deadline com time.since ────────")
+
+local function com_deadline(timeout_ms, fn)
+    local inicio = time.now()
+    local resultado_v = fn()
+    local elapsed = time.milliseconds(time.since(inicio))
+    if elapsed > timeout_ms then
+        return nil, error(string.format("timeout: %.0f ms > %d ms", elapsed, timeout_ms))
+    end
+    return resultado_v, nil
+end
+
+local r, err = com_deadline(500, function()
+    time.sleep(50 * time.Millisecond)
+    return "feito"
+end)
+if err then
+    print("  ERRO: " .. err.message)
+else
+    print("  OK: " .. r)
+end
+
+local r2, err2 = com_deadline(30, function()
+    time.sleep(50 * time.Millisecond)
+    return "deveria dar timeout"
+end)
+if err2 then
+    print("  TIMEOUT esperado: " .. err2.message)
+else
+    print("  OK: " .. tostring(r2))
+end

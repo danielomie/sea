@@ -1,0 +1,113 @@
+--
+-- Worker Pool Genérico em Sea
+--
+-- N workers paralelos processam jobs de um canal de entrada
+-- e enviam resultados para um canal de saída.
+--
+-- Diferença do exemplo pool/: aqui cada worker transforma dados (job→result),
+-- não controla acesso a recursos externos via semáforo.
+--
+--   [Produtor] ──jobs──▶ [Worker 1] ──╮
+--                        [Worker 2] ──╪──results──▶ [Consumidor]
+--                        [Worker N] ──╯
+--
+
+local N_JOBS    = 60
+local JOB_MS    = 30    -- ms de trabalho por job (simula I/O/CPU)
+
+-- Função de trabalho: job → resultado
+local function processar(job)
+    time.sleep(JOB_MS * time.Millisecond)
+    return { id = job, resultado = job * job + job }  -- f(n) = n² + n
+end
+
+-- Executa o pool com `n_workers` workers.
+-- Retorna: contagem de resultados, soma total, tempo em ms.
+local function executar_pool(n_workers)
+    local jobs    = chan(N_JOBS)
+    local results = chan(N_JOBS)
+    local wg      = sync.waitgroup()
+    wg.add(wg, n_workers)
+
+    -- Workers
+    for _ = 1, n_workers do
+        go (function()
+            for job in jobs do
+                results <- processar(job)
+            end
+            wg.done(wg)
+        end)()
+    end
+
+    -- Fechar results quando todos os workers terminarem
+    go (function()
+        wg.wait(wg)
+        close(results)
+    end)()
+
+    -- Produtor: envia N_JOBS e fecha jobs
+    local t_start = time.now()
+    for i = 1, N_JOBS do
+        jobs <- i
+    end
+    close(jobs)
+
+    -- Consumidor: agrega resultados
+    local count = 0
+    local soma  = 0
+    for r in results do
+        count = count + 1
+        soma  = soma + r.resultado
+    end
+
+    return count, soma, time.milliseconds(time.since(t_start))
+end
+
+-- Soma esperada: Σ (i² + i) para i=1..N = N*(N+1)*(2N+1)/6 + N*(N+1)/2
+local expected = N_JOBS * (N_JOBS + 1) * (2 * N_JOBS + 1) / 6 +
+                 N_JOBS * (N_JOBS + 1) / 2
+
+print("╔══════════════════════════════════════════╗")
+print("║      Worker Pool em Sea                  ║")
+print("╚══════════════════════════════════════════╝")
+print("  Jobs    : " .. N_JOBS)
+print("  Trabalho: " .. JOB_MS .. " ms / job")
+print("  f(n)    : n² + n   soma esperada = " .. expected)
+print("")
+
+local function fmt_speedup(t_ref, t_cur)
+    if t_cur == 0 then return "∞" end
+    local sp = math.floor(t_ref * 10 / t_cur)
+    return math.floor(sp / 10) .. "." .. (sp % 10) .. "x"
+end
+
+local c1, s1, t1 = executar_pool(1)
+print("  [1 worker ]  " .. c1 .. " jobs  soma=" .. s1 .. "  " .. t1 .. " ms")
+
+local c2, s2, t2 = executar_pool(2)
+print("  [2 workers]  " .. c2 .. " jobs  soma=" .. s2 .. "  " .. t2 .. " ms" ..
+      "  speedup=" .. fmt_speedup(t1, t2))
+
+local c4, s4, t4 = executar_pool(4)
+print("  [4 workers]  " .. c4 .. " jobs  soma=" .. s4 .. "  " .. t4 .. " ms" ..
+      "  speedup=" .. fmt_speedup(t1, t4))
+
+local c8, s8, t8 = executar_pool(8)
+print("  [8 workers]  " .. c8 .. " jobs  soma=" .. s8 .. "  " .. t8 .. " ms" ..
+      "  speedup=" .. fmt_speedup(t1, t8))
+
+print("")
+if s1 == expected and s2 == expected and s4 == expected and s8 == expected then
+    print("  Resultados: CORRETOS ✓")
+else
+    print("  Resultados: DIVERGÊNCIA ✗  esperado=" .. expected)
+end
+
+print("")
+print("── Padrão ───────────────────────────────────")
+print("  jobs = chan(N)   results = chan(N)")
+print("  wg = sync.waitgroup() ; wg.add(wg, N_workers)")
+print("  workers: for job in jobs do results <- processar(job) end")
+print("  fechar: wg.wait(wg) → close(results)")
+print("  produzir: jobs <- i ... close(jobs)")
+print("  consumir: for r in results do ... end")

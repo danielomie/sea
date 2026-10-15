@@ -1,0 +1,2 @@
+-- Test: basic print
+print("hello, world")

@@ -1,0 +1,52 @@
+-- Bug 2: variável numérica antes de for-in causava loop infinito.
+-- Todos os casos abaixo devem terminar e imprimir o valor correto.
+
+-- Caso 1: [=] map com contador antes do loop
+local m = [=]
+m["a"] = 10
+m["b"] = 20
+m["c"] = 30
+
+local n = 0
+for k, v in m do
+    n = n + 1
+end
+print(n)
+-- 3
+
+-- Caso 2: tabela {string keys} com dois locais antes do loop
+local t = {x=1, y=2}
+local count = 0
+local dummy = 0
+for k, v in t do
+    count = count + 1
+end
+print(count)
+-- 2
+
+-- Caso 3: array com contador antes do loop
+local arr = []
+arr[] = "p"
+arr[] = "q"
+arr[] = "r"
+local idx = 0
+for i, v in arr do
+    idx = idx + 1
+end
+print(idx)
+-- 3
+
+-- Caso 4: acumular soma com n declarado antes
+local vals = [=]
+vals["a"] = 5
+vals["b"] = 15
+local total = 0
+local num = 0
+for k, v in vals do
+    total = total + v
+    num = num + 1
+end
+print(total)
+-- 20
+print(num)
+-- 2

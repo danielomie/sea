@@ -1,0 +1,75 @@
+-- Test: goroutines
+
+-- 1. Simple goroutine spawning and result via channel
+local ch = chan(1)
+
+go (function()
+    ch <- 42
+end)()
+
+local result = <-ch
+assert(result == 42, "goroutine should send 42")
+
+-- 2. Goroutine receives argument and sends result
+local function worker(val, out_ch)
+    out_ch <- val * val
+end
+
+local sq_ch = chan(1)
+go worker(7, sq_ch)
+local sq = <-sq_ch
+assert(sq == 49, "worker goroutine: 7^2 = 49")
+
+-- 3. Multiple goroutines writing to the same channel
+local results = chan(5)
+local wg = sync.waitgroup()
+wg.add(wg, 5)
+
+for i = 1, 5 do
+    local val = i
+    go (function()
+        results <- val
+        wg.done(wg)
+    end)()
+end
+
+wg.wait(wg)
+close(results)
+
+local sum = 0
+for v in results do
+    sum = sum + v
+end
+assert(sum == 15, "sum of 1..5 from goroutines should be 15")
+
+-- 4. Goroutine synchronization: producer/consumer pipeline
+local nums = chan(3)
+local doubled = chan(3)
+local wg2 = sync.waitgroup()
+wg2.add(wg2, 1)
+
+go (function()
+    nums <- 2
+    nums <- 4
+    nums <- 6
+    close(nums)
+end)()
+
+go (function()
+    for v in nums do
+        doubled <- v * 2
+    end
+    close(doubled)
+    wg2.done(wg2)
+end)()
+
+wg2.wait(wg2)
+
+local d1 = <-doubled
+local d2 = <-doubled
+local d3 = <-doubled
+assert(d1 == 4,  "first doubled value")
+assert(d2 == 8,  "second doubled value")
+assert(d3 == 12, "third doubled value")
+
+print("PASS: goroutines")

@@ -1,0 +1,149 @@
+--
+-- File Watcher em Sea
+--
+-- Observa um diretório via polling com os.glob + os.filesize,
+-- detecta arquivos novos, removidos e modificados,
+-- e envia eventos por canal para um handler.
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      File Watcher em Sea                 ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- Cria um watcher para um diretório.
+--   dir          = diretório a observar
+--   sufixo       = extensão dos arquivos (ex: ".txt")
+--   intervalo_ms = ms entre polls
+-- Retorna canal de eventos { tipo, path, size }
+local function novo_watcher(dir, sufixo, intervalo_ms)
+    local eventos = chan(32)
+
+    go (function()
+        -- snapshot: path → size (atualizado in-place a cada poll)
+        local snapshot = [=]
+
+        -- Poll inicial: popula snapshot sem emitir eventos
+        local inicial = os.glob(dir, sufixo)
+        for i = 0, len(inicial) - 1 do
+            local p = inicial[i]
+            snapshot[p] = os.filesize(p)
+        end
+
+        local iteracoes = 0
+        local MAX_ITER  = 6   -- para o watcher após N polls (demo finito)
+
+        while iteracoes < MAX_ITER do
+            time.sleep(intervalo_ms * time.Millisecond)
+            iteracoes = iteracoes + 1
+
+            local atual = os.glob(dir, sufixo)
+
+            -- Mapa auxiliar: path → sz do estado atual
+            local curr = [=]
+            for i = 0, len(atual) - 1 do
+                local p = atual[i]
+                curr[p] = os.filesize(p)
+            end
+
+            -- CREATED e MODIFIED: arquivos em curr
+            for i = 0, len(atual) - 1 do
+                local p = atual[i]
+                local sz = curr[p]
+                local prev_sz, existe = snapshot[p]
+                if not existe then
+                    eventos <- { tipo = "CREATED", path = p, size = sz }
+                elseif prev_sz ~= sz then
+                    eventos <- { tipo = "MODIFIED", path = p, size = sz }
+                end
+            end
+
+            -- DELETED: arquivos em snapshot que não aparecem em curr.
+            -- Nota: não usar contador numérico antes do for-in; conflita com
+            -- o estado interno do iterador. Usar mapa [=] para coletar remoções.
+            local to_remove = [=]
+            for k, _ in snapshot do
+                local _, ok = curr[k]
+                if not ok then
+                    eventos <- { tipo = "DELETED", path = k, size = 0 }
+                    to_remove[k] = true
+                end
+            end
+            for k, _ in to_remove do
+                del snapshot[k]
+            end
+
+            -- Atualiza snapshot in-place com tamanhos atuais
+            for i = 0, len(atual) - 1 do
+                local p = atual[i]
+                snapshot[p] = curr[p]
+            end
+        end
+
+        close(eventos)   -- sinaliza fim ao handler
+    end)()
+
+    return eventos
+end
+
+-- ── Prepara diretório de teste ────────────────────────────────────────────────
+-- Usa /tmp/fw (caminho curto) para manter comandos os.exec abaixo de 64 chars
+local WATCH_DIR = "/tmp/fw"
+os.exec("mkdir -p " .. WATCH_DIR)
+os.exec("rm -f " .. WATCH_DIR .. "/*.txt")   -- limpa de runs anteriores
+
+-- Cria arquivos iniciais (echo com conteúdo curto para manter comando < 64 chars)
+os.exec("echo 'linha1' > " .. WATCH_DIR .. "/alpha.txt")
+os.exec("echo 'beta'   > " .. WATCH_DIR .. "/beta.txt")
+
+print("Diretório observado: " .. WATCH_DIR)
+print("Arquivos iniciais: alpha.txt, beta.txt")
+print("")
+
+-- ── Inicia o watcher ──────────────────────────────────────────────────────────
+local eventos = novo_watcher(WATCH_DIR, ".txt", 200)
+
+-- Handler de eventos (goroutine separada processa o canal)
+local handler_done = chan(1)
+go (function()
+    for ev in eventos do
+        local icon = "?"
+        if ev.tipo == "CREATED"  then icon = "+" end
+        if ev.tipo == "MODIFIED" then icon = "~" end
+        if ev.tipo == "DELETED"  then icon = "-" end
+        local nome = string.sub(ev.path, len(WATCH_DIR) + 2)   -- extrai só o nome
+        print("  [" .. icon .. "] " .. ev.tipo .. "  " .. string.pad_right(nome, 12) ..
+              "  size=" .. ev.size)
+    end
+    handler_done <- true
+end)()
+
+-- ── Simula mudanças no diretório ─────────────────────────────────────────────
+time.sleep(250 * time.Millisecond)   -- deixa primeiro poll acontecer
+
+-- Poll 2: cria gamma.txt
+os.exec("echo 'gamma' > " .. WATCH_DIR .. "/gamma.txt")
+time.sleep(250 * time.Millisecond)
+
+-- Poll 3: modifica alpha.txt com truncate (evita limite de 64 chars em os.exec)
+os.exec("truncate -s 50 " .. WATCH_DIR .. "/alpha.txt")
+time.sleep(250 * time.Millisecond)
+
+-- Poll 4: remove beta.txt
+os.exec("rm -f " .. WATCH_DIR .. "/beta.txt")
+time.sleep(250 * time.Millisecond)
+
+-- Poll 5 e 6: sem mudanças
+time.sleep(500 * time.Millisecond)
+
+-- Aguarda handler processar todos os eventos
+local _ = <-handler_done
+
+print("")
+print("── Padrão ───────────────────────────────────")
+print("  snapshot = [=]   -- path → size (atualizado in-place)")
+print("  loop: os.glob + os.filesize → diff com snapshot")
+print("  novo: path não em snapshot → CREATED")
+print("  mod : size mudou           → MODIFIED")
+print("  del : path sumiu de atual  → DELETED")
+print("  close(eventos) → handler termina o for-in")

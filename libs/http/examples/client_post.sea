@@ -1,0 +1,28 @@
+-- client_post.sea — HTTP POST example
+-- Sends a JSON payload and prints the response.
+-- Usage: bin/sea run libs/http/examples/client_post.sea
+
+local http = require("./libs/http/http")
+
+local url  = "http://httpbin.org/post"
+local body = '{"message": "hello from Sea", "version": 1}'
+local ct   = "application/json"
+
+print("POST " .. url)
+print("Body: " .. body)
+print("")
+
+local r = http.post(url, body, ct)
+
+print("Status: " .. r.status)
+print("--- response body ---")
+print(r.body)
+
+-- Demonstrate http.request with custom headers
+print("")
+print("--- same request via http.request ---")
+local r2 = http.request("POST", url, body, ct, {
+    ["X-Custom-Header"] = "sea-vm",
+    ["Accept"]          = "application/json",
+})
+print("Status: " .. r2.status)

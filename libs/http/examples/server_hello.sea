@@ -1,0 +1,20 @@
+-- server_hello.sea — minimal HTTP server example
+-- Responds with "Hello, World!" to every request.
+--
+-- Usage:
+--   bin/sea run libs/http/examples/server_hello.sea
+--
+-- Test with:
+--   curl http://localhost:8080/
+--   curl http://localhost:8080/foo
+
+local http = require("./libs/http/http")
+
+http.serve(8080, function(req)
+    print(req.method .. " " .. req.path)
+    return {
+        status  = 200,
+        body    = "Hello, World!\n",
+        headers = { ["Content-Type"] = "text/plain; charset=utf-8" },
+    }
+end)

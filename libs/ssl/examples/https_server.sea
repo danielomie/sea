@@ -1,0 +1,39 @@
+-- examples/https_server.sea — minimal HTTPS server using the ssl lib
+--
+-- Requires a self-signed cert + key. Generate with:
+--   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+--               -days 365 -nodes -subj "/CN=localhost"
+--
+-- Run: bin/sea libs/ssl/examples/https_server.sea cert.pem key.pem
+-- Test: curl -k https://localhost:8443/
+
+local ssl = require("../ssl")
+
+local cert = os.args[1] or "cert.pem"
+local key  = os.args[2] or "key.pem"
+local port = 8443
+
+local ctx = ssl.server_ctx(cert, key)
+if not ctx then
+    print("Failed to load cert/key: " .. cert .. " / " .. key)
+    os.exit(1)
+end
+
+ssl.serve(ctx, port, function(conn)
+    local raw = ssl.read(conn)
+    -- Parse first line of request
+    local nl  = string.find(raw, "\n")
+    local req = nl and string.sub(raw, 1, nl - 1) or raw
+    print("Request: " .. req)
+
+    local body = "Hello from Sea HTTPS!\n"
+    ssl.write(conn,
+        "HTTP/1.0 200 OK\r\n" ..
+        "Content-Type: text/plain\r\n" ..
+        "Content-Length: " .. len(body) .. "\r\n" ..
+        "Connection: close\r\n\r\n" ..
+        body)
+    ssl.close(conn)
+end)
+
+ssl.server_ctx_free(ctx)

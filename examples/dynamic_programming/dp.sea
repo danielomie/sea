@@ -1,0 +1,169 @@
+--
+-- Programação Dinâmica em Sea
+--
+-- Demonstra:
+--   - Tabelas de DP em int_array (matriz linearizada: linha * largura + coluna)
+--   - Reconstrução da solução percorrendo a tabela de trás para frente
+--   - Memoização com map (contagem de caminhos numa grade com obstáculos)
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║   Programação Dinâmica                   ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local function char_at(s, i) return string.sub(s, i, i) end
+
+-- ── 1. Maior subsequência comum (LCS) ────────────────────────────────────────
+print("── 1. Maior subsequência comum ──────────────")
+
+local function lcs(a, b)
+    local n = string.len(a)
+    local m = string.len(b)
+    local w = m + 1
+    local t = int_array((n + 1) * w)
+    for k = 0, (n + 1) * w - 1 do t[] = 0 end
+    for i = 1, n do
+        for j = 1, m do
+            if char_at(a, i) == char_at(b, j) then
+                t[i * w + j] = t[(i - 1) * w + (j - 1)] + 1
+            else
+                t[i * w + j] = math.max(t[(i - 1) * w + j], t[i * w + (j - 1)])
+            end
+        end
+    end
+    -- reconstrói a subsequência
+    local out = []
+    local i = n
+    local j = m
+    while i > 0 and j > 0 do
+        if char_at(a, i) == char_at(b, j) then
+            out[] = char_at(a, i)
+            i = i - 1
+            j = j - 1
+        elseif t[(i - 1) * w + j] >= t[i * w + (j - 1)] then
+            i = i - 1
+        else
+            j = j - 1
+        end
+    end
+    local rev = []
+    for k = len(out) - 1, 0, -1 do rev[] = out[k] end
+    return t[n * w + m], string.join(rev, "")
+end
+
+local pares = []
+pares[] = {a = "AGGTAB", b = "GXTXAYB"}
+pares[] = {a = "programacao", b = "programador"}
+pares[] = {a = "dinamica", b = "mecanica"}
+for _, p in pares do
+    local size, seq = lcs(p.a, p.b)
+    printf("  %-12s × %-12s → %d  \"%s\"\n", p.a, p.b, size, seq)
+end
+print("")
+
+-- ── 2. Distância de edição (Levenshtein) ─────────────────────────────────────
+print("── 2. Distância de edição ───────────────────")
+
+local function edit_distance(a, b)
+    local n = string.len(a)
+    local m = string.len(b)
+    local w = m + 1
+    local t = int_array((n + 1) * w)
+    for k = 0, (n + 1) * w - 1 do t[] = 0 end
+    for i = 0, n do t[i * w] = i end
+    for j = 0, m do t[j] = j end
+    for i = 1, n do
+        for j = 1, m do
+            local cost = 1
+            if char_at(a, i) == char_at(b, j) then cost = 0 end
+            t[i * w + j] = math.min(t[(i - 1) * w + j] + 1,          -- remoção
+                                    t[i * w + (j - 1)] + 1,          -- inserção
+                                    t[(i - 1) * w + (j - 1)] + cost) -- troca
+        end
+    end
+    return t[n * w + m]
+end
+
+local palavras = []
+palavras[] = {a = "kitten", b = "sitting"}
+palavras[] = {a = "casa", b = "caso"}
+palavras[] = {a = "flor", b = "florescer"}
+palavras[] = {a = "sea", b = "lua"}
+for _, p in palavras do
+    printf("  %-10s → %-10s : %d\n", p.a, p.b, edit_distance(p.a, p.b))
+end
+print("")
+
+-- ── 3. Mochila 0/1 ───────────────────────────────────────────────────────────
+print("── 3. Mochila 0/1 (capacidade 15 kg) ────────")
+
+local itens = []
+itens[] = {nome = "barraca",   peso = 5, valor = 60}
+itens[] = {nome = "fogareiro", peso = 3, valor = 35}
+itens[] = {nome = "lanterna",  peso = 1, valor = 20}
+itens[] = {nome = "saco",      peso = 4, valor = 45}
+itens[] = {nome = "livro",     peso = 2, valor = 10}
+itens[] = {nome = "câmera",    peso = 2, valor = 40}
+itens[] = {nome = "panela",    peso = 6, valor = 30}
+
+local function knapsack(items, cap)
+    local n = len(items)
+    local w = cap + 1
+    local t = int_array((n + 1) * w)
+    for k = 0, (n + 1) * w - 1 do t[] = 0 end
+    for i = 1, n do
+        local it = items[i - 1]
+        for c = 0, cap do
+            local best = t[(i - 1) * w + c]                  -- sem o item i
+            if it.peso <= c then
+                local com = t[(i - 1) * w + (c - it.peso)] + it.valor
+                if com > best then best = com end
+            end
+            t[i * w + c] = best
+        end
+    end
+    -- quais itens entraram?
+    local escolhidos = []
+    local c = cap
+    for i = n, 1, -1 do
+        if t[i * w + c] ~= t[(i - 1) * w + c] then
+            local it = items[i - 1]
+            escolhidos[] = it.nome
+            c = c - it.peso
+        end
+    end
+    return t[n * w + cap], escolhidos
+end
+
+local valor, escolhidos = knapsack(itens, 15)
+printf("  valor máximo: %d\n", valor)
+printf("  itens: %s\n", string.join(escolhidos, ", "))
+print("")
+
+-- ── 4. Memoização: caminhos numa grade com obstáculos ────────────────────────
+print("── 4. Caminhos numa grade 12x12 (memo) ──────")
+
+local SIZE = 12
+local function blocked(x, y)
+    return (x == 3 and y < 6) or (x == 8 and y > 2 and y < 10) or (x == 5 and y == 7)
+end
+
+local memo = [=]
+local hits = 0
+local function paths(x, y)
+    if x >= SIZE or y >= SIZE or blocked(x, y) then return 0 end
+    if x == SIZE - 1 and y == SIZE - 1 then return 1 end
+    local key = x * SIZE + y
+    local v, ok = memo[key]
+    if ok then
+        hits = hits + 1
+        return v
+    end
+    local total = paths(x + 1, y) + paths(x, y + 1)
+    memo[key] = total
+    return total
+end
+
+printf("  caminhos (só direita/baixo): %d\n", paths(0, 0))
+printf("  células memorizadas: %d, reaproveitamentos: %d\n", len(memo), hits)

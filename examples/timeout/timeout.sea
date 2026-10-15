@@ -1,0 +1,140 @@
+--
+-- Padrão de Timeout com select em Sea
+--
+-- Demonstra como implementar deadlines em operações lentas usando
+-- um canal de sinalização e select com case/default.
+--
+-- Padrão:
+--   [Operação Lenta] ──result_ch──╮
+--                                  ├── select ──→ primeiro que chegar
+--   [Goroutine Relógio] ─timeout──╯
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Timeout com select em Sea           ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── Função auxiliar: executa fn com deadline de `ms` milissegundos ────────────
+local function com_timeout(ms, fn)
+    local result_ch  = chan(1)
+    local timeout_ch = chan(1)
+
+    -- Goroutine da operação real
+    go (function()
+        local v = fn()
+        result_ch <- v
+    end)()
+
+    -- Goroutine do relógio
+    go (function()
+        time.sleep(ms * time.Millisecond)
+        timeout_ch <- true
+    end)()
+
+    select
+        case v = <-result_ch then
+            return v, false   -- valor, timed_out=false
+        case _ = <-timeout_ch then
+            return nil, true  -- nil, timed_out=true
+    end
+end
+
+-- ── Teste 1: operação mais rápida que o timeout ───────────────────────────────
+print("── Teste 1: operação < timeout ──────────────")
+local t1 = time.now()
+local val, timedout = com_timeout(500, function()
+    time.sleep(100 * time.Millisecond)   -- 100 ms (< 500 ms)
+    return "dados processados"
+end)
+local elapsed = time.milliseconds(time.since(t1))
+if timedout then
+    print("  TIMEOUT  (" .. elapsed .. " ms)")
+else
+    print("  OK: '" .. val .. "'  (" .. elapsed .. " ms)")
+end
+print("")
+
+-- ── Teste 2: timeout dispara antes da operação ───────────────────────────────
+print("── Teste 2: operação > timeout ──────────────")
+local t2 = time.now()
+local val2, timedout2 = com_timeout(100, function()
+    time.sleep(500 * time.Millisecond)   -- 500 ms (> 100 ms)
+    return "nunca chega"
+end)
+local elapsed2 = time.milliseconds(time.since(t2))
+if timedout2 then
+    print("  TIMEOUT esperado  (" .. elapsed2 .. " ms)")
+else
+    print("  resultado: " .. tostring(val2))
+end
+print("")
+
+-- ── Teste 3: select non-blocking (default:) ───────────────────────────────────
+print("── Teste 3: select non-blocking (default:) ──")
+
+local ch = chan(0)   -- canal sem buffer
+
+-- Tenta receber sem bloquear
+select
+    case v = <-ch then
+        print("  recebeu: " .. tostring(v))
+    case default then
+        print("  canal vazio — default executado imediatamente")
+end
+
+-- Canal bufferizado: send não bloqueia se há espaço
+local buf = chan(3)
+buf <- 10
+buf <- 20
+buf <- 30
+
+select
+    case v = <-buf then
+        print("  recebeu do canal bufferizado: " .. v)
+    case default then
+        print("  não deveria chegar aqui")
+end
+print("")
+
+-- ── Teste 4: múltiplas operações em paralelo com timeout global ───────────────
+print("── Teste 4: fan-in com timeout global ────────")
+
+local N = 5
+local results = chan(N)
+local timeout_global = chan(1)
+
+-- Dispara N operações com latências variadas
+for i = 1, N do
+    local idx = i
+    go (function()
+        local delay = (idx % 3 + 1) * 80   -- 80, 160, 240 ms ciclicamente
+        time.sleep(delay * time.Millisecond)
+        results <- { id = idx, delay = delay }
+    end)()
+end
+
+-- Timeout global de 250 ms
+go (function()
+    time.sleep(250 * time.Millisecond)
+    timeout_global <- true
+end)()
+
+local recebidos = 0
+local continuar = true
+while continuar do
+    select
+        case r = <-results then
+            recebidos = recebidos + 1
+            print("  [" .. r.id .. "] completou em " .. r.delay .. " ms")
+        case _ = <-timeout_global then
+            print("  TIMEOUT global — " .. recebidos .. "/" .. N .. " operações completaram")
+            continuar = false
+    end
+end
+print("")
+
+print("── Resumo ───────────────────────────────────")
+print("  select case v = <- result: ... case <- timeout: ... end")
+print("  select default:  → non-blocking (não bloqueia se canais vazios)")
+print("  goroutine relógio com time.sleep(ms) como fonte de timeout")

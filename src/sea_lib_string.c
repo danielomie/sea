@@ -1,0 +1,575 @@
+#include "sea_stdlib.h"
+#include "sea_string.h"
+#include "sea_rope.h"
+#include "sea_array.h"
+#include "sea_table.h"
+#include "sea_memory.h"
+#include <ctype.h>
+#include <string.h>
+
+/* Convention (docs/memory.md): natives borrow their arguments and return an
+ * owned value — a new object with rc=1, or sea_val_ref() of an argument. */
+
+// string.len(s)
+static SeaValue str_len(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return sea_int_val(0);
+    if (sea_is_string(args[0])) return sea_int_val(SEA_AS_STRING(args[0])->len);
+    if (sea_is_rope(args[0]))   return sea_int_val((int64_t)SEA_AS_ROPE(args[0])->total_len);
+    return sea_int_val(0);
+}
+
+// string.sub(s, i, j?)
+static SeaValue str_sub(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_NIL_VAL;
+    int64_t slen = (int64_t)s->len;
+    int64_t i = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    int64_t j = slen;
+    if (argc >= 3) {
+        j = sea_is_int(args[2]) ? sea_as_int(args[2]) : (int64_t)sea_as_number(args[2]);
+    }
+    if (i < 0) i = slen + i + 1;
+    if (j < 0) j = slen + j + 1;
+    if (i < 1) i = 1;
+    if (j > slen) j = slen;
+    SeaValue result;
+    if (i > j) {
+        result = sea_obj_val(&sea_string_new("", 0)->obj);
+    } else {
+        size_t start = (size_t)(i - 1);
+        size_t len = (size_t)(j - i + 1);
+        result = (len == 1)
+            ? sea_obj_val(&sea_string_get_byte((unsigned char)s->data[start])->obj)
+            : sea_obj_val(&sea_string_new(s->data + start, len)->obj);
+    }
+    sea_obj_release(&s->obj);
+    return result;
+}
+
+// string.upper(s) — single allocation: write directly into SeaString's data[]
+static SeaValue str_upper(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_NIL_VAL;
+    SeaString *result = sea_string_alloc(s->len);
+    for (uint32_t i = 0; i < s->len; i++)
+        result->data[i] = (char)toupper((unsigned char)s->data[i]);
+    result->data[s->len] = '\0';
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.lower(s) — single allocation
+static SeaValue str_lower(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_NIL_VAL;
+    SeaString *result = sea_string_alloc(s->len);
+    for (uint32_t i = 0; i < s->len; i++)
+        result->data[i] = (char)tolower((unsigned char)s->data[i]);
+    result->data[s->len] = '\0';
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.rep(s, n, sep?)
+static SeaValue str_rep(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_NIL_VAL;
+    int64_t n = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    const char *sep = "";
+    size_t seplen = 0;
+    if (argc >= 3 && sea_is_string(args[2])) {
+        sep = SEA_AS_STRING(args[2])->data;
+        seplen = SEA_AS_STRING(args[2])->len;
+    }
+    if (n <= 0) { sea_obj_release(&s->obj); return sea_obj_val(&sea_string_new("", 0)->obj); }
+    size_t total = (size_t)s->len * (size_t)n + seplen * (size_t)(n - 1);
+    char *buf = (char*)sea_malloc(total + 1);
+    char *p = buf;
+    for (int64_t i = 0; i < n; i++) {
+        if (i > 0 && seplen > 0) { memcpy(p, sep, seplen); p += seplen; }
+        memcpy(p, s->data, s->len);
+        p += s->len;
+    }
+    *p = '\0';
+    SeaString *result = sea_string_new(buf, total);
+    sea_free(buf, total + 1);
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.byte(s, i?)
+static SeaValue str_byte(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_NIL_VAL;
+    int64_t i = 1;
+    if (argc >= 2) i = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    if (i < 0) i = (int64_t)s->len + i + 1;
+    SeaValue result = (i < 1 || i > (int64_t)s->len) ? SEA_NIL_VAL : sea_int_val((uint8_t)s->data[i-1]);
+    sea_obj_release(&s->obj);
+    return result;
+}
+
+// string.char(...)
+static SeaValue str_char(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    char *buf = (char*)sea_malloc((size_t)argc + 1);
+    for (int i = 0; i < argc; i++) {
+        int64_t c = sea_is_int(args[i]) ? sea_as_int(args[i]) : (int64_t)sea_as_number(args[i]);
+        buf[i] = (char)(c & 0xFF);
+    }
+    buf[argc] = '\0';
+    SeaString *result = sea_string_new(buf, (size_t)argc);
+    sea_free(buf, (size_t)argc + 1);
+    return sea_obj_val(&result->obj);
+}
+
+// string.format(fmt, ...)
+SeaValue sea_str_format(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *fmt_s = sea_value_get_flat_string(args[0]);
+    if (!fmt_s) return SEA_NIL_VAL;
+    const char *fmt = fmt_s->data;
+
+    char buf[4096];
+    char *out = buf;
+    size_t out_left = sizeof(buf) - 1;
+    int arg_idx = 1;
+
+    for (const char *p = fmt; *p && out_left > 0; ) {
+        if (*p != '%') {
+            *out++ = *p++;
+            out_left--;
+            continue;
+        }
+        p++;
+        if (*p == '%') { *out++ = '%'; p++; out_left--; continue; }
+
+        // Parse format spec
+        char spec[32];
+        int si = 0;
+        spec[si++] = '%';
+        // Flags
+        while (*p == '-' || *p == '+' || *p == ' ' || *p == '0' || *p == '#') {
+            spec[si++] = *p++;
+        }
+        // Width
+        while (isdigit((unsigned char)*p)) spec[si++] = *p++;
+        // Precision
+        if (*p == '.') { spec[si++] = *p++; while (isdigit((unsigned char)*p)) spec[si++] = *p++; }
+
+        char conv = *p++;
+        spec[si++] = conv;
+        spec[si] = '\0';
+
+        SeaValue arg = (arg_idx < argc) ? args[arg_idx++] : SEA_NIL_VAL;
+        char tmp[256];
+
+        switch (conv) {
+            case 'd': case 'i': {
+                int64_t v = sea_is_int(arg) ? sea_as_int(arg) : (int64_t)sea_as_number(arg);
+                /* Replace conv char with "ll<conv>" in spec */
+                spec[si-1] = '\0';  /* null out conv */
+                char new_spec[40];
+                snprintf(new_spec, sizeof(new_spec), "%sll%c", spec, conv);
+                snprintf(tmp, sizeof(tmp), new_spec, v);
+                break;
+            }
+            case 'u': {
+                uint64_t v = sea_is_int(arg) ? (uint64_t)sea_as_int(arg) : (uint64_t)sea_as_number(arg);
+                spec[si-1] = '\0';
+                char new_spec[40];
+                snprintf(new_spec, sizeof(new_spec), "%sllu", spec);
+                snprintf(tmp, sizeof(tmp), new_spec, v);
+                break;
+            }
+            case 'f': case 'e': case 'E': case 'g': case 'G': {
+                double v = sea_is_number(arg) ? sea_as_number(arg) :
+                           sea_is_int(arg) ? (double)sea_as_int(arg) : 0.0;
+                snprintf(tmp, sizeof(tmp), spec, v);
+                break;
+            }
+            case 's': {
+                SeaString *s = sea_vm_tostring(vm, arg);
+                snprintf(tmp, sizeof(tmp), spec, s->data);
+                sea_obj_release(&s->obj);  /* tostring returns rc=1; we release after use */
+                break;
+            }
+            case 'c': {
+                int64_t v = sea_is_int(arg) ? sea_as_int(arg) : (int64_t)sea_as_number(arg);
+                snprintf(tmp, sizeof(tmp), spec, (int)v);
+                break;
+            }
+            case 'x': case 'X': {
+                uint64_t v = sea_is_int(arg) ? (uint64_t)sea_as_int(arg) : (uint64_t)sea_as_number(arg);
+                spec[si-1] = '\0';
+                char new_spec[40];
+                snprintf(new_spec, sizeof(new_spec), "%sll%c", spec, conv);
+                snprintf(tmp, sizeof(tmp), new_spec, v);
+                break;
+            }
+            default:
+                snprintf(tmp, sizeof(tmp), "%%%c", conv);
+                break;
+        }
+
+        size_t tlen = strlen(tmp);
+        size_t copy = tlen < out_left ? tlen : out_left;
+        memcpy(out, tmp, copy);
+        out += copy;
+        out_left -= copy;
+    }
+    *out = '\0';
+
+    sea_obj_release(&fmt_s->obj);
+    return sea_obj_val(&sea_string_new(buf, (size_t)(out - buf))->obj);
+}
+
+// string.find(s, pattern, init?)
+static SeaValue str_find(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return SEA_NIL_VAL;
+    SeaString *ss = sea_value_get_flat_string(args[0]);
+    if (!ss || !sea_is_string(args[1])) { if (ss) sea_obj_release(&ss->obj); return SEA_NIL_VAL; }
+    const char *s = ss->data;
+    size_t slen = ss->len;
+    const char *pat = SEA_AS_STRING(args[1])->data;
+    int64_t init = 1;
+    if (argc >= 3) init = sea_is_int(args[2]) ? sea_as_int(args[2]) : (int64_t)sea_as_number(args[2]);
+    if (init < 0) init = (int64_t)slen + init + 1;
+    if (init < 1) init = 1;
+    if ((size_t)init > slen) { sea_obj_release(&ss->obj); return SEA_NIL_VAL; }
+    const char *found = strstr(s + init - 1, pat);
+    sea_obj_release(&ss->obj);
+    if (!found) return SEA_NIL_VAL;
+    return sea_int_val((int64_t)(found - s) + 1);
+}
+
+// string.split(s, sep)
+static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_string(args[1])) return SEA_NIL_VAL;
+    SeaString *ss = sea_value_get_flat_string(args[0]);
+    if (!ss) return SEA_NIL_VAL;
+    const char *s = ss->data;
+    const char *sep = SEA_AS_STRING(args[1])->data;
+    size_t seplen = strlen(sep);
+
+    SeaArray *arr = sea_array_new(4);
+    if (seplen == 0) {
+        while (*s) {
+            SeaValue sv = sea_obj_val(&sea_string_new(s, 1)->obj);
+            sea_array_push(arr, sv);  /* array retains */
+            sea_obj_release(sea_as_obj(sv));  /* release our rc */
+            s++;
+        }
+    } else {
+        const char *start = s;
+        while (*start) {
+            const char *found = strstr(start, sep);
+            if (!found) {
+                SeaValue sv = sea_obj_val(&sea_string_new(start, strlen(start))->obj);
+                sea_array_push(arr, sv);
+                sea_obj_release(sea_as_obj(sv));
+                break;
+            }
+            SeaValue sv = sea_obj_val(&sea_string_new(start, (size_t)(found - start))->obj);
+            sea_array_push(arr, sv);
+            sea_obj_release(sea_as_obj(sv));
+            start = found + seplen;
+        }
+    }
+    sea_obj_release(&ss->obj);
+    /* Return array rc=1; caller owns */
+    return sea_obj_val(&arr->obj);
+}
+
+// string.contains(s, sub)
+static SeaValue str_contains(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_string(args[1])) return SEA_FALSE_VAL;
+    SeaString *ss = sea_value_get_flat_string(args[0]);
+    if (!ss) return SEA_FALSE_VAL;
+    bool found = strstr(ss->data, SEA_AS_STRING(args[1])->data) != NULL;
+    sea_obj_release(&ss->obj);
+    return sea_bool_val(found);
+}
+
+// string.trim(s)
+static SeaValue str_trim(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *ss = sea_value_get_flat_string(args[0]);
+    if (!ss) return SEA_NIL_VAL;
+    const char *s = ss->data;
+    while (isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len-1])) len--;
+    SeaValue result = sea_obj_val(&sea_string_new(s, len)->obj);
+    sea_obj_release(&ss->obj);
+    return result;
+}
+
+// string.starts_with(s, prefix)
+static SeaValue str_starts_with(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_string(args[1])) return SEA_FALSE_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_FALSE_VAL;
+    SeaString *pre = SEA_AS_STRING(args[1]);
+    bool ok = pre->len <= s->len && memcmp(s->data, pre->data, pre->len) == 0;
+    sea_obj_release(&s->obj);
+    return sea_bool_val(ok);
+}
+
+// string.ends_with(s, suffix)
+static SeaValue str_ends_with(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_string(args[1])) return SEA_FALSE_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_FALSE_VAL;
+    SeaString *suf = SEA_AS_STRING(args[1]);
+    bool ok = suf->len <= s->len && memcmp(s->data + s->len - suf->len, suf->data, suf->len) == 0;
+    sea_obj_release(&s->obj);
+    return sea_bool_val(ok);
+}
+
+// string.reverse(s) — single allocation
+static SeaValue str_reverse(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return SEA_NIL_VAL;
+    SeaString *result = sea_string_alloc(s->len);
+    for (uint32_t i = 0; i < s->len; i++)
+        result->data[i] = s->data[s->len - 1 - i];
+    result->data[s->len] = '\0';
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.pad_left(s, width, char?) — right-align: pad on the left
+static SeaValue str_pad_left(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return argc > 0 ? sea_val_ref(args[0]) : SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return sea_val_ref(args[0]);
+    int64_t width = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    char pad_ch = ' ';
+    if (argc >= 3 && sea_is_string(args[2]) && SEA_AS_STRING(args[2])->len > 0)
+        pad_ch = SEA_AS_STRING(args[2])->data[0];
+    if (width <= (int64_t)s->len) { sea_obj_release(&s->obj); return sea_val_ref(args[0]); }
+    size_t pad = (size_t)(width - (int64_t)s->len);
+    SeaString *result = sea_string_alloc((size_t)width);
+    memset(result->data, pad_ch, pad);
+    memcpy(result->data + pad, s->data, s->len);
+    result->data[width] = '\0';
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.pad_right(s, width, char?) — left-align: pad on the right
+static SeaValue str_pad_right(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return argc > 0 ? sea_val_ref(args[0]) : SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return sea_val_ref(args[0]);
+    int64_t width = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    char pad_ch = ' ';
+    if (argc >= 3 && sea_is_string(args[2]) && SEA_AS_STRING(args[2])->len > 0)
+        pad_ch = SEA_AS_STRING(args[2])->data[0];
+    if (width <= (int64_t)s->len) { sea_obj_release(&s->obj); return sea_val_ref(args[0]); }
+    size_t pad = (size_t)(width - (int64_t)s->len);
+    SeaString *result = sea_string_alloc((size_t)width);
+    memcpy(result->data, s->data, s->len);
+    memset(result->data + s->len, pad_ch, pad);
+    result->data[width] = '\0';
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.pad_center(s, width, char?) — center-align: even extra goes to the right
+static SeaValue str_pad_center(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return argc > 0 ? sea_val_ref(args[0]) : SEA_NIL_VAL;
+    SeaString *s = sea_value_get_flat_string(args[0]);
+    if (!s) return sea_val_ref(args[0]);
+    int64_t width = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    char pad_ch = ' ';
+    if (argc >= 3 && sea_is_string(args[2]) && SEA_AS_STRING(args[2])->len > 0)
+        pad_ch = SEA_AS_STRING(args[2])->data[0];
+    if (width <= (int64_t)s->len) { sea_obj_release(&s->obj); return sea_val_ref(args[0]); }
+    size_t total_pad = (size_t)(width - (int64_t)s->len);
+    size_t left_pad  = total_pad / 2;
+    size_t right_pad = total_pad - left_pad;
+    SeaString *result = sea_string_alloc((size_t)width);
+    memset(result->data, pad_ch, left_pad);
+    memcpy(result->data + left_pad, s->data, s->len);
+    memset(result->data + left_pad + s->len, pad_ch, right_pad);
+    result->data[width] = '\0';
+    sea_obj_release(&s->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.replace(s, old, new)
+static SeaValue str_replace(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 3 || !sea_is_string(args[1]) || !sea_is_string(args[2]))
+        return argc > 0 ? sea_val_ref(args[0]) : SEA_NIL_VAL;
+    SeaString *ss = sea_value_get_flat_string(args[0]);
+    if (!ss) return argc > 0 ? sea_val_ref(args[0]) : SEA_NIL_VAL;
+    const char *s = ss->data;
+    size_t slen = ss->len;
+    const char *old_str = SEA_AS_STRING(args[1])->data;
+    size_t old_len = SEA_AS_STRING(args[1])->len;
+    const char *new_str = SEA_AS_STRING(args[2])->data;
+    size_t new_len = SEA_AS_STRING(args[2])->len;
+
+    if (old_len == 0) { sea_obj_release(&ss->obj); return sea_val_ref(args[0]); }
+
+    char *buf = NULL;
+    int buf_len = 0, buf_cap = 0;
+    const char *p = s;
+    const char *end = s + slen;
+    while (p < end) {
+        const char *found = strstr(p, old_str);
+        if (!found) {
+            while (p < end) {
+                SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, *p++);
+            }
+            break;
+        }
+        while (p < found) SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, *p++);
+        for (size_t i = 0; i < new_len; i++) SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, new_str[i]);
+        p = found + old_len;
+    }
+    SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, '\0');
+    SeaString *result = sea_string_new(buf, (size_t)(buf_len - 1));
+    sea_free(buf, (size_t)buf_cap);
+    sea_obj_release(&ss->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.normalize_ws(s) → colapsa whitespace em espaço único, sem leading/trailing
+// Equivalente nativo de normalize_ws em carolina_train.sea — O(N) sem objetos Sea intermediários.
+static SeaValue str_normalize_ws(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return sea_obj_val(&sea_string_from_cstr("")->obj);
+    SeaString *input = sea_value_get_flat_string(args[0]);
+    if (!input) return sea_obj_val(&sea_string_from_cstr("")->obj);
+    const char *s    = input->data;
+    size_t      slen = input->len;
+
+    /* Allocate worst-case buffer (same length as input). */
+    char  *buf = (char*)sea_malloc(slen + 1);
+    size_t out = 0;
+    int    in_ws      = 1;   /* start as if we had leading whitespace */
+    int    has_content = 0;
+
+    for (size_t i = 0; i < slen; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!in_ws && has_content) { in_ws = 1; }
+        } else {
+            if (in_ws && has_content) buf[out++] = ' ';
+            buf[out++]  = (char)c;
+            in_ws       = 0;
+            has_content = 1;
+        }
+    }
+    buf[out] = '\0';
+
+    SeaString *result = sea_string_new(buf, out);
+    sea_free(buf, slen + 1);
+    sea_obj_release(&input->obj);
+    return sea_obj_val(&result->obj);
+}
+
+// string.join(arr, sep) → concatena elementos de arr com separador sep
+// Evita O(N²) de concatenação incremental: constrói o resultado em um único buffer.
+static SeaValue str_join(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_obj(args[0])) return sea_obj_val(&sea_string_from_cstr("")->obj);
+    SeaArray *arr = (SeaArray*)sea_as_obj(args[0]);
+    if (arr->obj.type != OBJ_ARRAY) return sea_obj_val(&sea_string_from_cstr("")->obj);
+
+    const char *sep     = "";
+    size_t      sep_len = 0;
+    if (argc >= 2 && sea_is_string(args[1])) {
+        sep     = SEA_AS_STRING(args[1])->data;
+        sep_len = SEA_AS_STRING(args[1])->len;
+    }
+
+    uint32_t n = arr->len;
+
+    /* Flatten any rope elements up front so we can measure and copy correctly. */
+    SeaString **flat = (SeaString**)sea_malloc(n * sizeof(SeaString*));
+    size_t total = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        SeaValue v = arr->data[i];
+        flat[i] = sea_value_get_flat_string(v);
+        if (flat[i]) total += flat[i]->len;
+        if (i + 1 < n) total += sep_len;
+    }
+
+    char *buf = (char*)sea_malloc(total + 1);
+    char *p   = buf;
+    for (uint32_t i = 0; i < n; i++) {
+        if (flat[i]) {
+            memcpy(p, flat[i]->data, flat[i]->len);
+            p += flat[i]->len;
+            sea_obj_release(&flat[i]->obj);
+        }
+        if (i + 1 < n && sep_len > 0) {
+            memcpy(p, sep, sep_len);
+            p += sep_len;
+        }
+    }
+    *p = '\0';
+    sea_free(flat, n * sizeof(SeaString*));
+
+    SeaString *result = sea_string_new(buf, total);
+    sea_free(buf, total + 1);
+    return sea_obj_val(&result->obj);
+}
+
+void sea_lib_string_register(SeaVM *vm) {
+    SeaTable *mod = sea_table_new(TABLE_MAP);  /* rc=1 */
+
+    mod_set(vm, mod, "len",         str_len);
+    mod_set(vm, mod, "sub",         str_sub);
+    mod_set(vm, mod, "upper",       str_upper);
+    mod_set(vm, mod, "lower",       str_lower);
+    mod_set(vm, mod, "rep",         str_rep);
+    mod_set(vm, mod, "byte",        str_byte);
+    mod_set(vm, mod, "char",        str_char);
+    mod_set(vm, mod, "format",      sea_str_format);
+    mod_set(vm, mod, "find",        str_find);
+    mod_set(vm, mod, "split",       str_split);
+    mod_set(vm, mod, "contains",    str_contains);
+    mod_set(vm, mod, "trim",        str_trim);
+    mod_set(vm, mod, "starts_with", str_starts_with);
+    mod_set(vm, mod, "ends_with",   str_ends_with);
+    mod_set(vm, mod, "reverse",     str_reverse);
+    mod_set(vm, mod, "replace",     str_replace);
+    mod_set(vm, mod, "pad_left",    str_pad_left);
+    mod_set(vm, mod, "pad_right",   str_pad_right);
+    mod_set(vm, mod, "pad_center",  str_pad_center);
+    mod_set(vm, mod, "join",        str_join);
+    mod_set(vm, mod, "normalize_ws", str_normalize_ws);
+
+    sea_vm_register_module(vm, "string", mod);
+    /* register_module stores in globals table (which retains mod).
+     * Release our local ref. */
+    sea_obj_release(&mod->obj);
+}

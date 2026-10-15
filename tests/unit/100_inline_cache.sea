@@ -1,0 +1,63 @@
+-- Inline caches on LOAD_GLOBAL / GET_FIELD must never return a stale value.
+
+-- 1. global reassigned while a site keeps reading it
+counter_g = 0
+local seen = 0
+for i = 1, 100 do
+    seen = seen + counter_g
+    counter_g = i
+end
+print("global", seen, counter_g)
+
+-- 2. table grows (resize) while the field stays cached
+local t = {}
+t.x = 1
+local sum = 0
+for i = 1, 300 do
+    sum = sum + t.x
+    t["k" .. i] = i          -- forces several resizes
+    if i == 150 then t.x = 2 end
+end
+print("resize", sum)
+
+-- 3. delete and reinsert the cached key
+local obj = {}
+obj.v = 10
+local acc = 0
+for i = 1, 6 do
+    acc = acc + (obj.v or 0)
+    if i == 2 then del obj["v"] end
+    if i == 4 then obj.v = 7 end
+end
+print("del/reinsert", acc)
+
+-- 4. one site, several tables (polymorphic)
+local a = {}
+a.name = "A"
+local b = {}
+b.pad = 0
+b.name = "B"
+local c = {}
+local names = []
+local objs = nil
+objs = []
+objs[] = a
+objs[] = b
+objs[] = c
+objs[] = a
+objs[] = b
+for i = 0, len(objs) - 1 do
+    local n = objs[i].name
+    names[] = n == nil and "nil" or n
+end
+print("polymorphic", string.join(names, ","))
+
+-- 5. module function looked up in a hot loop, then the module field replaced
+local m = {}
+m.f = function(x) return x + 1 end
+local r = 0
+for i = 1, 1000 do
+    r = m.f(r)
+    if i == 500 then m.f = function(x) return x + 2 end end
+end
+print("module fn", r)

@@ -1,0 +1,166 @@
+--
+-- Relatório a partir de CSV, com saída em JSON
+--
+-- Demonstra:
+--   - Parser de CSV com campos entre aspas ("a, b" e aspas escapadas "")
+--   - Agregação por chave com maps; ordenação simples
+--   - Saída formatada (printf) e serialização com a biblioteca json
+--     (encode → string → decode, conferindo a ida e volta)
+--
+--   bin/sea examples/csv_report/csv_report.sea [arquivo.csv]
+--
+
+local json = require("../../libs/json/json")
+
+print("╔══════════════════════════════════════════╗")
+print("║   Relatório de Vendas (CSV → JSON)       ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local CSV = []
+CSV[] = "data,regiao,produto,quantidade,preco_unit"
+CSV[] = "2026-01-05,Sul,Erva-mate,40,18.50"
+CSV[] = "2026-01-05,Sudeste,Café,120,32.90"
+CSV[] = "2026-01-06,Nordeste,\"Castanha, caju\",75,41.00"
+CSV[] = "2026-01-06,Sul,Café,30,32.90"
+CSV[] = "2026-01-07,Norte,Açaí,200,12.75"
+CSV[] = "2026-01-07,Sudeste,\"Queijo \"\"Minas\"\"\",55,49.90"
+CSV[] = "2026-01-08,Nordeste,Café,60,32.90"
+CSV[] = "2026-01-08,Sul,Erva-mate,25,18.50"
+CSV[] = "2026-01-09,Norte,\"Castanha, caju\",20,41.00"
+CSV[] = "2026-01-09,Sudeste,Erva-mate,15,18.50"
+CSV[] = "2026-01-10,Centro-Oeste,Café,45,32.90"
+
+local lines = CSV
+if len(os.args) > 1 then
+    local text = os.readfile(os.args[1])
+    if text == nil then
+        print("não foi possível ler " .. os.args[1])
+        os.exit(1)
+    end
+    lines = string.split(string.trim(text), "\n")
+end
+
+-- Divide uma linha CSV em campos, respeitando aspas.
+local function parse_csv_line(line)
+    local fields = []
+    local cur = []
+    local in_quotes = false
+    local i = 1
+    local n = string.len(line)
+    while i <= n do
+        local ch = string.sub(line, i, i)
+        if in_quotes then
+            if ch == "\"" then
+                if string.sub(line, i + 1, i + 1) == "\"" then
+                    cur[] = "\""              -- aspas escapadas ""
+                    i = i + 1
+                else
+                    in_quotes = false
+                end
+            else
+                cur[] = ch
+            end
+        elseif ch == "\"" then
+            in_quotes = true
+        elseif ch == "," then
+            fields[] = string.join(cur, "")
+            cur = []
+        else
+            cur[] = ch
+        end
+        i = i + 1
+    end
+    fields[] = string.join(cur, "")
+    return fields
+end
+
+-- cabeçalho → índice de cada coluna
+local header = parse_csv_line(lines[0])
+local col = [=]
+for i, name in header do col[name] = i end
+
+local por_regiao = [=]
+local por_produto = [=]
+local total_geral = 0.0
+local linhas_ok = 0
+
+for li = 1, len(lines) - 1 do
+    local f = parse_csv_line(lines[li])
+    if len(f) == len(header) then
+        local qtd = tonumber(f[col["quantidade"]])
+        local preco = tonumber(f[col["preco_unit"]])
+        local valor = qtd * preco
+        local reg = f[col["regiao"]]
+        local prod = f[col["produto"]]
+        local r, ok = por_regiao[reg]
+        if ok then por_regiao[reg] = r + valor else por_regiao[reg] = valor end
+        local p, okp = por_produto[prod]
+        if not okp then
+            p = {}
+            p.quantidade = 0
+            p.valor = 0.0
+            por_produto[prod] = p
+        end
+        p.quantidade = p.quantidade + qtd
+        p.valor = p.valor + valor
+        total_geral = total_geral + valor
+        linhas_ok = linhas_ok + 1
+    end
+end
+
+-- ordena chaves de um map pelo valor (seleção simples — poucos itens)
+local function keys_by(m, value_of)
+    local ks = []
+    for k, _ in m do ks[] = k end
+    for i = 0, len(ks) - 2 do
+        local best = i
+        for j = i + 1, len(ks) - 1 do
+            if value_of(ks[j]) > value_of(ks[best]) then best = j end
+        end
+        ks[i], ks[best] = ks[best], ks[i]
+    end
+    return ks
+end
+
+printf("%d registros, faturamento total R$ %.2f\n\n", linhas_ok, total_geral)
+
+print("Por região:")
+local regioes = keys_by(por_regiao, function(k) return por_regiao[k] end)
+for _, reg in regioes do
+    local v = por_regiao[reg]
+    printf("  R$ %10.2f  %5.1f%%  %s\n", v, 100 * v / total_geral, reg)
+end
+print("")
+
+print("Por produto:")
+local produtos = keys_by(por_produto, function(k) return por_produto[k].valor end)
+for _, prod in produtos do
+    local p = por_produto[prod]
+    printf("  R$ %10.2f  %4d un  %s\n", p.valor, p.quantidade, prod)
+end
+print("")
+
+-- resumo em JSON
+local resumo = {}
+resumo.registros = linhas_ok
+resumo.total = total_geral
+local lista = []
+for _, prod in produtos do
+    local p = por_produto[prod]
+    local item = {}
+    item.produto = prod
+    item.quantidade = p.quantidade
+    item.valor = p.valor
+    lista[] = item
+end
+resumo.produtos = lista
+
+local texto = json.encode(resumo)
+print("JSON:")
+print("  " .. texto)
+
+local volta = json.decode(texto)
+printf("ida e volta: %d produtos, primeiro = %s, total confere = %s\n",
+       len(volta.produtos), volta.produtos[0].produto,
+       tostring(math.abs(volta.total - total_geral) < 1e-9))

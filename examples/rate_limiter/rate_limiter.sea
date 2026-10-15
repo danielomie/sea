@@ -1,0 +1,136 @@
+--
+-- Rate Limiter em Sea — Token Bucket
+--
+-- Implementa um limitador de taxa usando um canal bufferizado como bucket
+-- e uma goroutine que repõe tokens em intervalo fixo.
+--
+-- Arquitetura:
+--   [Repositor] ──tokens(chan)──▶ [Consumer 1]
+--                                 [Consumer 2]  ... (select default: rejeita)
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Rate Limiter — Token Bucket         ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- Cria um rate limiter:
+--   cap      = capacidade do bucket (burst máximo)
+--   intervalo_ms = ms entre reposições de 1 token
+-- Retorna { adquirir, parar }
+local function novo_limiter(cap, intervalo_ms)
+    local tokens  = chan(cap)
+    local stop_ch = chan(1)
+    local wg      = sync.waitgroup()
+    wg.add(wg, 1)
+
+    -- Preenche o bucket inicialmente
+    for _ = 1, cap do
+        tokens <- true
+    end
+
+    -- Goroutine repositor: adiciona 1 token a cada intervalo
+    go (function()
+        while true do
+            time.sleep(intervalo_ms * time.Millisecond)
+
+            -- Verifica sinal de parada após sleep
+            select
+                case _ = <-stop_ch then
+                    wg.done(wg)
+                    return   -- encerra o repositor
+                case default then
+            end
+
+            -- Tenta adicionar token; descarta se bucket cheio
+            select
+                case tokens <- true then
+                case default then   -- bucket cheio, descarta
+            end
+        end
+    end)()
+
+    return {
+        adquirir = function()
+            -- Tenta obter token sem bloquear
+            select
+                case _ = <-tokens then
+                    return true    -- token obtido
+                case default then
+                    return false   -- sem tokens disponíveis
+            end
+        end,
+        parar = function()
+            stop_ch <- true   -- sinaliza parada (bloqueante: garante entrega)
+            wg.wait(wg)       -- espera goroutine confirmar saída
+        end,
+    }
+end
+
+-- ── Teste 1: burst e reposição ────────────────────────────────────────────────
+print("── Teste 1: burst e reposição ───────────────")
+print("  Limiter: cap=3, repõe 1 token a cada 100ms")
+print("")
+
+local lim = novo_limiter(3, 100)
+
+-- Burst inicial: 3 tokens disponíveis imediatamente
+print("  Burst inicial (3 tokens):")
+for i = 1, 5 do
+    local ok = lim.adquirir()
+    if ok then
+        print("    req " .. i .. " → PERMITIDA")
+    else
+        print("    req " .. i .. " → REJEITADA (sem tokens)")
+    end
+end
+print("")
+
+-- Aguarda reposição
+print("  Aguardando 250ms (≈2 tokens repostos)...")
+time.sleep(250 * time.Millisecond)
+
+print("  Após reposição:")
+for i = 6, 10 do
+    local ok = lim.adquirir()
+    if ok then
+        print("    req " .. i .. " → PERMITIDA")
+    else
+        print("    req " .. i .. " → REJEITADA")
+    end
+end
+lim.parar()
+print("")
+
+-- ── Teste 2: throughput medido ────────────────────────────────────────────────
+print("── Teste 2: throughput ──────────────────────")
+print("  Limiter: cap=5, repõe 1 token a cada 50ms (≈20 req/s)")
+print("")
+
+local lim2        = novo_limiter(5, 50)
+local permitidas  = 0
+local rejeitadas  = 0
+local N_REQS      = 30
+local INTERVALO   = 20   -- ms entre requisições do cliente
+
+for i = 1, N_REQS do
+    if lim2.adquirir() then
+        permitidas = permitidas + 1
+    else
+        rejeitadas = rejeitadas + 1
+    end
+    time.sleep(INTERVALO * time.Millisecond)
+end
+lim2.parar()
+
+local taxa = math.floor(permitidas * 1000 / (N_REQS * INTERVALO))
+print("  " .. N_REQS .. " requisições @ " .. (1000 // INTERVALO) .. " req/s")
+print("  Permitidas : " .. permitidas)
+print("  Rejeitadas : " .. rejeitadas)
+print("  Taxa efetiva ≈ " .. taxa .. " req/s  (limite ≈ 20 req/s)")
+print("")
+
+print("── Padrão ───────────────────────────────────")
+print("  tokens = chan(cap)   -- bucket como canal bufferizado")
+print("  repositor: time.sleep → tokens <- true (select default: descarta)")
+print("  adquirir:  select case <- tokens: → true  default: → false")

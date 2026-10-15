@@ -1,0 +1,180 @@
+-- libs/jwt/jwt.sea — JSON Web Tokens para Sea
+--
+-- Suporta HS256, HS384, HS512 (HMAC simétrico) e RS256 (RSA assimétrico).
+--
+-- Uso básico:
+--   local jwt = require("./libs/jwt/jwt")
+--
+--   local token = jwt.sign({ sub = "u123", name = "Alice" }, "segredo", {
+--       alg = "HS256",  -- padrão
+--       exp = 3600,     -- expira em 1h
+--   })
+--
+--   local claims, err = jwt.verify(token, "segredo")
+--   if claims then print(claims.sub) end
+--
+--   -- sem verificação (apenas inspecionar)
+--   local header, payload = jwt.decode(token)
+
+local native = require("jwt_native")
+local json   = require("../json/json")
+
+local M = {}
+
+-- ---- helpers internos ------------------------------------------------------
+
+local function b64(s)    return native.base64url_encode(s) end
+local function unb64(s)  return native.base64url_decode(s) end
+
+local function is_rsa(alg)
+    return alg == "RS256"
+end
+
+local function sign_sig(data, key, alg)
+    if is_rsa(alg) then
+        return native.rs256_sign(data, key)
+    end
+    return native.hs_sign(data, key, alg)
+end
+
+local function verify_sig(data, sig, key, alg)
+    if is_rsa(alg) then
+        return native.rs256_verify(data, sig, key)
+    end
+    return native.hs_verify(data, sig, key, alg)
+end
+
+-- ---- jwt.sign(claims, key, opts?) → token --------------------------------
+--
+-- claims : tabela com os campos do payload
+-- key    : secret string (HS*) ou PEM private key (RS256)
+-- opts   : {
+--     alg = "HS256",     -- algoritmo (padrão: "HS256")
+--     exp = 3600,        -- duração em segundos (adiciona exp ao payload)
+--     iss = "myapp",     -- issuer
+--     sub = "user",      -- subject (pode estar em claims também)
+--     aud = "api",       -- audience
+-- }
+
+function M.sign(claims, key, opts)
+    local alg = (opts and opts.alg) or "HS256"
+
+    -- header
+    local header = json.encode({ alg = alg, typ = "JWT" })
+    if not header then return nil end
+
+    -- monta payload
+    local payload = {}
+    for k, v in claims do
+        payload[k] = v
+    end
+
+    local now_t = time.now()
+    local now   = now_t.unix(now_t)
+    payload.iat = now
+
+    if opts then
+        if opts.exp then payload.exp = now + opts.exp end
+        if opts.iss and not payload.iss then payload.iss = opts.iss end
+        if opts.sub and not payload.sub then payload.sub = opts.sub end
+        if opts.aud and not payload.aud then payload.aud = opts.aud end
+        if opts.nbf then payload.nbf = opts.nbf end
+    end
+
+    local payload_json = json.encode(payload)
+    if not payload_json then return nil end
+
+    local h64 = b64(header)
+    local p64 = b64(payload_json)
+    local data = h64 .. "." .. p64
+
+    local sig = sign_sig(data, key, alg)
+    if not sig then return nil end
+
+    return data .. "." .. sig
+end
+
+-- ---- jwt.verify(token, key, opts?) → claims, err -------------------------
+--
+-- key  : secret string (HS*) ou PEM public key (RS256)
+-- opts : {
+--     verify_exp = true,   -- valida expiração (padrão: true)
+-- }
+-- Retorna: claims, nil   → sucesso
+--          nil, "motivo" → falha
+
+function M.verify(token, key, opts)
+    if not token then return nil, "token nil" end
+
+    local parts = string.split(token, ".")
+    if len(parts) ~= 3 then return nil, "formato inválido" end
+
+    local h64 = parts[0]
+    local p64 = parts[1]
+    local s64 = parts[2]
+    local data = h64 .. "." .. p64
+
+    -- decodifica header para obter alg
+    local header_json = unb64(h64)
+    if not header_json then return nil, "header inválido" end
+    local header = json.decode(header_json)
+    if not header then return nil, "header JSON inválido" end
+
+    local alg = header.alg
+    if not alg then return nil, "alg ausente no header" end
+
+    -- verifica assinatura
+    if not verify_sig(data, s64, key, alg) then
+        return nil, "assinatura inválida"
+    end
+
+    -- decodifica payload
+    local payload_json = unb64(p64)
+    if not payload_json then return nil, "payload inválido" end
+    local claims = json.decode(payload_json)
+    if not claims then return nil, "payload JSON inválido" end
+
+    -- valida exp
+    local check_exp = not opts or opts.verify_exp ~= false
+    if check_exp and claims.exp then
+        local ct = time.now(); local ct_sec = ct.unix(ct)
+        if ct_sec > claims.exp then
+            return nil, "token expirado"
+        end
+    end
+
+    -- valida nbf (not before)
+    if claims.nbf then
+        local ct = time.now(); local ct_sec = ct.unix(ct)
+        if ct_sec < claims.nbf then
+            return nil, "token ainda não válido"
+        end
+    end
+
+    return claims, nil
+end
+
+-- ---- jwt.decode(token) → header, payload ----------------------------------
+--
+-- Decodifica sem verificar a assinatura. Útil para inspecionar o token.
+-- Retorna nil, nil se o formato for inválido.
+
+function M.decode(token)
+    if not token then return nil, nil end
+    local parts = string.split(token, ".")
+    if len(parts) ~= 3 then return nil, nil end
+
+    local header_json  = unb64(parts[0])
+    local payload_json = unb64(parts[1])
+    if not header_json or not payload_json then return nil, nil end
+
+    return json.decode(header_json), json.decode(payload_json)
+end
+
+-- ---- jwt.algs() → array com algoritmos suportados -----------------------
+
+function M.algs()
+    return {"HS256", "HS384", "HS512", "RS256"}
+end
+
+return M

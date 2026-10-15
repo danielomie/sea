@@ -1,0 +1,33 @@
+# Build outputs
+/bin/
+/obj/
+/obj-jit/
+*.o
+*.d
+*.a
+
+# Native libraries and modules (built with `make -C libs/<name>`)
+*.so
+*.dylib
+
+# Compiled Sea bytecode (`sea compile` output; `make test-seac` cleans up its own)
+*.seac
+
+# Benchmark run history (tests/compare/run_benchmarks.sh writes one file per run;
+# the README table holds the summary)
+/tests/compare/results/*.json
+
+# Local Claude Code settings (the project skill under .claude/skills/ is tracked)
+/.claude/settings.local.json
+
+# Editors / OS / misc
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+core
+core.*
+vgcore.*
+gmon.out
+perf.data*

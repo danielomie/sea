@@ -1,0 +1,34 @@
+-- examples/client.sea — TLS client example using the ssl lib
+-- Run from project root: bin/sea libs/ssl/examples/client.sea
+
+local ssl = require("../ssl")
+
+local host = "example.com"
+local port = "443"
+
+print("Connecting to " .. host .. ":" .. port .. " ...")
+local conn = ssl.connect(host, port)
+if not conn then
+    print("Connection failed")
+    os.exit(1)
+end
+
+local cert = ssl.peer_cert(conn)
+if cert then
+    print("Peer cert subject: " .. cert.subject)
+    print("Peer cert issuer:  " .. cert.issuer)
+    print("Valid from: " .. cert.not_before)
+    print("Valid until: " .. cert.not_after)
+end
+
+ssl.write(conn, "GET / HTTP/1.0\r\nHost: " .. host .. "\r\nConnection: close\r\n\r\n")
+local body = ssl.read(conn)
+ssl.close(conn)
+
+-- Print only the status line
+local nl = string.find(body, "\n")
+if nl then
+    print(string.sub(body, 1, nl - 1))
+else
+    print(body)
+end

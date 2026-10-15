@@ -1,0 +1,134 @@
+--
+-- Módulo os em Sea
+--
+-- Demonstra:
+--   - os.exec: rodar comandos shell, capturar output e exit code
+--   - os.readfile / os.filesize: leitura de arquivos
+--   - os.getenv: variáveis de ambiente com fallback
+--   - os.glob: listagem de arquivos por extensão
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Módulo os em Sea                    ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── 1. os.exec ────────────────────────────────────────────────────────────────
+print("── 1. os.exec ───────────────────────────────")
+
+local uname = os.exec("uname -sr")
+print("  uname -sr:")
+print("    code   = " .. uname.code)
+print("    output = " .. string.trim(uname.output))
+
+-- Captura output de um comando com processamento
+local df = os.exec("df -h /tmp 2>/dev/null || df -h /")
+if df.code == 0 then
+    local linhas = string.split(string.trim(df.output), "\n")
+    print("  df /tmp:")
+    for i = 0, len(linhas) - 1 do
+        print("    " .. linhas[i])
+    end
+end
+print("")
+
+-- Comando que falha: código de saída ~= 0
+local bad = os.exec("ls /dir_que_nao_existe 2>/dev/null; exit 1")
+print("  comando falho: code=" .. bad.code)
+print("")
+
+-- Pipeline de comandos
+local wc = os.exec("echo -e 'um\ndois\ntres\nquatro' | wc -l")
+print("  wc -l de 4 linhas: " .. string.trim(wc.output) .. " linhas")
+print("")
+
+-- ── 2. Escrita e leitura de arquivo ───────────────────────────────────────────
+print("── 2. os.readfile / os.filesize ─────────────")
+
+local tmpfile = "/tmp/sea_os_demo.txt"
+os.exec("printf 'Sea\\nscripting\\nlanguage\\n' > " .. tmpfile)
+
+local sz = os.filesize(tmpfile)
+print("  " .. tmpfile .. ": " .. sz .. " bytes")
+
+local conteudo = os.readfile(tmpfile)
+if conteudo ~= nil then
+    local linhas = string.split(string.trim(conteudo), "\n")
+    print("  " .. len(linhas) .. " linhas:")
+    for i = 0, len(linhas) - 1 do
+        print("    [" .. i .. "] " .. linhas[i])
+    end
+end
+
+-- Arquivo inexistente → nil
+local nao_existe = os.readfile("/tmp/arquivo_que_nao_existe_xyz")
+print("  arquivo inexistente: " .. tostring(nao_existe))
+
+local sz_nil = os.filesize("/tmp/arquivo_que_nao_existe_xyz")
+print("  filesize inexistente: " .. tostring(sz_nil))
+print("")
+
+-- ── 3. os.getenv ──────────────────────────────────────────────────────────────
+print("── 3. os.getenv ─────────────────────────────")
+
+-- Variáveis normalmente definidas
+local home = os.getenv("HOME") or "/tmp"
+local user = os.getenv("USER") or os.getenv("LOGNAME") or "desconhecido"
+local path = os.getenv("PATH") or ""
+
+print("  HOME = " .. home)
+print("  USER = " .. user)
+print("  PATH (primeiros 40): " .. string.sub(path, 1, 40) .. "...")
+
+-- Variável inexistente → nil com fallback
+local myvar = os.getenv("SEA_DEMO_VAR_NAO_EXISTE") or "valor_padrao"
+print("  VAR_INDEFINIDA or padrão = " .. myvar)
+print("")
+
+-- ── 4. os.glob ────────────────────────────────────────────────────────────────
+print("── 4. os.glob ───────────────────────────────")
+
+local dir_examples = "examples"
+local arquivos_sea = os.glob(dir_examples, ".sea")
+
+print("  os.glob('examples', '.sea'):")
+print("  " .. len(arquivos_sea) .. " arquivo(s) .sea na raiz de examples/")
+
+-- Processa e exibe alguns
+local exibidos = 0
+for i = 0, len(arquivos_sea) - 1 do
+    local f = arquivos_sea[i]
+    -- Só exibe arquivos diretos em examples/ (sem subdir)
+    local sem_prefix = string.sub(f, len(dir_examples) + 2)
+    if not string.contains(sem_prefix, "/") then
+        local sz_f = os.filesize(f)
+        print("    " .. string.pad_right(sem_prefix, 20) .. sz_f .. " B")
+        exibidos = exibidos + 1
+        if exibidos >= 5 then break end
+    end
+end
+
+-- Glob no diretório de testes
+local tests_sea = os.glob("tests/unit", ".sea")
+print("")
+print("  os.glob('tests/unit', '.sea'):")
+print("  " .. len(tests_sea) .. " testes encontrados")
+if len(tests_sea) > 0 then
+    print("    primeiro: " .. tests_sea[0])
+    print("    último  : " .. tests_sea[len(tests_sea) - 1])
+end
+print("")
+
+-- ── 5. Padrão: pipeline de comandos ──────────────────────────────────────────
+print("── 5. Pipeline: processar saída de comando ──")
+
+local git_log = os.exec("git log --oneline -5 2>/dev/null || echo 'sem git'")
+if git_log.code == 0 then
+    local commits = string.split(string.trim(git_log.output), "\n")
+    print("  Últimos " .. len(commits) .. " commits:")
+    for i = 0, len(commits) - 1 do
+        print("    " .. commits[i])
+    end
+else
+    print("  (sem repositório git)")
+end

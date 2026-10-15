@@ -1,0 +1,328 @@
+-- libs/ssl/ssl.sea — Sea SSL/TLS + cryptography library
+--
+-- Full OpenSSL-backed library for TLS connections, X.509 certificates,
+-- asymmetric keys, CSR generation, and cryptographic primitives.
+--
+-- Build native backend first:  cd libs/ssl && make
+-- Usage:  local ssl = require("./libs/ssl/ssl")
+
+local native = require("ssl_native")
+
+local M = {}
+
+-- ---- TLS Client -----------------------------------------------------------
+
+-- ssl.connect(host, port, [opts]) → conn|nil
+-- opts: {verify=bool, cert=path, key=path, sni=string,
+--        min_version="TLSv1.2"|"TLSv1.3"}
+-- Returns an opaque TLS connection handle.
+function M.connect(host, port, opts)
+    return native.tls_connect(host, port, opts)
+end
+
+-- ssl.read(conn, [n]) → string|nil
+-- Without n: reads until the peer closes (EOF). With n: reads exactly n bytes.
+function M.read(conn, n)
+    return native.tls_read(conn, n)
+end
+
+-- ssl.read_request(conn) → string|nil
+-- Reads a full HTTP request over TLS (headers + body via Content-Length).
+-- Use this in HTTPS servers instead of ssl.read() which blocks until EOF.
+function M.read_request(conn)
+    return native.tls_read_request(conn)
+end
+
+-- ssl.write(conn, data) → nil
+function M.write(conn, data)
+    native.tls_write(conn, data)
+end
+
+-- ssl.close(conn) → nil
+-- Performs TLS shutdown and closes the underlying socket.
+function M.close(conn)
+    native.tls_close(conn)
+end
+
+-- ssl.peer_cert(conn) → cert|nil
+-- Returns a cert handle for the peer's certificate.
+-- Inspect with ssl.cert_info(); free with ssl.cert_free() when done.
+function M.peer_cert(conn)
+    return native.tls_peer_cert(conn)
+end
+
+-- ssl.version(conn) → string   e.g. "TLSv1.3"
+function M.version(conn)
+    return native.tls_version(conn)
+end
+
+-- ssl.cipher(conn) → string   e.g. "TLS_AES_256_GCM_SHA384"
+function M.cipher(conn)
+    return native.tls_cipher(conn)
+end
+
+-- ---- TLS Server -----------------------------------------------------------
+
+-- ssl.server(opts) → ctx|nil
+-- opts: {cert=path, key=path, ca=path, min_version="TLSv1.2"|"TLSv1.3"}
+-- ca enables mutual TLS (requires client certificate).
+-- Free with ssl.server_free() when done.
+function M.server(opts)
+    return native.server_new(opts)
+end
+
+-- ssl.server_free(ctx) → nil
+function M.server_free(ctx)
+    native.server_free(ctx)
+end
+
+-- ssl.listen(port) → fd|nil
+-- Binds a TCP server socket. Pass fd to ssl.accept or ssl.serve.
+function M.listen(port)
+    return native.server_listen(port)
+end
+
+-- ssl.accept(ctx, fd) → conn|nil
+-- Accepts one pending connection and performs the TLS server handshake.
+-- Returns the same handle type as ssl.connect (read/write/close work on it).
+function M.accept(ctx, fd)
+    return native.server_accept(ctx, fd)
+end
+
+-- ssl.serve(ctx, port, handler) → never returns
+-- Blocking TLS server loop. Calls handler(conn) for each accepted connection.
+-- handler is responsible for calling ssl.read, ssl.write, and ssl.close.
+function M.serve(ctx, port, handler)
+    local srv = native.server_listen(port)
+    if not srv then
+        print("ssl.serve: cannot bind port " .. port)
+        return
+    end
+    while true do
+        local conn = native.server_accept(ctx, srv)
+        if conn then handler(conn) end
+    end
+end
+
+-- ---- Certificates ---------------------------------------------------------
+
+-- ssl.cert_load(path) → cert|nil
+-- Load an X.509 certificate from a PEM file.
+function M.cert_load(path)
+    return native.cert_load_file(path)
+end
+
+-- ssl.cert_parse(pem_string) → cert|nil
+-- Parse an X.509 certificate from a PEM-encoded string.
+function M.cert_parse(pem)
+    return native.cert_parse(pem)
+end
+
+-- ssl.cert_info(cert) → table
+-- Returns: {subject, issuer, not_before, not_after, serial, fingerprint, san}
+-- san is a 0-indexed array of DNS names and IP addresses.
+function M.cert_info(cert)
+    return native.cert_info(cert)
+end
+
+-- ssl.cert_pem(cert) → string|nil
+-- Serialize a certificate to PEM format.
+function M.cert_pem(cert)
+    return native.cert_pem(cert)
+end
+
+-- ssl.cert_save(cert, path) → bool
+function M.cert_save(cert, path)
+    return native.cert_save(cert, path)
+end
+
+-- ssl.cert_free(cert) → nil
+function M.cert_free(cert)
+    native.cert_free(cert)
+end
+
+-- ssl.cert_verify(cert, ca_cert) → bool
+-- Verify that cert was signed by ca_cert.
+function M.cert_verify(cert, ca)
+    return native.cert_verify(cert, ca)
+end
+
+-- ssl.cert_self_signed(key, opts) → cert|nil
+-- Generate a self-signed X.509 certificate.
+-- opts: {cn, org, country, state, city, email, san=<array>, days=365, is_ca=false}
+-- san must be a Sea array literal: local s = []; s[] = "example.com"
+function M.cert_self_signed(key, opts)
+    return native.cert_self_signed(key, opts or {days=365})
+end
+
+-- ssl.cert_sign(csr, ca_key, ca_cert, opts) → cert|nil
+-- Sign a CSR with a CA key and certificate.
+-- opts: {days=365, serial=1}
+function M.cert_sign(csr, ca_key, ca_cert, opts)
+    return native.cert_sign(csr, ca_key, ca_cert, opts or {days=365, serial=1})
+end
+
+-- ---- Keys -----------------------------------------------------------------
+
+-- ssl.keygen(opts) → key|nil
+-- Generate a new asymmetric key pair.
+-- opts: {type="rsa"|"ec", bits=2048, curve="P-256"|"P-384"|"P-521"}
+-- Free with ssl.key_free() when done.
+function M.keygen(opts)
+    return native.key_generate(opts or {type="rsa", bits=2048})
+end
+
+-- ssl.key_load(path, [password]) → key|nil
+-- Load a private key from a PEM file.
+function M.key_load(path, password)
+    return native.key_load_file(path, password)
+end
+
+-- ssl.key_parse(pem_string, [password]) → key|nil
+-- Parse a private key from a PEM-encoded string.
+function M.key_parse(pem, password)
+    return native.key_parse(pem, password)
+end
+
+-- ssl.key_pem(key, [password]) → string|nil
+-- Serialize the private key to PEM. Encrypt with AES-256-CBC if password given.
+function M.key_pem(key, password)
+    return native.key_pem(key, password)
+end
+
+-- ssl.key_pub_pem(key) → string|nil
+-- Serialize only the public key to PEM (PKCS#8 SubjectPublicKeyInfo format).
+function M.key_pub_pem(key)
+    return native.key_pub_pem(key)
+end
+
+-- ssl.key_save(key, path, [password]) → bool
+-- Write the private key to a PEM file.
+function M.key_save(key, path, password)
+    return native.key_save(key, path, password)
+end
+
+-- ssl.key_free(key) → nil
+function M.key_free(key)
+    native.key_free(key)
+end
+
+-- ---- CSR ------------------------------------------------------------------
+
+-- ssl.csr_new(key, opts) → csr|nil
+-- Create a Certificate Signing Request signed by key.
+-- opts: {cn, org, country, state, city, email, san=<array>}
+-- san must be a Sea array literal: local s = []; s[] = "example.com"
+function M.csr_new(key, opts)
+    return native.csr_new(key, opts or {})
+end
+
+-- ssl.csr_pem(csr) → string|nil
+-- Serialize a CSR to PEM format.
+function M.csr_pem(csr)
+    return native.csr_pem(csr)
+end
+
+-- ssl.csr_free(csr) → nil
+function M.csr_free(csr)
+    native.csr_free(csr)
+end
+
+-- ---- Hash / HMAC ----------------------------------------------------------
+
+-- ssl.hash(algo, data) → hex string|nil
+-- Supported algos: "sha256", "sha384", "sha512", "sha1", "md5",
+--                  "sha3-256", "sha3-512"
+function M.hash(algo, data)
+    return native.hash(algo, data)
+end
+
+-- ssl.hash_raw(algo, data) → binary string|nil
+function M.hash_raw(algo, data)
+    return native.hash_raw(algo, data)
+end
+
+-- ssl.hmac(algo, key, data) → hex string|nil
+function M.hmac(algo, key, data)
+    return native.hmac(algo, key, data)
+end
+
+-- ssl.hmac_raw(algo, key, data) → binary string|nil
+function M.hmac_raw(algo, key, data)
+    return native.hmac_raw(algo, key, data)
+end
+
+-- ---- Symmetric encryption -------------------------------------------------
+
+-- ssl.encrypt(algo, key, plaintext, [iv]) → {data, iv, tag}|nil
+-- Supported algos: "aes-128-gcm", "aes-256-gcm", "aes-128-cbc",
+--                  "aes-256-cbc", "chacha20-poly1305"
+-- For GCM/ChaCha20: iv is auto-generated if omitted; tag is always returned.
+-- key must be at least as long as the cipher's key size (16 or 32 bytes).
+function M.encrypt(algo, key, plaintext, iv)
+    return native.aes_encrypt(algo, key, plaintext, iv)
+end
+
+-- ssl.decrypt(algo, key, iv, ciphertext, [tag]) → string|nil
+-- tag is required for authenticated ciphers (GCM, ChaCha20-Poly1305).
+function M.decrypt(algo, key, iv, ciphertext, tag)
+    return native.aes_decrypt(algo, key, iv, ciphertext, tag)
+end
+
+-- ---- Asymmetric sign/verify -----------------------------------------------
+
+-- ssl.sign(algo, key, data) → binary signature|nil
+-- Supported algos: "rsa-sha256", "rsa-sha384", "rsa-sha512",
+--                  "rsa-pss-sha256", "rsa-pss-sha384", "rsa-pss-sha512",
+--                  "ecdsa-sha256", "ecdsa-sha384", "ecdsa-sha512"
+function M.sign(algo, key, data)
+    return native.sign(algo, key, data)
+end
+
+-- ssl.verify(algo, key, data, signature) → bool
+-- key may be a private or public key handle.
+function M.verify(algo, key, data, sig)
+    return native.verify(algo, key, data, sig)
+end
+
+-- ---- Utilities ------------------------------------------------------------
+
+-- ssl.rand_bytes(n) → string
+-- Returns n cryptographically random bytes.
+function M.rand_bytes(n)
+    return native.rand_bytes(n)
+end
+
+-- ssl.pbkdf2(algo, password, salt, iterations, key_len) → binary string|nil
+-- Password-based key derivation (PKCS#5 PBKDF2).
+function M.pbkdf2(algo, password, salt, iterations, key_len)
+    return native.pbkdf2(algo, password, salt, iterations, key_len)
+end
+
+-- ssl.hkdf(algo, ikm, salt, info, length) → binary string|nil
+-- HMAC-based key derivation (RFC 5869).
+function M.hkdf(algo, ikm, salt, info, length)
+    return native.hkdf(algo, ikm, salt, info, length)
+end
+
+-- ssl.base64_encode(data) → string
+function M.base64_encode(data)
+    return native.base64_encode(data)
+end
+
+-- ssl.base64_decode(str) → string|nil
+function M.base64_decode(str)
+    return native.base64_decode(str)
+end
+
+-- ssl.hex_encode(data) → string
+function M.hex_encode(data)
+    return native.hex_encode(data)
+end
+
+-- ssl.hex_decode(str) → string|nil
+function M.hex_decode(str)
+    return native.hex_decode(str)
+end
+
+return M

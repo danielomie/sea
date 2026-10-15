@@ -1,0 +1,127 @@
+-- JIT on-stack replacement (OSR) paths. Under `make test-jit` every chunk is
+-- compiled at its first loop back-edge and entered mid-function; the output
+-- must match the interpreter exactly.
+
+-- 1. Function called once whose hot loop finishes the call natively: the OSR
+--    run ends in RETURN and completes through the interpreter's return path.
+local function sum_to(n)
+    local s = 0
+    for i = 1, n do
+        s = s + i
+    end
+    return s
+end
+print(sum_to(100000))
+
+-- 2. Multiple return values out of an OSR-entered function.
+local function divmod_count(n, d)
+    local q = 0
+    local r = n
+    while r >= d do
+        r = r - d
+        q = q + 1
+    end
+    return q, r
+end
+local q, r = divmod_count(1000003, 7)
+print(q, r)
+
+-- 3. Unsupported op (string concat) before the hot loop, and after it.
+local function labelled(n)
+    local tag = "sum:" .. n
+    local s = 0
+    for i = 0, n do
+        s = s + i * 2
+    end
+    return tag .. "=" .. s
+end
+print(labelled(5000))
+
+-- 4. Clean inner loop nested in a non-clean outer loop (print in the outer
+--    body): the inner loop runs natively, the outer one is interpreted.
+for i = 1, 3 do
+    local acc = 0
+    for j = 1, 20000 do
+        acc = acc + j % 7
+    end
+    print(i, acc)
+end
+
+-- 5. Call inside a loop (forced bailout at the call) feeding a clean loop.
+local function sq(x) return x * x end
+local total = 0
+for i = 1, 2000 do
+    total = total + sq(i)
+end
+local t2 = 0
+for i = 1, 2000 do
+    t2 = t2 + i
+end
+print(total, t2)
+
+-- 6. Type change mid-loop: int arithmetic turns float, so native code bails
+--    every iteration from then on; the result must still be exact.
+local x = 0
+for i = 1, 3000 do
+    if i == 1500 then x = x + 0.5 end
+    x = x + 1
+end
+print(x)
+
+-- 7. Defer in a function whose loop is OSR-entered: the deferred call runs
+--    when the native run returns.
+local function with_defer(n)
+    defer function() print("deferred") end
+    local s = 0
+    for i = 1, n do s = s + i end
+    return s
+end
+print(with_defer(10000))
+
+-- 8. Main-chunk loop with an array (OSR in the top-level chunk).
+local arr = []
+for i = 0, 9999 do arr[] = i end
+local s = 0
+for i = 0, 9999 do s = s + arr[i] end
+print(s)
+
+-- 9. Helper-backed ops inside hot loops: positional table and map access
+--    (GET/SET_TABLE slow path), struct fields, upvalues, globals, concat.
+local tbl = {10, 20, 30, 40}
+local m = [=]
+local tsum = 0
+for i = 0, 3999 do
+    tsum = tsum + tbl[i % 4]
+    m["k" .. (i % 10)] = i
+end
+print(tsum, m["k3"], m["k9"])
+
+local pt = {x = 0, y = 0}
+for i = 1, 5000 do
+    pt.x = pt.x + 1
+    pt.y = pt.y + pt.x % 3
+end
+print(pt.x, pt.y)
+
+local function counter()
+    local n = 0
+    return function()
+        for i = 1, 100 do n = n + 1 end
+        return n
+    end
+end
+local tick = counter()
+local last = 0
+for i = 1, 50 do last = tick() end
+print(last)
+
+gcount = 0
+for i = 1, 3000 do gcount = gcount + 2 end
+print(gcount)
+
+local parts = []
+local str = ""
+for i = 1, 300 do
+    str = str .. (i % 10)
+end
+print(string.len(str), string.sub(str, 1, 12))

@@ -1,0 +1,40 @@
+-- Bug 3: snapshot apagado ao reasignar local de loop
+
+-- Caso 1: [=] map
+local snapshot = [=]
+local i = 0
+while i < 3 do
+    local curr = [=]
+    curr["val"] = i
+    snapshot = curr
+    i = i + 1
+end
+print(snapshot["val"])
+-- 2
+
+-- Caso 2: tabela {}
+local snap2 = {}
+local j = 0
+while j < 2 do
+    local c2 = {}
+    c2["n"] = j * 10
+    snap2 = c2
+    j = j + 1
+end
+print(snap2["n"])
+-- 10
+
+-- Caso 3: array []
+local snap3 = []
+local k = 0
+while k < 3 do
+    local a = []
+    a[] = k
+    a[] = k * 2
+    snap3 = a
+    k = k + 1
+end
+print(snap3[0])
+-- 2
+print(snap3[1])
+-- 4

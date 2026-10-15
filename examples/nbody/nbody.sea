@@ -1,0 +1,128 @@
+--
+-- Simulação N-Body (sistema solar) em Sea
+--
+-- Demonstra:
+--   - Aritmética de ponto flutuante intensiva em laços aninhados
+--   - Arrays tipados (float_array): dados contíguos, sem refcount por elemento
+--   - Medição de tempo com time.now / time.since
+--
+-- É o tipo de código que o JIT acelera. Compare:
+--   bin/sea examples/nbody/nbody.sea
+--   bin/sea-jit --jit examples/nbody/nbody.sea
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║   N-Body: Sol, Júpiter, Saturno, Urano,  ║")
+print("║   Netuno                                 ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+local PI = math.pi
+local SOLAR_MASS = 4 * PI * PI
+local DAYS_PER_YEAR = 365.24
+
+-- Cada corpo ocupa 7 posições consecutivas: x, y, z, vx, vy, vz, massa.
+local N = 5
+local body = float_array(N * 7)
+
+local function add_body(x, y, z, vx, vy, vz, mass)
+    body[] = x
+    body[] = y
+    body[] = z
+    body[] = vx * DAYS_PER_YEAR
+    body[] = vy * DAYS_PER_YEAR
+    body[] = vz * DAYS_PER_YEAR
+    body[] = mass * SOLAR_MASS
+end
+
+add_body(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)   -- Sol
+add_body(4.84143144246472090e+00, -1.16032004402742839e+00, -1.03622044471123109e-01,
+         1.66007664274403694e-03, 7.69901118419740425e-03, -6.90460016972063023e-05,
+         9.54791938424326609e-04)             -- Júpiter
+add_body(8.34336671824457987e+00, 4.12479856412430479e+00, -4.03523417114321381e-01,
+         -2.76742510726862411e-03, 4.99852801234917238e-03, 2.30417297573763929e-05,
+         2.85885980666130812e-04)             -- Saturno
+add_body(1.28943695621391310e+01, -1.51111514016986312e+01, -2.23307578892655734e-01,
+         2.96460137564761618e-03, 2.37847173959480950e-03, -2.96589568540237556e-05,
+         4.36624404335156298e-05)             -- Urano
+add_body(1.53796971148509165e+01, -2.59193146099879641e+01, 1.79258772950371181e-01,
+         2.68067772490389322e-03, 1.62824170038242295e-03, -9.51592254519715870e-05,
+         5.15138902046611451e-05)             -- Netuno
+
+-- Ajusta o momento do Sol para o momento total do sistema ser zero.
+local function offset_momentum()
+    local px = 0.0
+    local py = 0.0
+    local pz = 0.0
+    for i = 0, N - 1 do
+        local b = i * 7
+        px = px + body[b + 3] * body[b + 6]
+        py = py + body[b + 4] * body[b + 6]
+        pz = pz + body[b + 5] * body[b + 6]
+    end
+    body[3] = -px / SOLAR_MASS
+    body[4] = -py / SOLAR_MASS
+    body[5] = -pz / SOLAR_MASS
+end
+
+local function energy()
+    local e = 0.0
+    for i = 0, N - 1 do
+        local b = i * 7
+        local vx = body[b + 3]
+        local vy = body[b + 4]
+        local vz = body[b + 5]
+        e = e + 0.5 * body[b + 6] * (vx * vx + vy * vy + vz * vz)
+        for j = i + 1, N - 1 do
+            local c = j * 7
+            local dx = body[b] - body[c]
+            local dy = body[b + 1] - body[c + 1]
+            local dz = body[b + 2] - body[c + 2]
+            e = e - body[b + 6] * body[c + 6] / math.sqrt(dx * dx + dy * dy + dz * dz)
+        end
+    end
+    return e
+end
+
+-- Um passo de integração (Euler simplético, dt fixo).
+local function advance(dt)
+    for i = 0, N - 1 do
+        local b = i * 7
+        for j = i + 1, N - 1 do
+            local c = j * 7
+            local dx = body[b] - body[c]
+            local dy = body[b + 1] - body[c + 1]
+            local dz = body[b + 2] - body[c + 2]
+            local d2 = dx * dx + dy * dy + dz * dz
+            local mag = dt / (d2 * math.sqrt(d2))
+            local mb = body[b + 6] * mag
+            local mc = body[c + 6] * mag
+            body[b + 3] = body[b + 3] - dx * mc
+            body[b + 4] = body[b + 4] - dy * mc
+            body[b + 5] = body[b + 5] - dz * mc
+            body[c + 3] = body[c + 3] + dx * mb
+            body[c + 4] = body[c + 4] + dy * mb
+            body[c + 5] = body[c + 5] + dz * mb
+        end
+    end
+    for i = 0, N - 1 do
+        local b = i * 7
+        body[b]     = body[b]     + dt * body[b + 3]
+        body[b + 1] = body[b + 1] + dt * body[b + 4]
+        body[b + 2] = body[b + 2] + dt * body[b + 5]
+    end
+end
+
+local STEPS = 200000
+if len(os.args) > 1 then STEPS = tonumber(os.args[1]) end
+
+offset_momentum()
+printf("energia inicial: %.9f\n", energy())
+
+local t0 = time.now()
+for s = 1, STEPS do advance(0.01) end
+local ms = time.since(t0) / 1e6
+
+printf("energia final:   %.9f   (%d passos)\n", energy(), STEPS)
+print("")
+printf("tempo: %.0f ms\n", ms)

@@ -1,0 +1,162 @@
+-- Test: green threads aggressive stress test
+-- Stresses goroutine pool recycling, work-stealing, channel contention
+
+-- 1. Pool recycling: 5000 short-lived goroutines
+local ch1 = chan(5000)
+local wg1 = sync.waitgroup()
+wg1.add(wg1, 5000)
+
+for i = 1, 5000 do
+    local v = i
+    go (function()
+        ch1 <- v
+        wg1.done(wg1)
+    end)()
+end
+
+wg1.wait(wg1)
+close(ch1)
+
+local sum1 = 0
+for v in ch1 do
+    sum1 = sum1 + v
+end
+-- sum(1..5000) = 5000*5001/2 = 12502500
+assert(sum1 == 12502500, "test1: expected 12502500, got " .. sum1)
+print("test1 ok")
+
+-- 2. Deep pipeline: 4 stages each adding 1, 1000 items
+local p0 = chan(1000)
+local p1 = chan(1000)
+local p2 = chan(1000)
+local p3 = chan(1000)
+local p4 = chan(1000)
+local wg2 = sync.waitgroup()
+wg2.add(wg2, 4)
+
+go (function()
+    for v in p0 do p1 <- v + 1 end
+    close(p1)
+    wg2.done(wg2)
+end)()
+
+go (function()
+    for v in p1 do p2 <- v + 1 end
+    close(p2)
+    wg2.done(wg2)
+end)()
+
+go (function()
+    for v in p2 do p3 <- v + 1 end
+    close(p3)
+    wg2.done(wg2)
+end)()
+
+go (function()
+    for v in p3 do p4 <- v + 1 end
+    close(p4)
+    wg2.done(wg2)
+end)()
+
+for i = 1, 1000 do p0 <- i end
+close(p0)
+wg2.wait(wg2)
+
+local sum2 = 0
+local cnt2 = 0
+for v in p4 do
+    sum2 = sum2 + v
+    cnt2 = cnt2 + 1
+end
+assert(cnt2 == 1000, "test2: expected 1000 items, got " .. cnt2)
+-- sum(i+4 for i=1..1000) = 500500 + 4000 = 504500
+assert(sum2 == 504500, "test2: expected 504500, got " .. sum2)
+print("test2 ok")
+
+-- 3. Heavy fan-out: 20 workers processing 1000 tasks
+local tasks3 = chan(1000)
+local results3 = chan(1000)
+local wg3 = sync.waitgroup()
+wg3.add(wg3, 20)
+
+for w = 1, 20 do
+    go function()
+        for task in tasks3 do
+            results3 <- task * task
+        end
+        wg3.done(wg3)
+    end ()
+end
+
+for i = 1, 1000 do tasks3 <- i end
+close(tasks3)
+wg3.wait(wg3)
+close(results3)
+
+local sum3 = 0
+local cnt3 = 0
+for v in results3 do
+    sum3 = sum3 + v
+    cnt3 = cnt3 + 1
+end
+assert(cnt3 == 1000, "test3: expected 1000 results, got " .. cnt3)
+-- sum(i^2 for i=1..1000) = 1000*1001*2001/6 = 333833500
+assert(sum3 == 333833500, "test3: expected 333833500, got " .. sum3)
+print("test3 ok")
+
+-- 4. Goroutine avalanche: each goroutine spawns 2 children (depth 8 = 255 total)
+local ch4 = chan(300)
+local wg4 = sync.waitgroup()
+
+local function spawn_tree(depth)
+    wg4.add(wg4, 1)
+    go (function()
+        ch4 <- 1
+        if depth > 1 then
+            spawn_tree(depth - 1)
+            spawn_tree(depth - 1)
+        end
+        wg4.done(wg4)
+    end)()
+end
+
+spawn_tree(8)
+wg4.wait(wg4)
+close(ch4)
+
+local cnt4 = 0
+for _ in ch4 do cnt4 = cnt4 + 1 end
+-- 2^8 - 1 = 255
+assert(cnt4 == 255, "test4: expected 255 goroutines, got " .. cnt4)
+print("test4 ok")
+
+-- 5. Fan-in: 50 producers each sending 100 values to one consumer channel
+local chin = chan(5000)
+local wg5 = sync.waitgroup()
+wg5.add(wg5, 50)
+
+for i = 1, 50 do
+    local base = (i - 1) * 100
+    go (function()
+        for j = 1, 100 do
+            chin <- base + j
+        end
+        wg5.done(wg5)
+    end)()
+end
+
+wg5.wait(wg5)
+close(chin)
+
+local sum5 = 0
+local cnt5 = 0
+for v in chin do
+    sum5 = sum5 + v
+    cnt5 = cnt5 + 1
+end
+assert(cnt5 == 5000, "test5: expected 5000 values, got " .. cnt5)
+-- producers cover 1..5000 collectively: sum = 5000*5001/2 = 12502500
+assert(sum5 == 12502500, "test5: expected 12502500, got " .. sum5)
+print("test5 ok")
+
+print("PASS: green_stress")

@@ -1,0 +1,1500 @@
+/*
+ * libs/ssl/ssl_native.c — Sea SSL/TLS + Cryptography library (OpenSSL backend).
+ *
+ * Build:  cd libs/ssl && make
+ *
+ * Groups:
+ *   TLS client     — tls_connect, tls_read, tls_write, tls_close,
+ *                    tls_peer_cert, tls_version, tls_cipher
+ *   TLS server     — server_new, server_free, server_listen, server_accept
+ *   Certificates   — cert_load_file, cert_parse, cert_info, cert_pem,
+ *                    cert_save, cert_free, cert_verify, cert_self_signed,
+ *                    cert_sign
+ *   Keys           — key_generate, key_load_file, key_parse, key_pem,
+ *                    key_pub_pem, key_save, key_free
+ *   CSR            — csr_new, csr_pem, csr_free
+ *   Crypto         — hash, hash_raw, hmac, hmac_raw, aes_encrypt, aes_decrypt,
+ *                    sign, verify, rand_bytes, pbkdf2, hkdf,
+ *                    base64_encode, base64_decode, hex_encode, hex_decode
+ */
+
+#include "sea.h"
+#include "sea_rope.h"
+#include "sea_struct.h"
+
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/kdf.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+/* ---- Pointer packing ---------------------------------------------------- */
+
+#define PACK_PTR(p)    sea_int_val((int64_t)(uintptr_t)(p))
+#define UNPACK(v, T)   ((T)(uintptr_t)(uint64_t)sea_as_int(v))
+
+/* ---- Dynamic buffer ----------------------------------------------------- */
+
+typedef struct { char *data; size_t len; size_t cap; } Buf;
+
+static void buf_init(Buf *b) { b->data = NULL; b->len = 0; b->cap = 0; }
+static void buf_free(Buf *b) { free(b->data); buf_init(b); }
+
+static int buf_push(Buf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap : 4096;
+        while (nc < b->len + n + 1) nc *= 2;
+        char *p = realloc(b->data, nc);
+        if (!p) return 0;
+        b->data = p; b->cap = nc;
+    }
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = '\0';
+    return 1;
+}
+
+/* ---- String / value helpers --------------------------------------------- */
+
+/* Copy SeaValue string into a C buffer. Returns 1 on success, 0 on failure. */
+static int val_to_cstr(SeaValue v, char *buf, size_t bufsz) {
+    SeaString *s = sea_value_get_flat_string(v);
+    if (!s) return 0;
+    size_t len = s->len < bufsz - 1 ? s->len : bufsz - 1;
+    memcpy(buf, s->data, len);
+    buf[len] = '\0';
+    sea_obj_release(&s->obj);
+    return 1;
+}
+
+/* Create a SeaValue string (RC=1) for direct return. */
+static SeaValue make_str(const char *data, size_t len) {
+    SeaString *s = sea_string_new(data, len);
+    return sea_obj_val(&s->obj);
+}
+
+/* Set a string table field, correctly managing RC. */
+static void tbl_set_str(SeaTable *t, const char *key, const char *data, size_t len) {
+    SeaString *s = sea_string_new(data, len);
+    sea_table_set_str(t, key, sea_obj_val(&s->obj));
+    sea_obj_release(&s->obj);
+}
+
+/* Push a C string to an array, correctly managing RC. */
+static void arr_push_str(SeaArray *arr, const char *data, size_t len) {
+    SeaString *s = sea_string_new(data, len);
+    sea_array_push(arr, sea_obj_val(&s->obj));
+    sea_obj_release(&s->obj);
+}
+
+/* ---- Options table lookup (handles both TABLE_MAP and OBJ_STRUCT) ------- */
+
+static bool opts_get(SeaValue opts, const char *field, SeaValue *out) {
+    if (sea_is_table(opts)) {
+        return sea_table_get_str(SEA_AS_TABLE(opts), field, out);
+    }
+    if (sea_is_struct(opts)) {
+        SeaString *k = sea_string_intern(field, strlen(field));
+        *out = sea_struct_get(SEA_AS_STRUCT(opts), k);
+        sea_obj_release(&k->obj);
+        return !sea_is_nil(*out);
+    }
+    return false;
+}
+
+/* ---- Hex helpers --------------------------------------------------------- */
+
+static void bin_to_hex(const unsigned char *in, size_t n, char *out) {
+    static const char hx[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[i*2]   = hx[in[i] >> 4];
+        out[i*2+1] = hx[in[i] & 0xf];
+    }
+    out[n*2] = '\0';
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* ---- Algorithm lookup --------------------------------------------------- */
+
+static const EVP_MD *lookup_md(const char *algo) {
+    if (!strcmp(algo, "sha256")    || !strcmp(algo, "SHA256"))    return EVP_sha256();
+    if (!strcmp(algo, "sha384")    || !strcmp(algo, "SHA384"))    return EVP_sha384();
+    if (!strcmp(algo, "sha512")    || !strcmp(algo, "SHA512"))    return EVP_sha512();
+    if (!strcmp(algo, "sha1")      || !strcmp(algo, "SHA1"))      return EVP_sha1();
+    if (!strcmp(algo, "md5")       || !strcmp(algo, "MD5"))       return EVP_md5();
+    if (!strcmp(algo, "sha3-256")  || !strcmp(algo, "SHA3-256"))  return EVP_sha3_256();
+    if (!strcmp(algo, "sha3-512")  || !strcmp(algo, "SHA3-512"))  return EVP_sha3_512();
+    return NULL;
+}
+
+static const EVP_CIPHER *lookup_cipher(const char *algo) {
+    if (!strcmp(algo, "aes-128-gcm"))       return EVP_aes_128_gcm();
+    if (!strcmp(algo, "aes-256-gcm"))       return EVP_aes_256_gcm();
+    if (!strcmp(algo, "aes-128-cbc"))       return EVP_aes_128_cbc();
+    if (!strcmp(algo, "aes-256-cbc"))       return EVP_aes_256_cbc();
+    if (!strcmp(algo, "chacha20-poly1305")) return EVP_chacha20_poly1305();
+    return NULL;
+}
+
+/* Strip "rsa-", "rsa-pss-", "ecdsa-" prefix to find the hash algo. */
+static const EVP_MD *lookup_sign_md(const char *algo) {
+    const char *p = strrchr(algo, '-');
+    return lookup_md(p ? p + 1 : algo);
+}
+
+/* ---- TCP helpers --------------------------------------------------------- */
+
+static int do_tcp_connect(const char *host, const char *port, int timeout_ms) {
+    struct addrinfo hints = {0};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res;
+    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
+    int fd = -1;
+    for (struct addrinfo *p = res; p; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) continue;
+        if (timeout_ms > 0) {
+            struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000L };
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+        close(fd); fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+static int do_tcp_listen(int port) {
+    signal(SIGPIPE, SIG_IGN);
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        int no6only = 0, reuse = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no6only, sizeof(no6only));
+        setsockopt(fd, SOL_SOCKET,   SO_REUSEADDR, &reuse,  sizeof(reuse));
+        struct sockaddr_in6 sa = {0};
+        sa.sin6_family = AF_INET6;
+        sa.sin6_addr   = in6addr_any;
+        sa.sin6_port   = htons((uint16_t)port);
+        if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 &&
+            listen(fd, 128) == 0)
+            return fd;
+        close(fd);
+    }
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int reuse = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in sa4 = {0};
+    sa4.sin_family      = AF_INET;
+    sa4.sin_addr.s_addr = INADDR_ANY;
+    sa4.sin_port        = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr*)&sa4, sizeof(sa4)) < 0 ||
+        listen(fd, 128) < 0) {
+        close(fd); return -1;
+    }
+    return fd;
+}
+
+/* ---- Global client SSL_CTX (lazy-initialized) --------------------------- */
+
+static SSL_CTX        *g_client_ctx  = NULL;
+static pthread_once_t  g_client_once = PTHREAD_ONCE_INIT;
+
+static void client_ctx_init(void) {
+    g_client_ctx = SSL_CTX_new(TLS_client_method());
+    if (!g_client_ctx) return;
+    SSL_CTX_set_verify(g_client_ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_default_verify_paths(g_client_ctx);
+    SSL_CTX_set_min_proto_version(g_client_ctx, TLS1_2_VERSION);
+}
+
+static SSL_CTX *get_client_ctx(void) {
+    pthread_once(&g_client_once, client_ctx_init);
+    return g_client_ctx;
+}
+
+/* =========================================================================
+ * TLS CLIENT
+ * ========================================================================= */
+
+static SeaValue fn_tls_connect(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2) return SEA_NIL_VAL;
+
+    char host[256] = {0}, port[24] = {0};
+    if (!val_to_cstr(args[0], host, sizeof(host))) return SEA_NIL_VAL;
+
+    if (sea_is_int(args[1]))
+        snprintf(port, sizeof(port), "%lld", (long long)sea_as_int(args[1]));
+    else if (!val_to_cstr(args[1], port, sizeof(port)))
+        return SEA_NIL_VAL;
+
+    bool verify      = true;
+    char sni[256]    = {0};
+    char cert_p[512] = {0};
+    char key_p[512]  = {0};
+    long min_ver     = TLS1_2_VERSION;
+    int  timeout_ms  = 0;
+
+    if (argc >= 3 && (sea_is_table(args[2]) || sea_is_struct(args[2]))) {
+        SeaValue v;
+        if (opts_get(args[2], "verify",      &v)) verify = sea_is_truthy(v);
+        if (opts_get(args[2], "sni",         &v)) val_to_cstr(v, sni,    sizeof(sni));
+        if (opts_get(args[2], "cert",        &v)) val_to_cstr(v, cert_p, sizeof(cert_p));
+        if (opts_get(args[2], "key",         &v)) val_to_cstr(v, key_p,  sizeof(key_p));
+        if (opts_get(args[2], "min_version", &v)) {
+            char mv[32]; val_to_cstr(v, mv, sizeof(mv));
+            if (!strcmp(mv, "TLSv1.3") || !strcmp(mv, "1.3")) min_ver = TLS1_3_VERSION;
+        }
+        if (opts_get(args[2], "timeout", &v))
+            timeout_ms = sea_is_int(v) ? (int)sea_as_int(v) : (int)sea_as_number(v);
+    }
+
+    bool    needs_clone = !verify || cert_p[0] || key_p[0] || min_ver != TLS1_2_VERSION;
+    SSL_CTX *ctx        = needs_clone ? NULL : get_client_ctx();
+
+    if (needs_clone) {
+        ctx = SSL_CTX_new(TLS_client_method());
+        if (!ctx) return SEA_NIL_VAL;
+        SSL_CTX_set_min_proto_version(ctx, min_ver);
+        if (!verify)
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+        else {
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+            SSL_CTX_set_default_verify_paths(ctx);
+        }
+        if (cert_p[0]) SSL_CTX_use_certificate_chain_file(ctx, cert_p);
+        if (key_p[0])  SSL_CTX_use_PrivateKey_file(ctx, key_p, SSL_FILETYPE_PEM);
+    }
+
+    int fd = do_tcp_connect(host, port, timeout_ms);
+    if (fd < 0) { if (needs_clone) SSL_CTX_free(ctx); return SEA_NIL_VAL; }
+
+    SSL *ssl = SSL_new(ctx);
+    /* SSL_new increments ctx's internal refcount, safe to free clone now */
+    if (needs_clone) SSL_CTX_free(ctx);
+    if (!ssl) { close(fd); return SEA_NIL_VAL; }
+
+    const char *sni_name = sni[0] ? sni : host;
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, sni_name);
+    if (verify) SSL_set1_host(ssl, sni_name);
+
+    if (SSL_connect(ssl) <= 0) {
+        SSL_free(ssl); close(fd);
+        return SEA_NIL_VAL;
+    }
+    return PACK_PTR(ssl);
+}
+
+static SeaValue fn_tls_read(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SSL *ssl = UNPACK(args[0], SSL*);
+
+    /* Read exactly n bytes */
+    if (argc >= 2 && sea_is_int(args[1])) {
+        int n = (int)sea_as_int(args[1]);
+        if (n <= 0) return make_str("", 0);
+        char *buf = malloc((size_t)n);
+        if (!buf) return SEA_NIL_VAL;
+        int total = 0;
+        while (total < n) {
+            int r = SSL_read(ssl, buf + total, n - total);
+            if (r <= 0) break;
+            total += r;
+        }
+        SeaValue v = make_str(buf, (size_t)total);
+        free(buf);
+        return v;
+    }
+
+    /* Read until EOF/close */
+    Buf b; buf_init(&b);
+    char tmp[8192]; int r;
+    while ((r = SSL_read(ssl, tmp, (int)sizeof(tmp))) > 0)
+        buf_push(&b, tmp, (size_t)r);
+    SeaValue v = make_str(b.data ? b.data : "", b.len);
+    buf_free(&b);
+    return v;
+}
+
+/* Read a full HTTP request over TLS: headers + body (based on Content-Length).
+ * Mirrors read_http_request_buf() in http_native.c but uses SSL_read. */
+static SeaValue fn_tls_read_request(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SSL *ssl = UNPACK(args[0], SSL*);
+
+    Buf buf; buf_init(&buf);
+    char tmp[8192];
+
+    while (buf.len < (1u << 20)) {
+        int n = SSL_read(ssl, tmp, (int)sizeof(tmp));
+        if (n <= 0) break;
+        buf_push(&buf, tmp, (size_t)n);
+
+        /* Find end of headers */
+        const char *hdr_end = (const char*)memmem(buf.data, buf.len, "\r\n\r\n", 4);
+        if (!hdr_end) continue;
+
+        size_t body_start = (size_t)(hdr_end - buf.data) + 4;
+        size_t body_have  = buf.len - body_start;
+        size_t body_need  = 0;
+
+        /* Scan headers for Content-Length */
+        for (const char *scan = buf.data; scan < hdr_end; ) {
+            size_t rem = (size_t)(hdr_end - scan);
+            if (rem >= 15 && strncasecmp(scan, "content-length:", 15) == 0) {
+                const char *v = scan + 15;
+                while (v < hdr_end && (*v == ' ' || *v == '\t')) v++;
+                body_need = (size_t)strtoul(v, NULL, 10);
+                break;
+            }
+            const char *nl = (const char*)memmem(scan, rem, "\r\n", 2);
+            if (!nl) break;
+            scan = nl + 2;
+        }
+
+        /* Read remaining body bytes */
+        while (body_have < body_need) {
+            size_t want = body_need - body_have;
+            int m = SSL_read(ssl, tmp, (int)(want < sizeof(tmp) ? want : sizeof(tmp)));
+            if (m <= 0) break;
+            buf_push(&buf, tmp, (size_t)m);
+            body_have += (size_t)m;
+        }
+        break;
+    }
+
+    SeaValue r = make_str(buf.data ? buf.data : "", buf.len);
+    buf_free(&buf);
+    return r;
+}
+
+static SeaValue fn_tls_write(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SeaString *str = sea_value_get_flat_string(args[1]);
+    if (!str) return SEA_NIL_VAL;
+    SSL *ssl = UNPACK(args[0], SSL*);
+    const char *data = str->data;
+    int total = (int)str->len;
+    for (int sent = 0; sent < total; ) {
+        int n = SSL_write(ssl, data + sent, total - sent);
+        if (n <= 0) break;
+        sent += n;
+    }
+    sea_obj_release(&str->obj);
+    return SEA_NIL_VAL;
+}
+
+static SeaValue fn_tls_close(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SSL *ssl = UNPACK(args[0], SSL*);
+    int fd = SSL_get_fd(ssl);
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    if (fd >= 0) close(fd);
+    return SEA_NIL_VAL;
+}
+
+static SeaValue fn_tls_peer_cert(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SSL *ssl = UNPACK(args[0], SSL*);
+    X509 *cert = SSL_get_peer_certificate(ssl);
+    return cert ? PACK_PTR(cert) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_tls_version(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    const char *v = SSL_get_version(UNPACK(args[0], SSL*));
+    return make_str(v, strlen(v));
+}
+
+static SeaValue fn_tls_cipher(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    const char *c = SSL_get_cipher(UNPACK(args[0], SSL*));
+    return c ? make_str(c, strlen(c)) : SEA_NIL_VAL;
+}
+
+/* =========================================================================
+ * TLS SERVER
+ * ========================================================================= */
+
+static SeaValue fn_server_new(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaValue opts_v = args[0];
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+
+    char cert[512] = {0}, key[512] = {0}, ca[512] = {0};
+    long min_ver = TLS1_2_VERSION;
+    SeaValue v;
+
+    if (opts_get(opts_v, "cert",        &v)) val_to_cstr(v, cert, sizeof(cert));
+    if (opts_get(opts_v, "key",         &v)) val_to_cstr(v, key,  sizeof(key));
+    if (opts_get(opts_v, "ca",          &v)) val_to_cstr(v, ca,   sizeof(ca));
+    if (opts_get(opts_v, "min_version", &v)) {
+        char mv[32]; val_to_cstr(v, mv, sizeof(mv));
+        if (!strcmp(mv, "TLSv1.3") || !strcmp(mv, "1.3")) min_ver = TLS1_3_VERSION;
+    }
+
+    if (!cert[0] || !key[0]) return SEA_NIL_VAL;
+
+    SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) return SEA_NIL_VAL;
+
+    SSL_CTX_set_min_proto_version(ctx, min_ver);
+
+    if (SSL_CTX_use_certificate_chain_file(ctx, cert) != 1 ||
+        SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_check_private_key(ctx) != 1) {
+        SSL_CTX_free(ctx);
+        return SEA_NIL_VAL;
+    }
+
+    if (ca[0]) {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+        SSL_CTX_load_verify_locations(ctx, ca, NULL);
+    }
+
+    return PACK_PTR(ctx);
+}
+
+static SeaValue fn_server_free(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SSL_CTX_free(UNPACK(args[0], SSL_CTX*));
+    return SEA_NIL_VAL;
+}
+
+static SeaValue fn_server_listen(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    int port = sea_is_int(args[0]) ? (int)sea_as_int(args[0]) : (int)sea_as_number(args[0]);
+    int fd = do_tcp_listen(port);
+    return fd >= 0 ? sea_int_val(fd) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_server_accept(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0]) || !sea_is_int(args[1])) return SEA_NIL_VAL;
+    SSL_CTX *ctx = UNPACK(args[0], SSL_CTX*);
+    int server_fd = (int)sea_as_int(args[1]);
+
+    struct sockaddr_storage sa; socklen_t sl = sizeof(sa);
+    int fd = accept(server_fd, (struct sockaddr*)&sa, &sl);
+    if (fd < 0) return SEA_NIL_VAL;
+
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) { close(fd); return SEA_NIL_VAL; }
+    SSL_set_fd(ssl, fd);
+    if (SSL_accept(ssl) <= 0) {
+        SSL_free(ssl); close(fd);
+        return SEA_NIL_VAL;
+    }
+    return PACK_PTR(ssl);
+}
+
+/* =========================================================================
+ * CERTIFICATES
+ * ========================================================================= */
+
+static void push_asn1_time(SeaTable *t, const char *key, const ASN1_TIME *at) {
+    if (!at) return;
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return;
+    ASN1_TIME_print(bio, at);
+    char buf[64]; int n = BIO_read(bio, buf, (int)sizeof(buf) - 1);
+    BIO_free(bio);
+    if (n > 0) { buf[n] = '\0'; tbl_set_str(t, key, buf, (size_t)n); }
+}
+
+/* Build SAN string from opts.san SeaArray and add to cert/req extensions. */
+static void build_san_buf(SeaArray *arr, Buf *san) {
+    for (uint32_t i = 0; i < arr->len; i++) {
+        SeaString *s = sea_value_get_flat_string(arr->data[i]);
+        if (!s) continue;
+        if (san->len > 0) buf_push(san, ",", 1);
+        /* Heuristic: 4 dotted segments ≤ 15 chars → IP, else DNS */
+        int dots = 0;
+        for (uint32_t j = 0; j < s->len; j++) if (s->data[j] == '.') dots++;
+        if (dots == 3 && s->len <= 15)
+            buf_push(san, "IP:", 3);
+        else
+            buf_push(san, "DNS:", 4);
+        buf_push(san, s->data, s->len);
+        sea_obj_release(&s->obj);
+    }
+}
+
+/* Helper: read subject name fields from opts and populate X509_NAME. */
+static void name_from_opts(X509_NAME *name, SeaValue opts_v) {
+    static const struct { const char *field; const char *nid; } map[] = {
+        {"cn",      "CN"}, {"org",     "O"},  {"country", "C"},
+        {"state",   "ST"}, {"city",    "L"},  {"email",   "emailAddress"},
+        {NULL, NULL}
+    };
+    SeaValue v;
+    char buf[256];
+    for (int i = 0; map[i].field; i++) {
+        if (opts_get(opts_v, map[i].field, &v) && val_to_cstr(v, buf, sizeof(buf)))
+            X509_NAME_add_entry_by_txt(name, map[i].nid, MBSTRING_ASC,
+                                       (unsigned char*)buf, -1, -1, 0);
+    }
+}
+
+static SeaValue fn_cert_load_file(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    char path[512];
+    if (!val_to_cstr(args[0], path, sizeof(path))) return SEA_NIL_VAL;
+    FILE *f = fopen(path, "r");
+    if (!f) return SEA_NIL_VAL;
+    X509 *cert = PEM_read_X509(f, NULL, NULL, NULL);
+    fclose(f);
+    return cert ? PACK_PTR(cert) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_cert_parse(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *pem = sea_value_get_flat_string(args[0]);
+    if (!pem) return SEA_NIL_VAL;
+    BIO *bio = BIO_new_mem_buf(pem->data, (int)pem->len);
+    sea_obj_release(&pem->obj);
+    if (!bio) return SEA_NIL_VAL;
+    X509 *cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    return cert ? PACK_PTR(cert) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_cert_info(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    X509 *cert = UNPACK(args[0], X509*);
+
+    SeaTable *t = sea_table_new(TABLE_MAP);
+
+    /* subject / issuer */
+    char buf[512];
+    X509_NAME *subj = X509_get_subject_name(cert);
+    if (subj) {
+        X509_NAME_oneline(subj, buf, (int)sizeof(buf));
+        tbl_set_str(t, "subject", buf, strlen(buf));
+    }
+    X509_NAME *iss = X509_get_issuer_name(cert);
+    if (iss) {
+        X509_NAME_oneline(iss, buf, (int)sizeof(buf));
+        tbl_set_str(t, "issuer", buf, strlen(buf));
+    }
+
+    push_asn1_time(t, "not_before", X509_get_notBefore(cert));
+    push_asn1_time(t, "not_after",  X509_get_notAfter(cert));
+
+    /* serial */
+    const ASN1_INTEGER *ser = X509_get_serialNumber(cert);
+    if (ser) sea_table_set_str(t, "serial", sea_int_val(ASN1_INTEGER_get(ser)));
+
+    /* SHA-256 fingerprint */
+    unsigned char fp[32]; unsigned int fplen = sizeof(fp);
+    if (X509_digest(cert, EVP_sha256(), fp, &fplen)) {
+        char hex[65]; bin_to_hex(fp, fplen, hex);
+        tbl_set_str(t, "fingerprint", hex, 64);
+    }
+
+    /* SAN */
+    GENERAL_NAMES *sans = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    if (sans) {
+        int n = sk_GENERAL_NAME_num(sans);
+        SeaArray *arr = sea_array_new((uint32_t)n);
+        for (int i = 0; i < n; i++) {
+            GENERAL_NAME *gn = sk_GENERAL_NAME_value(sans, i);
+            char ipbuf[64] = {0};
+            if (gn->type == GEN_DNS) {
+                const char *dns = (const char*)ASN1_STRING_get0_data(gn->d.dNSName);
+                arr_push_str(arr, dns, strlen(dns));
+            } else if (gn->type == GEN_IPADD) {
+                const unsigned char *ip = ASN1_STRING_get0_data(gn->d.iPAddress);
+                int ilen = ASN1_STRING_length(gn->d.iPAddress);
+                if (ilen == 4)
+                    snprintf(ipbuf, sizeof(ipbuf), "%d.%d.%d.%d",
+                             ip[0], ip[1], ip[2], ip[3]);
+                else if (ilen == 16)
+                    snprintf(ipbuf, sizeof(ipbuf),
+                             "%02x%02x:%02x%02x:%02x%02x:%02x%02x"
+                             ":%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+                             ip[0],ip[1],ip[2],ip[3],ip[4],ip[5],ip[6],ip[7],
+                             ip[8],ip[9],ip[10],ip[11],ip[12],ip[13],ip[14],ip[15]);
+                if (ipbuf[0]) arr_push_str(arr, ipbuf, strlen(ipbuf));
+            }
+        }
+        GENERAL_NAMES_free(sans);
+        sea_table_set_str(t, "san", sea_obj_val(&arr->obj));
+        sea_obj_release(&arr->obj);
+    }
+
+    return sea_obj_val(&t->obj);
+}
+
+static SeaValue fn_cert_pem(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return SEA_NIL_VAL;
+    PEM_write_bio_X509(bio, UNPACK(args[0], X509*));
+    char *ptr; long len = BIO_get_mem_data(bio, &ptr);
+    SeaValue r = len > 0 ? make_str(ptr, (size_t)len) : SEA_NIL_VAL;
+    BIO_free(bio);
+    return r;
+}
+
+static SeaValue fn_cert_save(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0])) return SEA_FALSE_VAL;
+    char path[512];
+    if (!val_to_cstr(args[1], path, sizeof(path))) return SEA_FALSE_VAL;
+    FILE *f = fopen(path, "w");
+    if (!f) return SEA_FALSE_VAL;
+    int ok = PEM_write_X509(f, UNPACK(args[0], X509*));
+    fclose(f);
+    return sea_bool_val(ok == 1);
+}
+
+static SeaValue fn_cert_free(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc >= 1 && sea_is_int(args[0])) X509_free(UNPACK(args[0], X509*));
+    return SEA_NIL_VAL;
+}
+
+static SeaValue fn_cert_verify(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0]) || !sea_is_int(args[1])) return SEA_FALSE_VAL;
+    X509 *cert = UNPACK(args[0], X509*);
+    X509 *ca   = UNPACK(args[1], X509*);
+    X509_STORE *store = X509_STORE_new();
+    X509_STORE_add_cert(store, ca);
+    X509_STORE_CTX *ctx = X509_STORE_CTX_new();
+    X509_STORE_CTX_init(ctx, store, cert, NULL);
+    int ok = X509_verify_cert(ctx);
+    X509_STORE_CTX_free(ctx);
+    X509_STORE_free(store);
+    return sea_bool_val(ok == 1);
+}
+
+static SeaValue fn_cert_self_signed(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SeaValue opts_v = args[1];
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+
+    EVP_PKEY *key = UNPACK(args[0], EVP_PKEY*);
+    long days = 365; bool is_ca = false;
+    SeaValue v;
+    if (opts_get(opts_v, "days",  &v) && sea_is_int(v)) days  = (long)sea_as_int(v);
+    if (opts_get(opts_v, "is_ca", &v)) is_ca = sea_is_truthy(v);
+
+    X509 *cert = X509_new();
+    if (!cert) return SEA_NIL_VAL;
+    X509_set_version(cert, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+    X509_gmtime_adj(X509_get_notBefore(cert), 0);
+    X509_gmtime_adj(X509_get_notAfter(cert), (long)60 * 60 * 24 * days);
+    X509_set_pubkey(cert, key);
+
+    X509_NAME *name = X509_get_subject_name(cert);
+    name_from_opts(name, opts_v);
+    X509_set_issuer_name(cert, name);
+
+    X509V3_CTX x3ctx;
+    X509V3_set_ctx_nodb(&x3ctx);
+    X509V3_set_ctx(&x3ctx, cert, cert, NULL, NULL, 0);
+
+    const char *bc = is_ca ? "critical,CA:TRUE" : "CA:FALSE";
+    X509_EXTENSION *ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_basic_constraints, bc);
+    if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+
+    if (is_ca) {
+        ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_key_usage, "critical,keyCertSign,cRLSign");
+        if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+    }
+
+    ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_subject_key_identifier, "hash");
+    if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+
+    /* SAN */
+    if (opts_get(opts_v, "san", &v) && sea_is_array(v)) {
+        Buf san; buf_init(&san);
+        build_san_buf(SEA_AS_ARRAY(v), &san);
+        if (san.len > 0) {
+            ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_subject_alt_name, san.data);
+            if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+        }
+        buf_free(&san);
+    }
+
+    if (X509_sign(cert, key, EVP_sha256()) <= 0) {
+        X509_free(cert); return SEA_NIL_VAL;
+    }
+    return PACK_PTR(cert);
+}
+
+static SeaValue fn_cert_sign(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* cert_sign(csr, ca_key, ca_cert, opts) */
+    if (argc < 4 || !sea_is_int(args[0]) || !sea_is_int(args[1]) || !sea_is_int(args[2]))
+        return SEA_NIL_VAL;
+    SeaValue opts_v = args[3];
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+
+    X509_REQ *csr      = UNPACK(args[0], X509_REQ*);
+    EVP_PKEY *ca_key   = UNPACK(args[1], EVP_PKEY*);
+    X509     *ca_cert  = UNPACK(args[2], X509*);
+
+    long days = 365, serial = 1;
+    SeaValue v;
+    if (opts_get(opts_v, "days",   &v) && sea_is_int(v)) days   = (long)sea_as_int(v);
+    if (opts_get(opts_v, "serial", &v) && sea_is_int(v)) serial = (long)sea_as_int(v);
+
+    X509 *cert = X509_new();
+    if (!cert) return SEA_NIL_VAL;
+    X509_set_version(cert, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), serial);
+    X509_gmtime_adj(X509_get_notBefore(cert), 0);
+    X509_gmtime_adj(X509_get_notAfter(cert), (long)60 * 60 * 24 * days);
+
+    EVP_PKEY *pub = X509_REQ_get_pubkey(csr);
+    X509_set_pubkey(cert, pub);
+    EVP_PKEY_free(pub);
+
+    X509_set_subject_name(cert, X509_REQ_get_subject_name(csr));
+    X509_set_issuer_name(cert, X509_get_subject_name(ca_cert));
+
+    X509V3_CTX x3ctx;
+    X509V3_set_ctx_nodb(&x3ctx);
+    X509V3_set_ctx(&x3ctx, ca_cert, cert, NULL, NULL, 0);
+
+    X509_EXTENSION *ext;
+    ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_basic_constraints, "CA:FALSE");
+    if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+    ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_subject_key_identifier, "hash");
+    if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+    ext = X509V3_EXT_conf_nid(NULL, &x3ctx, NID_authority_key_identifier, "keyid:always");
+    if (ext) { X509_add_ext(cert, ext, -1); X509_EXTENSION_free(ext); }
+
+    if (X509_sign(cert, ca_key, EVP_sha256()) <= 0) {
+        X509_free(cert); return SEA_NIL_VAL;
+    }
+    return PACK_PTR(cert);
+}
+
+/* =========================================================================
+ * KEYS
+ * ========================================================================= */
+
+static SeaValue fn_key_generate(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaValue opts_v = args[0];
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+
+    char type[16]  = "rsa";
+    int  bits      = 2048;
+    char curve[32] = "P-256";
+    SeaValue v;
+    if (opts_get(opts_v, "type",  &v)) val_to_cstr(v, type,  sizeof(type));
+    if (opts_get(opts_v, "bits",  &v) && sea_is_int(v)) bits = (int)sea_as_int(v);
+    if (opts_get(opts_v, "curve", &v)) val_to_cstr(v, curve, sizeof(curve));
+
+    EVP_PKEY     *pkey = NULL;
+    EVP_PKEY_CTX *ctx  = NULL;
+
+    if (!strcmp(type, "rsa") || !strcmp(type, "RSA")) {
+        ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+        if (ctx &&
+            EVP_PKEY_keygen_init(ctx) > 0 &&
+            EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) > 0)
+            EVP_PKEY_keygen(ctx, &pkey);
+    } else if (!strcmp(type, "ec") || !strcmp(type, "EC")) {
+        int nid = OBJ_txt2nid(curve);
+        if (nid == NID_undef) {
+            if      (!strcmp(curve, "P-256")) nid = NID_X9_62_prime256v1;
+            else if (!strcmp(curve, "P-384")) nid = NID_secp384r1;
+            else if (!strcmp(curve, "P-521")) nid = NID_secp521r1;
+        }
+        if (nid != NID_undef) {
+            ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+            if (ctx &&
+                EVP_PKEY_keygen_init(ctx) > 0 &&
+                EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, nid) > 0)
+                EVP_PKEY_keygen(ctx, &pkey);
+        }
+    }
+
+    if (ctx) EVP_PKEY_CTX_free(ctx);
+    return pkey ? PACK_PTR(pkey) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_key_load_file(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    char path[512], pass[256] = {0};
+    if (!val_to_cstr(args[0], path, sizeof(path))) return SEA_NIL_VAL;
+    if (argc >= 2) val_to_cstr(args[1], pass, sizeof(pass));
+    FILE *f = fopen(path, "r");
+    if (!f) return SEA_NIL_VAL;
+    EVP_PKEY *key = PEM_read_PrivateKey(f, NULL, NULL, pass[0] ? pass : NULL);
+    fclose(f);
+    return key ? PACK_PTR(key) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_key_parse(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *pem = sea_value_get_flat_string(args[0]);
+    if (!pem) return SEA_NIL_VAL;
+    char pass[256] = {0};
+    if (argc >= 2) val_to_cstr(args[1], pass, sizeof(pass));
+    BIO *bio = BIO_new_mem_buf(pem->data, (int)pem->len);
+    sea_obj_release(&pem->obj);
+    if (!bio) return SEA_NIL_VAL;
+    EVP_PKEY *key = PEM_read_bio_PrivateKey(bio, NULL, NULL, pass[0] ? pass : NULL);
+    BIO_free(bio);
+    return key ? PACK_PTR(key) : SEA_NIL_VAL;
+}
+
+static SeaValue fn_key_pem(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    EVP_PKEY *key = UNPACK(args[0], EVP_PKEY*);
+    char pass[256] = {0};
+    if (argc >= 2) val_to_cstr(args[1], pass, sizeof(pass));
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return SEA_NIL_VAL;
+    if (pass[0])
+        PEM_write_bio_PrivateKey(bio, key, EVP_aes_256_cbc(),
+                                 (unsigned char*)pass, (int)strlen(pass), NULL, NULL);
+    else
+        PEM_write_bio_PrivateKey(bio, key, NULL, NULL, 0, NULL, NULL);
+    char *ptr; long len = BIO_get_mem_data(bio, &ptr);
+    SeaValue r = len > 0 ? make_str(ptr, (size_t)len) : SEA_NIL_VAL;
+    BIO_free(bio);
+    return r;
+}
+
+static SeaValue fn_key_pub_pem(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return SEA_NIL_VAL;
+    PEM_write_bio_PUBKEY(bio, UNPACK(args[0], EVP_PKEY*));
+    char *ptr; long len = BIO_get_mem_data(bio, &ptr);
+    SeaValue r = len > 0 ? make_str(ptr, (size_t)len) : SEA_NIL_VAL;
+    BIO_free(bio);
+    return r;
+}
+
+static SeaValue fn_key_save(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0])) return SEA_FALSE_VAL;
+    char path[512], pass[256] = {0};
+    if (!val_to_cstr(args[1], path, sizeof(path))) return SEA_FALSE_VAL;
+    if (argc >= 3) val_to_cstr(args[2], pass, sizeof(pass));
+    EVP_PKEY *key = UNPACK(args[0], EVP_PKEY*);
+    FILE *f = fopen(path, "w");
+    if (!f) return SEA_FALSE_VAL;
+    int ok = pass[0]
+        ? PEM_write_PrivateKey(f, key, EVP_aes_256_cbc(),
+                               (unsigned char*)pass, (int)strlen(pass), NULL, NULL)
+        : PEM_write_PrivateKey(f, key, NULL, NULL, 0, NULL, NULL);
+    fclose(f);
+    return sea_bool_val(ok == 1);
+}
+
+static SeaValue fn_key_free(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc >= 1 && sea_is_int(args[0])) EVP_PKEY_free(UNPACK(args[0], EVP_PKEY*));
+    return SEA_NIL_VAL;
+}
+
+/* =========================================================================
+ * CSR
+ * ========================================================================= */
+
+static SeaValue fn_csr_new(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 2 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    SeaValue opts_v = args[1];
+    if (!sea_is_table(opts_v) && !sea_is_struct(opts_v)) return SEA_NIL_VAL;
+
+    EVP_PKEY *key = UNPACK(args[0], EVP_PKEY*);
+    X509_REQ *req = X509_REQ_new();
+    if (!req) return SEA_NIL_VAL;
+    X509_REQ_set_version(req, 0);
+    X509_REQ_set_pubkey(req, key);
+
+    X509_NAME *name = X509_REQ_get_subject_name(req);
+    name_from_opts(name, opts_v);
+
+    /* SAN via request extensions */
+    SeaValue v;
+    if (opts_get(opts_v, "san", &v) && sea_is_array(v)) {
+        Buf san; buf_init(&san);
+        build_san_buf(SEA_AS_ARRAY(v), &san);
+        if (san.len > 0) {
+            STACK_OF(X509_EXTENSION) *exts = sk_X509_EXTENSION_new_null();
+            X509V3_CTX ctx;
+            X509V3_set_ctx_nodb(&ctx);
+            X509V3_set_ctx(&ctx, NULL, NULL, req, NULL, 0);
+            X509_EXTENSION *ext = X509V3_EXT_conf_nid(NULL, &ctx,
+                                                       NID_subject_alt_name, san.data);
+            if (ext) {
+                sk_X509_EXTENSION_push(exts, ext);
+                X509_REQ_add_extensions(req, exts);
+            }
+            sk_X509_EXTENSION_pop_free(exts, X509_EXTENSION_free);
+        }
+        buf_free(&san);
+    }
+
+    if (X509_REQ_sign(req, key, EVP_sha256()) <= 0) {
+        X509_REQ_free(req); return SEA_NIL_VAL;
+    }
+    return PACK_PTR(req);
+}
+
+static SeaValue fn_csr_pem(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return SEA_NIL_VAL;
+    PEM_write_bio_X509_REQ(bio, UNPACK(args[0], X509_REQ*));
+    char *ptr; long len = BIO_get_mem_data(bio, &ptr);
+    SeaValue r = len > 0 ? make_str(ptr, (size_t)len) : SEA_NIL_VAL;
+    BIO_free(bio);
+    return r;
+}
+
+static SeaValue fn_csr_free(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc >= 1 && sea_is_int(args[0])) X509_REQ_free(UNPACK(args[0], X509_REQ*));
+    return SEA_NIL_VAL;
+}
+
+/* =========================================================================
+ * CRYPTOGRAPHY — hash, HMAC
+ * ========================================================================= */
+
+static SeaValue do_hash(int argc, SeaValue *args, bool hex_out) {
+    if (argc < 2) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_MD *md = lookup_md(algo);
+    if (!md) return SEA_NIL_VAL;
+    SeaString *data = sea_value_get_flat_string(args[1]);
+    if (!data) return SEA_NIL_VAL;
+
+    unsigned char digest[EVP_MAX_MD_SIZE]; unsigned int dlen = 0;
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, md, NULL);
+    EVP_DigestUpdate(ctx, data->data, data->len);
+    EVP_DigestFinal_ex(ctx, digest, &dlen);
+    EVP_MD_CTX_free(ctx);
+    sea_obj_release(&data->obj);
+
+    if (!hex_out) return make_str((char*)digest, dlen);
+    char hex[EVP_MAX_MD_SIZE * 2 + 1];
+    bin_to_hex(digest, dlen, hex);
+    return make_str(hex, dlen * 2);
+}
+
+static SeaValue fn_hash(SeaVM *vm, int argc, SeaValue *args)     { (void)vm; return do_hash(argc, args, true);  }
+static SeaValue fn_hash_raw(SeaVM *vm, int argc, SeaValue *args) { (void)vm; return do_hash(argc, args, false); }
+
+static SeaValue do_hmac(int argc, SeaValue *args, bool hex_out) {
+    if (argc < 3) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_MD *md = lookup_md(algo);
+    if (!md) return SEA_NIL_VAL;
+    SeaString *key  = sea_value_get_flat_string(args[1]);
+    SeaString *data = sea_value_get_flat_string(args[2]);
+    if (!key || !data) {
+        if (key)  sea_obj_release(&key->obj);
+        if (data) sea_obj_release(&data->obj);
+        return SEA_NIL_VAL;
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE]; unsigned int dlen = 0;
+    HMAC(md, key->data, (int)key->len,
+         (unsigned char*)data->data, data->len, digest, &dlen);
+    sea_obj_release(&key->obj);
+    sea_obj_release(&data->obj);
+
+    if (!hex_out) return make_str((char*)digest, dlen);
+    char hex[EVP_MAX_MD_SIZE * 2 + 1];
+    bin_to_hex(digest, dlen, hex);
+    return make_str(hex, dlen * 2);
+}
+
+static SeaValue fn_hmac(SeaVM *vm, int argc, SeaValue *args)     { (void)vm; return do_hmac(argc, args, true);  }
+static SeaValue fn_hmac_raw(SeaVM *vm, int argc, SeaValue *args) { (void)vm; return do_hmac(argc, args, false); }
+
+/* =========================================================================
+ * CRYPTOGRAPHY — symmetric (AES/ChaCha20)
+ * ========================================================================= */
+
+static SeaValue fn_aes_encrypt(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* encrypt(algo, key, plaintext, [iv]) */
+    if (argc < 3) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_CIPHER *cipher = lookup_cipher(algo);
+    if (!cipher) return SEA_NIL_VAL;
+
+    SeaString *key_s  = sea_value_get_flat_string(args[1]);
+    SeaString *plain  = sea_value_get_flat_string(args[2]);
+    if (!key_s || !plain) {
+        if (key_s)  sea_obj_release(&key_s->obj);
+        if (plain)  sea_obj_release(&plain->obj);
+        return SEA_NIL_VAL;
+    }
+
+    bool is_aead = strstr(algo, "gcm") || strstr(algo, "poly1305");
+    int  iv_len  = is_aead ? 12 : EVP_CIPHER_iv_length(cipher);
+    int  key_len = EVP_CIPHER_key_length(cipher);
+
+    if ((int)key_s->len < key_len) {
+        sea_obj_release(&key_s->obj); sea_obj_release(&plain->obj);
+        return SEA_NIL_VAL;
+    }
+
+    unsigned char iv[32] = {0};
+    if (argc >= 4) {
+        SeaString *iv_s = sea_value_get_flat_string(args[3]);
+        if (iv_s) {
+            int n = (int)iv_s->len < iv_len ? (int)iv_s->len : iv_len;
+            memcpy(iv, iv_s->data, (size_t)n);
+            sea_obj_release(&iv_s->obj);
+        } else {
+            RAND_bytes(iv, iv_len);
+        }
+    } else {
+        RAND_bytes(iv, iv_len);
+    }
+
+    int outlen = (int)plain->len + EVP_CIPHER_block_size(cipher) + 16;
+    unsigned char *out = malloc((size_t)outlen);
+    if (!out) {
+        sea_obj_release(&key_s->obj); sea_obj_release(&plain->obj);
+        return SEA_NIL_VAL;
+    }
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    EVP_EncryptInit_ex(ctx, cipher, NULL, (unsigned char*)key_s->data, iv);
+    int len1 = 0, len2 = 0;
+    EVP_EncryptUpdate(ctx, out, &len1, (unsigned char*)plain->data, (int)plain->len);
+    EVP_EncryptFinal_ex(ctx, out + len1, &len2);
+
+    unsigned char tag[16] = {0};
+    if (is_aead) EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
+    EVP_CIPHER_CTX_free(ctx);
+    sea_obj_release(&key_s->obj);
+    sea_obj_release(&plain->obj);
+
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    tbl_set_str(t, "data", (char*)out,  (size_t)(len1 + len2));
+    tbl_set_str(t, "iv",   (char*)iv,   (size_t)iv_len);
+    tbl_set_str(t, "tag",  (char*)tag,  is_aead ? 16 : 0);
+    free(out);
+    return sea_obj_val(&t->obj);
+}
+
+static SeaValue fn_aes_decrypt(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* decrypt(algo, key, iv, ciphertext, [tag]) */
+    if (argc < 4) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_CIPHER *cipher = lookup_cipher(algo);
+    if (!cipher) return SEA_NIL_VAL;
+
+    SeaString *key_s  = sea_value_get_flat_string(args[1]);
+    SeaString *iv_s   = sea_value_get_flat_string(args[2]);
+    SeaString *cipher_s = sea_value_get_flat_string(args[3]);
+    if (!key_s || !iv_s || !cipher_s) {
+        if (key_s)    sea_obj_release(&key_s->obj);
+        if (iv_s)     sea_obj_release(&iv_s->obj);
+        if (cipher_s) sea_obj_release(&cipher_s->obj);
+        return SEA_NIL_VAL;
+    }
+
+    bool is_aead = strstr(algo, "gcm") || strstr(algo, "poly1305");
+    int outlen = (int)cipher_s->len + EVP_CIPHER_block_size(cipher);
+    unsigned char *out = malloc((size_t)outlen);
+    if (!out) {
+        sea_obj_release(&key_s->obj); sea_obj_release(&iv_s->obj);
+        sea_obj_release(&cipher_s->obj);
+        return SEA_NIL_VAL;
+    }
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    EVP_DecryptInit_ex(ctx, cipher, NULL,
+                       (unsigned char*)key_s->data, (unsigned char*)iv_s->data);
+
+    if (is_aead && argc >= 5) {
+        SeaString *tag_s = sea_value_get_flat_string(args[4]);
+        if (tag_s) {
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
+                                (int)tag_s->len, (void*)tag_s->data);
+            sea_obj_release(&tag_s->obj);
+        }
+    }
+
+    int len1 = 0, len2 = 0;
+    EVP_DecryptUpdate(ctx, out, &len1, (unsigned char*)cipher_s->data, (int)cipher_s->len);
+    int ok = EVP_DecryptFinal_ex(ctx, out + len1, &len2);
+    EVP_CIPHER_CTX_free(ctx);
+    sea_obj_release(&key_s->obj);
+    sea_obj_release(&iv_s->obj);
+    sea_obj_release(&cipher_s->obj);
+
+    SeaValue r = ok > 0 ? make_str((char*)out, (size_t)(len1 + len2)) : SEA_NIL_VAL;
+    free(out);
+    return r;
+}
+
+/* =========================================================================
+ * CRYPTOGRAPHY — asymmetric sign/verify
+ * ========================================================================= */
+
+static SeaValue fn_sign(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* sign(algo, key, data) */
+    if (argc < 3 || !sea_is_int(args[1])) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_MD *md = lookup_sign_md(algo);
+    if (!md) return SEA_NIL_VAL;
+    EVP_PKEY  *key  = UNPACK(args[1], EVP_PKEY*);
+    SeaString *data = sea_value_get_flat_string(args[2]);
+    if (!data) return SEA_NIL_VAL;
+
+    EVP_MD_CTX   *ctx  = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pctx = NULL;
+    EVP_DigestSignInit(ctx, &pctx, md, NULL, key);
+
+    if (strstr(algo, "pss")) {
+        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING);
+        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST);
+    }
+
+    EVP_DigestSignUpdate(ctx, data->data, data->len);
+    size_t siglen = 0;
+    EVP_DigestSignFinal(ctx, NULL, &siglen);
+    unsigned char *sig = malloc(siglen);
+    int ok = sig ? EVP_DigestSignFinal(ctx, sig, &siglen) : 0;
+    EVP_MD_CTX_free(ctx);
+    sea_obj_release(&data->obj);
+
+    SeaValue r = ok > 0 ? make_str((char*)sig, siglen) : SEA_NIL_VAL;
+    free(sig);
+    return r;
+}
+
+static SeaValue fn_verify(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* verify(algo, key, data, signature) */
+    if (argc < 4 || !sea_is_int(args[1])) return SEA_FALSE_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_FALSE_VAL;
+    const EVP_MD *md = lookup_sign_md(algo);
+    if (!md) return SEA_FALSE_VAL;
+    EVP_PKEY  *key  = UNPACK(args[1], EVP_PKEY*);
+    SeaString *data = sea_value_get_flat_string(args[2]);
+    SeaString *sig  = sea_value_get_flat_string(args[3]);
+    if (!data || !sig) {
+        if (data) sea_obj_release(&data->obj);
+        if (sig)  sea_obj_release(&sig->obj);
+        return SEA_FALSE_VAL;
+    }
+
+    EVP_MD_CTX   *ctx  = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pctx = NULL;
+    EVP_DigestVerifyInit(ctx, &pctx, md, NULL, key);
+
+    if (strstr(algo, "pss")) {
+        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING);
+        EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST);
+    }
+
+    EVP_DigestVerifyUpdate(ctx, data->data, data->len);
+    int ok = EVP_DigestVerifyFinal(ctx, (unsigned char*)sig->data, sig->len);
+    EVP_MD_CTX_free(ctx);
+    sea_obj_release(&data->obj);
+    sea_obj_release(&sig->obj);
+    return sea_bool_val(ok == 1);
+}
+
+/* =========================================================================
+ * CRYPTOGRAPHY — KDF, random
+ * ========================================================================= */
+
+static SeaValue fn_rand_bytes(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    int n = (int)sea_as_int(args[0]);
+    if (n <= 0) return make_str("", 0);
+    unsigned char *buf = malloc((size_t)n);
+    if (!buf) return SEA_NIL_VAL;
+    RAND_bytes(buf, n);
+    SeaValue r = make_str((char*)buf, (size_t)n);
+    free(buf);
+    return r;
+}
+
+static SeaValue fn_pbkdf2(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* pbkdf2(algo, password, salt, iterations, key_len) */
+    if (argc < 5) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_MD *md = lookup_md(algo);
+    if (!md) return SEA_NIL_VAL;
+    SeaString *pass = sea_value_get_flat_string(args[1]);
+    SeaString *salt = sea_value_get_flat_string(args[2]);
+    if (!pass || !salt) {
+        if (pass) sea_obj_release(&pass->obj);
+        if (salt) sea_obj_release(&salt->obj);
+        return SEA_NIL_VAL;
+    }
+    int iters   = sea_is_int(args[3]) ? (int)sea_as_int(args[3]) : 10000;
+    int key_len = sea_is_int(args[4]) ? (int)sea_as_int(args[4]) : 32;
+    if (iters < 1 || key_len < 1) {
+        sea_obj_release(&pass->obj); sea_obj_release(&salt->obj);
+        return SEA_NIL_VAL;
+    }
+    unsigned char *out = malloc((size_t)key_len);
+    PKCS5_PBKDF2_HMAC(pass->data, (int)pass->len,
+                      (unsigned char*)salt->data, (int)salt->len,
+                      iters, md, key_len, out);
+    sea_obj_release(&pass->obj);
+    sea_obj_release(&salt->obj);
+    SeaValue r = make_str((char*)out, (size_t)key_len);
+    free(out);
+    return r;
+}
+
+static SeaValue fn_hkdf(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    /* hkdf(algo, ikm, salt, info, length) */
+    if (argc < 5) return SEA_NIL_VAL;
+    char algo[32];
+    if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
+    const EVP_MD *md = lookup_md(algo);
+    if (!md) return SEA_NIL_VAL;
+    SeaString *ikm  = sea_value_get_flat_string(args[1]);
+    SeaString *salt = sea_value_get_flat_string(args[2]);
+    SeaString *info = sea_value_get_flat_string(args[3]);
+    int length = sea_is_int(args[4]) ? (int)sea_as_int(args[4]) : 32;
+    if (!ikm || !salt || !info || length < 1) {
+        if (ikm)  sea_obj_release(&ikm->obj);
+        if (salt) sea_obj_release(&salt->obj);
+        if (info) sea_obj_release(&info->obj);
+        return SEA_NIL_VAL;
+    }
+    unsigned char *out = malloc((size_t)length);
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    int ok = 0;
+    if (pctx) {
+        size_t outlen = (size_t)length;
+        ok = EVP_PKEY_derive_init(pctx) > 0 &&
+             EVP_PKEY_CTX_set_hkdf_md(pctx, md) > 0 &&
+             EVP_PKEY_CTX_set1_hkdf_salt(pctx, (unsigned char*)salt->data, (int)salt->len) > 0 &&
+             EVP_PKEY_CTX_set1_hkdf_key(pctx, (unsigned char*)ikm->data,  (int)ikm->len)  > 0 &&
+             EVP_PKEY_CTX_add1_hkdf_info(pctx, (unsigned char*)info->data, (int)info->len) > 0 &&
+             EVP_PKEY_derive(pctx, out, &outlen) > 0;
+        EVP_PKEY_CTX_free(pctx);
+    }
+    sea_obj_release(&ikm->obj);
+    sea_obj_release(&salt->obj);
+    sea_obj_release(&info->obj);
+    SeaValue r = ok ? make_str((char*)out, (size_t)length) : SEA_NIL_VAL;
+    free(out);
+    return r;
+}
+
+/* =========================================================================
+ * ENCODING — base64, hex
+ * ========================================================================= */
+
+static SeaValue fn_base64_encode(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *data = sea_value_get_flat_string(args[0]);
+    if (!data) return SEA_NIL_VAL;
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *mem = BIO_new(BIO_s_mem());
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+    BIO_push(b64, mem);
+    BIO_write(b64, data->data, (int)data->len);
+    BIO_flush(b64);
+    char *ptr; long len = BIO_get_mem_data(mem, &ptr);
+    SeaValue r = len >= 0 ? make_str(ptr, (size_t)len) : make_str("", 0);
+    BIO_free_all(b64);
+    sea_obj_release(&data->obj);
+    return r;
+}
+
+static SeaValue fn_base64_decode(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *str = sea_value_get_flat_string(args[0]);
+    if (!str) return SEA_NIL_VAL;
+    size_t outmax = (str->len * 3) / 4 + 4;
+    unsigned char *out = malloc(outmax);
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *mem = BIO_new_mem_buf(str->data, (int)str->len);
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+    BIO_push(b64, mem);
+    int n = BIO_read(b64, out, (int)outmax);
+    BIO_free_all(b64);
+    sea_obj_release(&str->obj);
+    SeaValue r = n > 0 ? make_str((char*)out, (size_t)n) : SEA_NIL_VAL;
+    free(out);
+    return r;
+}
+
+static SeaValue fn_hex_encode(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *data = sea_value_get_flat_string(args[0]);
+    if (!data) return SEA_NIL_VAL;
+    char *hex = malloc(data->len * 2 + 1);
+    if (!hex) { sea_obj_release(&data->obj); return SEA_NIL_VAL; }
+    bin_to_hex((unsigned char*)data->data, data->len, hex);
+    SeaValue r = make_str(hex, data->len * 2);
+    free(hex);
+    sea_obj_release(&data->obj);
+    return r;
+}
+
+static SeaValue fn_hex_decode(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1) return SEA_NIL_VAL;
+    SeaString *str = sea_value_get_flat_string(args[0]);
+    if (!str) return SEA_NIL_VAL;
+    if (str->len % 2 != 0) { sea_obj_release(&str->obj); return SEA_NIL_VAL; }
+    size_t outlen = str->len / 2;
+    unsigned char *out = malloc(outlen + 1);
+    int ok = 1;
+    for (size_t i = 0; i < outlen; i++) {
+        int hi = hex_nibble(str->data[i*2]);
+        int lo = hex_nibble(str->data[i*2+1]);
+        if (hi < 0 || lo < 0) { ok = 0; break; }
+        out[i] = (unsigned char)(hi << 4 | lo);
+    }
+    out[outlen] = '\0';
+    sea_obj_release(&str->obj);
+    SeaValue r = ok ? make_str((char*)out, outlen) : SEA_NIL_VAL;
+    free(out);
+    return r;
+}
+
+/* =========================================================================
+ * MODULE ENTRY POINT
+ * ========================================================================= */
+
+SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
+    (void)vm;
+    SeaTable *mod = sea_mod_new();
+
+    /* TLS client */
+    sea_mod_set(mod, "tls_connect",   fn_tls_connect);
+    sea_mod_set(mod, "tls_read",         fn_tls_read);
+    sea_mod_set(mod, "tls_read_request", fn_tls_read_request);
+    sea_mod_set(mod, "tls_write",        fn_tls_write);
+    sea_mod_set(mod, "tls_close",        fn_tls_close);
+    sea_mod_set(mod, "tls_peer_cert", fn_tls_peer_cert);
+    sea_mod_set(mod, "tls_version",   fn_tls_version);
+    sea_mod_set(mod, "tls_cipher",    fn_tls_cipher);
+
+    /* TLS server */
+    sea_mod_set(mod, "server_new",    fn_server_new);
+    sea_mod_set(mod, "server_free",   fn_server_free);
+    sea_mod_set(mod, "server_listen", fn_server_listen);
+    sea_mod_set(mod, "server_accept", fn_server_accept);
+
+    /* Certificate */
+    sea_mod_set(mod, "cert_load_file",   fn_cert_load_file);
+    sea_mod_set(mod, "cert_parse",       fn_cert_parse);
+    sea_mod_set(mod, "cert_info",        fn_cert_info);
+    sea_mod_set(mod, "cert_pem",         fn_cert_pem);
+    sea_mod_set(mod, "cert_save",        fn_cert_save);
+    sea_mod_set(mod, "cert_free",        fn_cert_free);
+    sea_mod_set(mod, "cert_verify",      fn_cert_verify);
+    sea_mod_set(mod, "cert_self_signed", fn_cert_self_signed);
+    sea_mod_set(mod, "cert_sign",        fn_cert_sign);
+
+    /* Key */
+    sea_mod_set(mod, "key_generate",  fn_key_generate);
+    sea_mod_set(mod, "key_load_file", fn_key_load_file);
+    sea_mod_set(mod, "key_parse",     fn_key_parse);
+    sea_mod_set(mod, "key_pem",       fn_key_pem);
+    sea_mod_set(mod, "key_pub_pem",   fn_key_pub_pem);
+    sea_mod_set(mod, "key_save",      fn_key_save);
+    sea_mod_set(mod, "key_free",      fn_key_free);
+
+    /* CSR */
+    sea_mod_set(mod, "csr_new",  fn_csr_new);
+    sea_mod_set(mod, "csr_pem",  fn_csr_pem);
+    sea_mod_set(mod, "csr_free", fn_csr_free);
+
+    /* Crypto */
+    sea_mod_set(mod, "hash",           fn_hash);
+    sea_mod_set(mod, "hash_raw",       fn_hash_raw);
+    sea_mod_set(mod, "hmac",           fn_hmac);
+    sea_mod_set(mod, "hmac_raw",       fn_hmac_raw);
+    sea_mod_set(mod, "aes_encrypt",    fn_aes_encrypt);
+    sea_mod_set(mod, "aes_decrypt",    fn_aes_decrypt);
+    sea_mod_set(mod, "sign",           fn_sign);
+    sea_mod_set(mod, "verify",         fn_verify);
+    sea_mod_set(mod, "rand_bytes",     fn_rand_bytes);
+    sea_mod_set(mod, "pbkdf2",         fn_pbkdf2);
+    sea_mod_set(mod, "hkdf",           fn_hkdf);
+    sea_mod_set(mod, "base64_encode",  fn_base64_encode);
+    sea_mod_set(mod, "base64_decode",  fn_base64_decode);
+    sea_mod_set(mod, "hex_encode",     fn_hex_encode);
+    sea_mod_set(mod, "hex_decode",     fn_hex_decode);
+
+    return sea_obj_val(&mod->obj);
+}

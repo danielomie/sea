@@ -1,0 +1,40 @@
+-- Strings longer than 64 bytes built with `..` are ropes internally. They must
+-- behave exactly like ordinary strings everywhere (Bug 1 in docs/bugs.md:
+-- os.exec silently returned nil for a long concatenated command).
+
+local pad = "0123456789012345678901234567890123456789012345678901234567890123456789"
+
+-- 1. native functions receive a proper string
+local r = os.exec("echo " .. "built-command-" .. pad)
+print("exec", r.code, string.len(r.output))
+local s = "start-" .. pad
+print("len", string.len(s), string.sub(string.upper(s), 1, 10), string.find(s, "6789"))
+print("tonumber", tonumber("1" .. string.rep("0", 70)) ~= nil)
+
+-- 2. growing the same rope in place, then calling natives again
+for i = 1, 3 do
+    s = s .. "+" .. i
+    print("grow", i, string.len(s), string.sub(s, -4))
+end
+
+-- 3. ropes as keys: equal content finds the same entry
+local m = [=]
+m["key-" .. pad] = "map-value"
+print("map", m["key-" .. pad])
+local t = {}
+t["key-" .. pad] = "table-value"
+print("table", t["key-" .. pad])
+-- overwrite through an equal key, then delete through another equal key
+t["key-" .. pad] = "overwritten"
+print("table overwrite", t["key-" .. pad])
+local count = 0
+for k, v in t do count = count + 1 end
+print("table entries", count)
+
+-- 4. a long concatenated string compares equal to the literal
+local lit = "key-" .. pad
+local again = "key-" .. pad
+print("equal", lit == again)
+print("not equal", lit ~= again, lit == "key-" .. pad .. "x")
+print("ordering", ("a" .. pad) < ("b" .. pad), ("b" .. pad) <= ("a" .. pad), ("b" .. pad) > ("a" .. pad))
+print("rope vs flat", lit == "key-0123456789012345678901234567890123456789012345678901234567890123456789")

@@ -1,0 +1,66 @@
+-- Test: io — buffered file read/write
+
+local PATH = "/tmp/sea_43_io.txt"
+
+-- ---- escrita ---------------------------------------------------------------
+
+local w = io.open(PATH, "w")
+io.write_line(w, "hello")        -- escreve com \n
+io.write_line(w, "world")
+io.write_string(w, "no newline") -- sem \n no fim
+io.flush(w)
+io.close(w)
+
+-- ---- read_line -------------------------------------------------------------
+
+local r = io.open(PATH)
+local line = io.read_line(r)
+while line do
+    print(line)
+    line = io.read_line(r)
+end
+io.close(r)
+
+-- ---- read_all --------------------------------------------------------------
+
+local r2 = io.open(PATH)
+local all = io.read_all(r2)
+io.close(r2)
+print(len(all))   -- "hello\nworld\nno newline" = 22
+
+-- ---- read_bytes ------------------------------------------------------------
+
+local r3 = io.open(PATH)
+print(io.read_bytes(r3, 5))   -- "hello"
+io.close(r3)
+
+-- ---- scanner ---------------------------------------------------------------
+
+local sc = io.scanner(PATH)
+local n = 0
+while io.scan(sc) do
+    n = n + 1
+    print(n .. ": " .. io.scan_text(sc))
+end
+io.close(sc)
+
+-- ---- append ----------------------------------------------------------------
+-- write_string não adiciona \n, então "appended" emenda na última linha
+
+local a = io.open(PATH, "a")
+io.write_line(a, "appended")
+io.close(a)
+
+local sc2 = io.scanner(PATH)
+while io.scan(sc2) do
+    print(io.scan_text(sc2))
+end
+io.close(sc2)
+
+-- ---- nil para arquivo inexistente ------------------------------------------
+
+local bad = io.open("/tmp/sea_43_nao_existe_xyz.txt")
+print(bad == nil)
+
+local bad2 = io.scanner("/tmp/sea_43_nao_existe_xyz.txt")
+print(bad2 == nil)

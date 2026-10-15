@@ -1,0 +1,228 @@
+--
+-- Broker Pub/Sub com Goroutines e Select
+--
+-- Um broker central recebe mensagens de N publishers e faz fan-out para
+-- os subscribers de cada tópico. O broker usa `select` (com `default`) para
+-- verificar queries de estado ao vivo sem bloquear o fluxo principal.
+--
+-- Arquitetura:
+--
+--   [Pub 1] ───╮                       ╭──inbox──▶ [alice]  (tech, games)
+--   [Pub 2] ───┤──pub_ch──▶ [Broker]───┤──inbox──▶ [bob]    (esportes, tech)
+--   [Pub 3] ───┤    select (non-block)  ├──inbox──▶ [carol]  (política, esportes)
+--   [Pub 4] ───╯    stats_req/res       ├──inbox──▶ [dave]   (games)
+--                                       ╰──inbox──▶ [eve]    (tech, política)
+--
+-- Fan-out: 1 mensagem publicada → entregue a TODOS os subscribers do tópico.
+-- Resultado: total de entregas > total de publicações.
+--
+
+local N_PUBS       = 4    -- publishers simultâneos
+local MSGS_PER_PUB = 80   -- mensagens por publisher
+local BROKER_LAT   = 1    -- latência simulada por mensagem no broker (ms)
+
+math.randomseed(time.time())
+
+local TOPICS = []
+TOPICS[] = "tecnologia"
+TOPICS[] = "esportes"
+TOPICS[] = "política"
+TOPICS[] = "games"
+
+local N_TOTAL = N_PUBS * MSGS_PER_PUB
+
+-- ─── Canais de controle ───────────────────────────────────────────────────────
+local pub_ch    = chan(N_TOTAL + 8)   -- mensagens dos publishers → broker
+local stats_req = chan(1)             -- requisição de snapshot ao broker
+local stats_res = chan(1)             -- resposta do broker com estado atual
+
+-- ─── Tabela de roteamento ─────────────────────────────────────────────────────
+-- subs[tópico] = array de inboxes dos subscribers daquele tópico
+local subs        = [=]
+local all_inboxes = []
+
+local function new_sub(topics_arr)
+    local inbox = chan(N_TOTAL + 8)
+    all_inboxes[] = inbox
+    for i = 0, len(topics_arr)-1 do
+        local t = topics_arr[i]
+        if subs[t] == nil then
+            subs[t] = []
+        end
+        subs[t][] = inbox
+    end
+    return inbox
+end
+
+local t_alice = [] 
+t_alice[] = "tecnologia"
+t_alice[] = "games"
+local t_bob   = [] 
+t_bob[] = "esportes"
+t_bob[] = "tecnologia"
+local t_carol = [] 
+t_carol[] = "política"
+t_carol[] = "esportes"
+local t_dave  = [] 
+t_dave[] = "games"
+local t_eve   = [] 
+t_eve[] = "tecnologia"
+t_eve[] = "política"
+
+local inbox_alice = new_sub(t_alice)
+local inbox_bob   = new_sub(t_bob)
+local inbox_carol = new_sub(t_carol)
+local inbox_dave  = new_sub(t_dave)
+local inbox_eve   = new_sub(t_eve)
+
+-- ─── Broker ───────────────────────────────────────────────────────────────────
+-- Loop principal: `for evt in pub_ch` drena todas as mensagens e sai
+-- quando o canal for fechado (semântica correta de for-in sobre canais).
+--
+-- A cada mensagem, um `select` não-bloqueante (com `default`) verifica
+-- se há uma query de snapshot pendente — assim o broker pode responder
+-- ao vivo sem interromper o roteamento.
+local broker_done = chan(1)
+
+go (function()
+    local routed = 0
+
+    for evt in pub_ch do
+        -- ── Verifica query de snapshot (não-bloqueante) ─────────────────
+        select
+            case _ = <-stats_req then
+                stats_res <- routed      -- responde com estado atual
+            case default then
+                -- nenhuma query pendente, continua
+        end
+
+        -- ── Roteia mensagem para todos os subscribers do tópico ─────────
+        local inboxes = subs[evt.topic]
+        if inboxes ~= nil then
+            for i = 0, len(inboxes)-1 do
+                inboxes[i] <- evt.msg
+            end
+            routed = routed + len(inboxes)
+        end
+
+        time.sleep(BROKER_LAT * time.Millisecond)  -- simula latência de persistência (DB write)
+    end
+
+    -- Verifica se há query pendente depois da última mensagem
+    select
+        case _ = <-stats_req then
+            stats_res <- routed
+        case default then
+    end
+
+    -- Fecha todos os inboxes → subscribers terminam seus for-in loops
+    for i = 0, len(all_inboxes)-1 do
+        close(all_inboxes[i])
+    end
+    broker_done <- routed
+end)()
+
+-- ─── Subscribers ─────────────────────────────────────────────────────────────
+local results_ch = chan(5)
+
+local function start_sub(name, inbox)
+    go (function()
+        local count = 0
+        for _ in inbox do
+            count = count + 1
+        end
+        results_ch <- {name=name, count=count}
+    end)()
+end
+
+start_sub("alice", inbox_alice)
+start_sub("bob",   inbox_bob)
+start_sub("carol", inbox_carol)
+start_sub("dave",  inbox_dave)
+start_sub("eve",   inbox_eve)
+
+-- ─── Publishers ──────────────────────────────────────────────────────────────
+local pub_done = chan(N_PUBS)
+
+local function start_pub(id)
+    go (function()
+        for j = 1, MSGS_PER_PUB do
+            local tidx = math.random(0, len(TOPICS)-1)
+            pub_ch <- {topic=TOPICS[tidx], msg="pub" .. id .. "#" .. j}
+        end
+        pub_done <- true
+    end)()
+end
+
+-- ─── Execução ────────────────────────────────────────────────────────────────
+print("╔══════════════════════════════════════════╗")
+print("║   Broker Pub/Sub com Select              ║")
+print("╚══════════════════════════════════════════╝")
+print("  Publishers : " .. N_PUBS .. " × " .. MSGS_PER_PUB .. " msgs = " .. N_TOTAL .. " total")
+print("  Tópicos    : tecnologia · esportes · política · games")
+print("  Subscribers: alice(tech,games)  bob(sport,tech)  carol(pol,sport)")
+print("               dave(games)  eve(tech,pol)")
+print("  Latência   : " .. BROKER_LAT .. " ms / msg no broker")
+print("")
+
+local t_start = time.now()
+
+for p = 1, N_PUBS do
+    start_pub(p)
+end
+
+-- Aguarda todos os publishers despejarem suas mensagens em pub_ch
+for i = 1, N_PUBS do
+    local _ = <-pub_done
+end
+
+-- Snapshot ao vivo: broker ainda está processando a fila de mensagens.
+-- O select não-bloqueante no broker atende esta query entre as mensagens.
+stats_req <- true
+local snap = <-stats_res
+print("  [snapshot] entregas realizadas até agora: " .. snap .. " / ~" .. N_TOTAL .. " msgs")
+
+-- Fecha pub_ch: broker drena o que restar e depois sai do for-in
+close(pub_ch)
+
+-- Aguarda broker finalizar
+local total_routed = <-broker_done
+local wall_ms = time.milliseconds(time.since(t_start))
+
+-- Coleta contagens dos subscribers (chegam em ordem arbitrária)
+local counts = [=]
+for i = 1, 5 do
+    local r = <-results_ch
+    counts[r.name] = r.count
+end
+
+local total_recv = counts["alice"] + counts["bob"] + counts["carol"] + counts["dave"] + counts["eve"]
+
+-- Fan-out médio: entregas / mensagens publicadas
+local fanout_x10 = math.floor(total_routed * 10 / N_TOTAL)
+local fanout_int = math.floor(fanout_x10 / 10)
+local fanout_dec = fanout_x10 - fanout_int * 10
+
+print("")
+print("═══════════════════════════════════════════")
+print("  RESULTADO")
+print("═══════════════════════════════════════════")
+print("  Mensagens publicadas     : " .. N_TOTAL)
+print("  Entregas realizadas      : " .. total_routed)
+print("  Fan-out médio            : " .. fanout_int .. "." .. fanout_dec .. "x por mensagem")
+print("───────────────────────────────────────────")
+print("  alice  (tech, games)     : " .. counts["alice"] .. " msgs")
+print("  bob    (sport, tech)     : " .. counts["bob"]   .. " msgs")
+print("  carol  (pol, sport)      : " .. counts["carol"] .. " msgs")
+print("  dave   (games)           : " .. counts["dave"]  .. " msgs")
+print("  eve    (tech, pol)       : " .. counts["eve"]   .. " msgs")
+print("───────────────────────────────────────────")
+print("  Total recebido           : " .. total_recv)
+if total_recv == total_routed then
+    print("  Entregas                 : CORRETAS ✓  (nenhuma mensagem perdida)")
+else
+    print("  DIVERGÊNCIA ✗            : esperado=" .. total_routed)
+end
+print("───────────────────────────────────────────")
+print("  Tempo total (wall clock) : " .. wall_ms .. " ms")
+print("═══════════════════════════════════════════")

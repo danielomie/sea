@@ -1,0 +1,31 @@
+-- encode.sea — json.encode examples
+-- Usage: bin/sea libs/json/examples/encode.sea
+
+local json = require("./libs/json/json")
+
+-- primitives
+print(json.encode(nil))           -- null
+print(json.encode(true))          -- true
+print(json.encode(42))            -- 42
+print(json.encode(3.14))          -- 3.14
+print(json.encode("hello world")) -- "hello world"
+
+-- string escaping
+print(json.encode("line1\nline2"))  -- "line1\nline2"
+print(json.encode('say "hi"'))      -- "say \"hi\""
+
+-- array (table with integer keys 0..n-1)
+print(json.encode({1, 2, 3}))                    -- [1,2,3]
+print(json.encode({"a", "b", "c"}))              -- ["a","b","c"]
+print(json.encode({true, false, nil, 42}))        -- [true,false,null,42]
+
+-- object (table with string keys)
+print(json.encode({ name = "sea", version = 1 }))
+
+-- nested
+local data = {
+    lang  = "sea",
+    tags  = {"fast", "concurrent", "simple"},
+    meta  = { lines = 500, stable = true },
+}
+print(json.encode(data))

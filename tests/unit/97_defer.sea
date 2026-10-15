@@ -1,0 +1,70 @@
+-- defer: the callee and its arguments are evaluated when `defer` runs (Go
+-- semantics), and the call happens at function exit in LIFO order.
+-- Regression test for Bug 10 (docs/bugs.md): argument loads were removed as
+-- dead writes, so the deferred call read whatever a later local left there.
+
+-- 1. constant argument, register reused by a later local
+local function reuse()
+    defer print("deferred")
+    local s = 0
+    return s
+end
+print(reuse())
+
+-- 2. argument value is captured at defer time
+local function eval_time()
+    local x = 1
+    defer print("x at defer:", x)
+    x = 2
+    print("x now:", x)
+end
+eval_time()
+
+-- 3. several arguments, including computed ones
+local function multi(n)
+    defer print("multi", n, n * 2, "end")
+    local filler = 99
+    return filler
+end
+print(multi(7))
+
+-- 4. temporary objects as arguments (concat results)
+local function temp_obj(n)
+    defer print("built: " .. n .. "/" .. (n + 1))
+    local s = "other " .. n
+    return string.len(s)
+end
+print(temp_obj(41))
+
+-- 5. defers registered in a loop run LIFO at function exit
+local function in_loop()
+    for i = 1, 3 do
+        defer print("loop defer", i)
+    end
+    print("loop body done")
+end
+in_loop()
+
+-- 6. method call syntax: obj:m(args) is deferred too (it used to run at once)
+local obj = {}
+obj.name = "box"
+obj.greet = function(self, who) print("hello", who, "from", self.name) end
+local function method()
+    defer obj:greet("deferred")
+    print("in method")
+end
+method()
+
+-- 7. the maximum of 8 arguments
+local function eight()
+    defer print(1, 2, 3, 4, 5, 6, 7, 8)
+end
+eight()
+
+-- 8. closure form still works
+local function closure_form()
+    local n = 5
+    defer function() print("closure sees", n) end
+    n = 6
+end
+closure_form()

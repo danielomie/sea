@@ -1,0 +1,5 @@
+global	4950	100
+resize	450
+del/reinsert	34
+polymorphic	A,B,nil,A,B
+module fn	1500

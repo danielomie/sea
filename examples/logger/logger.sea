@@ -1,0 +1,127 @@
+--
+-- Logger em Sea
+--
+-- Demonstra:
+--   - Logger com níveis: DEBUG, INFO, WARN, ERROR
+--   - Timestamp via time.now()
+--   - Closures como "logger instanciado": make_logger("módulo")
+--   - Logger global com filtragem de nível mínimo
+--   - Uso integrado com servidor HTTP simulado
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║      Logger em Sea                       ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── Implementação do logger ───────────────────────────────────────────────────
+
+local LEVEL_NUM = { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3 }
+local LEVEL_PREFIX = { DEBUG = "[DBG]", INFO = "[INF]", WARN = "[WRN]", ERROR = "[ERR]" }
+
+-- make_logger(modulo, nivel_minimo)
+--   modulo       = nome do subsistema (ex: "http", "db")
+--   nivel_minimo = nível abaixo do qual não imprime (padrão: "DEBUG")
+-- Retorna closure com métodos debug/info/warn/error
+local function make_logger(modulo, nivel_minimo)
+    local min_num = LEVEL_NUM[nivel_minimo or "DEBUG"] or 0
+
+    local function log(nivel, msg)
+        if LEVEL_NUM[nivel] < min_num then return end
+        local ts = time.now()
+        local t  = ts.format(ts, "2006-01-02 15:04:05")
+        print(t .. " " .. LEVEL_PREFIX[nivel] .. " [" .. modulo .. "] " .. msg)
+    end
+
+    return {
+        debug = function(msg) log("DEBUG", msg) end,
+        info  = function(msg) log("INFO",  msg) end,
+        warn  = function(msg) log("WARN",  msg) end,
+        error = function(msg) log("ERROR", msg) end,
+    }
+end
+
+-- ── 1. Uso básico ─────────────────────────────────────────────────────────────
+print("── 1. Logger básico (todos os níveis) ───────")
+local log = make_logger("app")
+log.debug("servidor inicializando")
+log.info("porta 8080 aberta")
+log.warn("pool de conexões quase cheio (90%)")
+log.error("falha ao conectar ao banco de dados")
+print("")
+
+-- ── 2. Logger com nível mínimo INFO (filtra DEBUG) ────────────────────────────
+print("── 2. Logger INFO (filtra DEBUG) ────────────")
+local log_prod = make_logger("prod", "INFO")
+log_prod.debug("este debug não aparece")
+log_prod.info("aplicação pronta")
+log_prod.warn("latência elevada: 450ms")
+log_prod.error("timeout na resposta externa")
+print("")
+
+-- ── 3. Múltiplos loggers por subsistema ───────────────────────────────────────
+print("── 3. Múltiplos subsistemas ─────────────────")
+local log_http = make_logger("http", "INFO")
+local log_db   = make_logger("db",   "DEBUG")
+local log_auth = make_logger("auth", "WARN")
+
+log_http.info("GET /api/users 200 OK")
+log_db.debug("query: SELECT * FROM users LIMIT 10")
+log_db.info("conexão estabelecida")
+log_auth.debug("este debug de auth não aparece (min=WARN)")
+log_auth.warn("tentativa de login inválida: user=admin")
+log_auth.error("conta bloqueada após 5 tentativas")
+print("")
+
+-- ── 4. Logger em goroutine (concorrente) ──────────────────────────────────────
+print("── 4. Logger em goroutines concorrentes ─────")
+
+local log_worker = make_logger("worker", "INFO")
+local wg = sync.waitgroup()
+local N_WORKERS = 3
+
+-- Usa função auxiliar para capturar o id por valor (evita captura de upvalue do loop)
+local function iniciar_worker(i)
+    go (function()
+        log_worker.info("worker #" .. i .. " iniciando")
+        time.sleep(10 * time.Millisecond)
+        log_worker.info("worker #" .. i .. " concluído")
+        wg.done(wg)
+    end)()
+end
+
+for id = 1, N_WORKERS do
+    wg.add(wg, 1)
+    iniciar_worker(id)
+end
+wg.wait(wg)
+print("")
+
+-- ── 5. Padrão: logger simulando servidor HTTP ─────────────────────────────────
+print("── 5. Servidor HTTP simulado com logger ─────")
+
+local function make_request_logger(modulo)
+    local l = make_logger(modulo, "INFO")
+    return function(method, path, status, ms)
+        local msg = method .. " " .. path .. " → " .. status .. " (" .. ms .. "ms)"
+        if status >= 500 then
+            l.error(msg)
+        elseif status >= 400 then
+            l.warn(msg)
+        else
+            l.info(msg)
+        end
+    end
+end
+
+local reqlog = make_request_logger("http")
+reqlog("GET",  "/",           200, 12)
+reqlog("POST", "/api/login",  201, 45)
+reqlog("GET",  "/api/data",   404, 3)
+reqlog("POST", "/api/action", 500, 102)
+print("")
+
+print("── Padrão ───────────────────────────────────")
+print("  make_logger(mod, min) → { debug, info, warn, error }")
+print("  cada método é uma closure que captura mod e min")
+print("  timestamp: time.now().format(t, '2006-01-02 15:04:05')")

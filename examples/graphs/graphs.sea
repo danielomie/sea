@@ -1,0 +1,208 @@
+--
+-- Grafos em Sea: BFS em labirinto e Dijkstra com heap binário
+--
+-- Demonstra:
+--   - Fila (array + índice de cabeça) para BFS
+--   - Heap binário (min-heap) implementado do zero sobre arrays
+--   - Grafo como map de listas de adjacência; structs para arestas
+--   - Reconstrução de caminho a partir de um map de predecessores
+--
+
+print("╔══════════════════════════════════════════╗")
+print("║   Grafos: BFS e Dijkstra                 ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+-- ── 1. BFS: menor caminho num labirinto ──────────────────────────────────────
+print("── 1. BFS num labirinto ─────────────────────")
+
+local maze_text = []
+maze_text[] = "##########"
+maze_text[] = "#S.....#.#"
+maze_text[] = "#.##.#.#.#"
+maze_text[] = "#.#..#...#"
+maze_text[] = "#.#.####.#"
+maze_text[] = "#...#..#.#"
+maze_text[] = "###.#.##.#"
+maze_text[] = "#...#....#"
+maze_text[] = "#.###.##E#"
+maze_text[] = "##########"
+
+local H = len(maze_text)
+local W = string.len(maze_text[0])
+
+-- grade de caracteres (array de arrays) e posições de início/fim
+local grid = []
+local start = nil
+local goal = nil
+for y = 0, H - 1 do
+    local row = []
+    for x = 0, W - 1 do
+        local ch = string.sub(maze_text[y], x + 1, x + 1)
+        if ch == "S" then start = y * W + x end
+        if ch == "E" then goal = y * W + x end
+        row[] = ch
+    end
+    grid[] = row
+end
+
+local function bfs(src, dst)
+    local prev = [=]
+    prev[src] = -1
+    local queue = []
+    queue[] = src
+    local head = 0
+    local dx = {1, -1, 0, 0}
+    local dy = {0, 0, 1, -1}
+    while head < len(queue) do
+        local cell = queue[head]
+        head = head + 1
+        if cell == dst then break end
+        local x = cell % W
+        local y = cell // W
+        for d = 0, 3 do
+            local nx = x + dx[d]
+            local ny = y + dy[d]
+            local ncell = ny * W + nx
+            local _, seen = prev[ncell]
+            if grid[ny][nx] ~= "#" and not seen then
+                prev[ncell] = cell
+                queue[] = ncell
+            end
+        end
+    end
+    return prev
+end
+
+local prev = bfs(start, goal)
+local steps = 0
+local cell = prev[goal]
+while cell ~= start do
+    grid[cell // W][cell % W] = "·"
+    cell = prev[cell]
+    steps = steps + 1
+end
+for y = 0, H - 1 do print("  " .. string.join(grid[y], "")) end
+printf("  menor caminho: %d passos\n", steps + 1)
+print("")
+
+-- ── 2. Dijkstra com heap binário ─────────────────────────────────────────────
+print("── 2. Dijkstra: rotas entre cidades ─────────")
+
+-- Min-heap de pares (prioridade, valor) em dois arrays paralelos.
+local function heap_new() return { prio = [], val = [] } end
+
+local function heap_push(h, p, v)
+    local prio = h.prio
+    local val = h.val
+    prio[] = p
+    val[] = v
+    local i = len(prio) - 1
+    while i > 0 do
+        local parent = (i - 1) // 2
+        if prio[parent] <= prio[i] then break end
+        prio[parent], prio[i] = prio[i], prio[parent]
+        val[parent], val[i] = val[i], val[parent]
+        i = parent
+    end
+end
+
+local function heap_pop(h)
+    local prio = h.prio
+    local val = h.val
+    local top_p = prio[0]
+    local top_v = val[0]
+    local last = len(prio) - 1
+    prio[0] = prio[last]
+    val[0] = val[last]
+    del prio[last]
+    del val[last]
+    local n = len(prio)
+    local i = 0
+    while true do
+        local l = 2 * i + 1
+        local r = l + 1
+        local m = i
+        if l < n and prio[l] < prio[m] then m = l end
+        if r < n and prio[r] < prio[m] then m = r end
+        if m == i then break end
+        prio[m], prio[i] = prio[i], prio[m]
+        val[m], val[i] = val[i], val[m]
+        i = m
+    end
+    return top_p, top_v
+end
+
+-- Grafo não direcionado: cidade → lista de {to, km}
+local graph = [=]
+local function road(a, b, km)
+    if graph[a] == nil then graph[a] = [] end
+    if graph[b] == nil then graph[b] = [] end
+    local ga = graph[a]
+    local gb = graph[b]
+    ga[] = {to = b, km = km}
+    gb[] = {to = a, km = km}
+end
+
+road("Porto Alegre", "Florianópolis", 476)
+road("Porto Alegre", "Curitiba", 711)
+road("Florianópolis", "Curitiba", 300)
+road("Curitiba", "São Paulo", 408)
+road("Curitiba", "Campo Grande", 990)
+road("São Paulo", "Rio de Janeiro", 429)
+road("São Paulo", "Belo Horizonte", 586)
+road("São Paulo", "Campo Grande", 1014)
+road("Rio de Janeiro", "Belo Horizonte", 434)
+road("Belo Horizonte", "Brasília", 716)
+road("Campo Grande", "Brasília", 1134)
+road("São Paulo", "Brasília", 1015)
+road("Brasília", "Goiânia", 209)
+road("Campo Grande", "Goiânia", 935)
+
+local function dijkstra(src)
+    local dist = [=]
+    local via = [=]
+    dist[src] = 0
+    local h = heap_new()
+    heap_push(h, 0, src)
+    while len(h.prio) > 0 do
+        local d, city = heap_pop(h)
+        if d == dist[city] then          -- ignora entradas obsoletas
+            local edges = graph[city]
+            for i = 0, len(edges) - 1 do
+                local e = edges[i]
+                local nd = d + e.km
+                local cur = dist[e.to]
+                if cur == nil or nd < cur then
+                    dist[e.to] = nd
+                    via[e.to] = city
+                    heap_push(h, nd, e.to)
+                end
+            end
+        end
+    end
+    return dist, via
+end
+
+local function route(via, src, dst)
+    local path = []
+    local c = dst
+    while c ~= nil do
+        path[] = c
+        if c == src then break end
+        c = via[c]
+    end
+    local out = []
+    for i = len(path) - 1, 0, -1 do out[] = path[i] end
+    return string.join(out, " → ")
+end
+
+local dist, via = dijkstra("Porto Alegre")
+local destinos = []
+destinos[] = "Rio de Janeiro"
+destinos[] = "Brasília"
+destinos[] = "Goiânia"
+for i = 0, len(destinos) - 1 do
+    local d = destinos[i]
+    printf("  %5d km  %s\n", dist[d], route(via, "Porto Alegre", d))
+end

@@ -1,0 +1,293 @@
+-- libs/flags/flags.sea — Flag parsing library (Go's flag package style)
+--
+-- Uso:
+--   local flags = require("./libs/flags/flags")
+--
+--   local host    = flags.string("host",    "localhost", "server host")
+--   local port    = flags.int("port",       8080,        "server port")
+--   local verbose = flags.bool("verbose",   false,       "verbose output")
+--   local rate    = flags.number("rate",    1.0,         "request rate")
+--
+--   flags.parse()
+--
+--   print(host.value, port.value, verbose.value)
+--   local rest = flags.args()   -- argumentos posicionais restantes
+--
+-- Sintaxe aceita (igual ao Go):
+--   -flag value
+--   -flag=value
+--   --flag value
+--   --flag=value
+--   -bool         (boolean sem valor → true)
+--   --            (encerra o parsing; resto vai para flags.args())
+--   -h / --help   (imprime usage e sai com código 0)
+
+local M = {}
+
+-- ---- Estado interno --------------------------------------------------------
+
+local _defs    = {}     -- name → { typ, value, default, usage, set }
+local _order   = {}     -- lista ordenada de nomes (para usage)
+local _order_n = 0
+local _rest    = {}     -- argumentos posicionais após parse
+local _rest_n  = 0
+local _usage_fn = nil   -- função de usage customizável
+
+-- ---- Helpers privados ------------------------------------------------------
+
+local function list_push(t, n, v)
+    t[n] = v
+    return n + 1
+end
+
+local function flagdef(typ, default_val, usage)
+    return { typ = typ, value = default_val, def = default_val,
+             usage = usage or "", set = false }
+end
+
+local function register(name, typ, default_val, usage)
+    if _defs[name] then
+        error("flag redefinida: -" .. name)
+    end
+    local f = flagdef(typ, default_val, usage)
+    _defs[name] = f
+    _order_n = list_push(_order, _order_n, name)
+    return f
+end
+
+local function die(msg)
+    io.writeln("flag: " .. msg)
+    M.usage()
+    os.exit(2)
+end
+
+local function apply(f, name, val_str)
+    if f.typ == "string" then
+        f.value = val_str
+
+    elseif f.typ == "int" then
+        local n = tonumber(val_str)
+        if not n then die("valor inválido para -" .. name .. ": '" .. val_str .. "' (esperado inteiro)") end
+        f.value = math.floor(n)
+
+    elseif f.typ == "number" then
+        local n = tonumber(val_str)
+        if not n then die("valor inválido para -" .. name .. ": '" .. val_str .. "' (esperado número)") end
+        f.value = n
+
+    elseif f.typ == "bool" then
+        if val_str == "true" or val_str == "1" or val_str == "yes" then
+            f.value = true
+        elseif val_str == "false" or val_str == "0" or val_str == "no" then
+            f.value = false
+        else
+            die("valor inválido para -" .. name .. ": '" .. val_str .. "' (esperado true/false)")
+        end
+    end
+
+    f.set = true
+end
+
+-- ---- Definição de flags ----------------------------------------------------
+
+-- flags.string(name, default, usage) → flagref
+-- flagref.value contém o valor após flags.parse()
+function M.string(name, default_val, usage)
+    return register(name, "string", default_val or "", usage)
+end
+
+-- flags.int(name, default, usage) → flagref
+function M.int(name, default_val, usage)
+    return register(name, "int", default_val or 0, usage)
+end
+
+-- flags.bool(name, default, usage) → flagref
+-- Pode ser passado como -flag (→ true) ou -flag=false
+function M.bool(name, default_val, usage)
+    return register(name, "bool", default_val or false, usage)
+end
+
+-- flags.number(name, default, usage) → flagref  (float64 no Go)
+function M.number(name, default_val, usage)
+    return register(name, "number", default_val or 0.0, usage)
+end
+
+-- ---- Parsing ---------------------------------------------------------------
+
+-- flags.parse() — processa os.args[1..n]
+-- Deve ser chamado após todas as definições de flags.
+function M.parse()
+    local nargs = len(os.args) - 1   -- os.args[0] é nil
+
+    local i = 1
+    while i <= nargs do
+        local arg = os.args[i]
+
+        -- Fim explícito do parsing de flags
+        if arg == "--" then
+            i = i + 1
+            break
+        end
+
+        -- Help
+        if arg == "-h" or arg == "--help" then
+            M.usage()
+            os.exit(0)
+        end
+
+        -- É uma flag?
+        if string.starts_with(arg, "-") then
+            -- Remove um ou dois traços
+            local stripped
+            if string.starts_with(arg, "--") then
+                stripped = string.sub(arg, 3)
+            else
+                stripped = string.sub(arg, 2)
+            end
+
+            if len(stripped) == 0 then
+                -- "-" sozinho é argumento posicional
+                _rest_n = list_push(_rest, _rest_n, arg)
+                i = i + 1
+            else
+                -- Verifica se há "=" embutido: --flag=value
+                local eq  = string.find(stripped, "=")
+                local name, val_str
+
+                if eq then
+                    name    = string.sub(stripped, 1, eq - 1)
+                    val_str = string.sub(stripped, eq + 1)
+                else
+                    name    = stripped
+                    val_str = nil
+                end
+
+                local f = _defs[name]
+                if not f then
+                    die("flag desconhecida: -" .. name)
+                end
+
+                if val_str then
+                    -- valor já está na mesma token (-flag=value)
+                    apply(f, name, val_str)
+                elseif f.typ == "bool" then
+                    -- booleano sem valor → true
+                    f.value = true
+                    f.set   = true
+                else
+                    -- próximo token é o valor
+                    i = i + 1
+                    if i > nargs then
+                        die("flag -" .. name .. " requer um valor")
+                    end
+                    apply(f, name, os.args[i])
+                end
+
+                i = i + 1
+            end
+        else
+            -- Argumento posicional
+            _rest_n = list_push(_rest, _rest_n, arg)
+            i = i + 1
+        end
+    end
+
+    -- Tudo após "--" vai para args posicionais
+    while i <= nargs do
+        _rest_n = list_push(_rest, _rest_n, os.args[i])
+        i = i + 1
+    end
+end
+
+-- ---- Acesso aos resultados -------------------------------------------------
+
+-- flags.get(name) → valor da flag (ou nil se não definida)
+function M.get(name)
+    local f = _defs[name]
+    return f and f.value or nil
+end
+
+-- flags.is_set(name) → true se a flag foi explicitamente passada
+function M.is_set(name)
+    local f = _defs[name]
+    return f and f.set or false
+end
+
+-- flags.args() → tabela com os argumentos posicionais restantes (0-indexed)
+function M.args()
+    return _rest
+end
+
+-- flags.narg() → quantidade de argumentos posicionais
+function M.narg()
+    return _rest_n
+end
+
+-- flags.nflag() → quantidade de flags definidas
+function M.nflag()
+    return _order_n
+end
+
+-- ---- Usage -----------------------------------------------------------------
+
+-- flags.set_usage(fn) — substitui a função de usage padrão
+function M.set_usage(fn)
+    _usage_fn = fn
+end
+
+-- flags.usage() — imprime ajuda no formato do Go flag package
+function M.usage()
+    if _usage_fn then
+        _usage_fn()
+        return
+    end
+
+    io.writeln("Usage:")
+    io.writeln("  [flags] [arguments...]")
+    io.writeln("")
+    io.writeln("Flags:")
+
+    if _order_n > 0 then
+        for i = 0, _order_n - 1 do
+            local name = _order[i]
+            local f    = _defs[name]
+
+            local type_label
+            if f.typ == "string" then type_label = "string"
+            elseif f.typ == "int" then type_label = "int"
+            elseif f.typ == "number" then type_label = "float"
+            elseif f.typ == "bool" then type_label = ""
+            else type_label = f.typ end
+
+            local flag_line
+            if type_label == "" then
+                flag_line = "  -" .. name
+            else
+                flag_line = "  -" .. name .. " " .. type_label
+            end
+
+            local default_str
+            if f.typ == "string" then
+                default_str = '"' .. tostring(f.def) .. '"'
+            else
+                default_str = tostring(f.def)
+            end
+
+            io.writeln(flag_line)
+            io.writeln("    \t" .. f.usage .. " (default " .. default_str .. ")")
+        end
+    end
+end
+
+-- ---- Reset (útil em testes) ------------------------------------------------
+
+function M.reset()
+    _defs    = {}
+    _order   = {}
+    _order_n = 0
+    _rest    = {}
+    _rest_n  = 0
+    _usage_fn = nil
+end
+
+return M
