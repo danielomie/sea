@@ -324,3 +324,16 @@ Corrigidos no caminho:
 - Desempenho: a maioria dos benchmarks ficou igual ou mais rápida (fib e matrix_mul no interpretador ficaram mais rápidos). `sort` no JIT perdeu cerca de 50%: `local tmp = nums[j]` agora precisa segurar uma referência por iteração.
 
 **Teste:** `tests/unit/105_ownership.sea`.
+
+## Coletor de ciclos e correções encontradas no caminho **(2026-10)**
+
+Ciclos de referência (`a.peer = b; b.peer = a`, uma closure guardada na tabela que ela captura, anéis, listas duplamente ligadas) não eram liberados pelo refcount. Agora há um coletor de ciclos (`src/sea_gc.c`, [memory.md](memory.md#cycles)), com `gc.collect()` e `gc.stats()`. Os probes de ciclos caíram de 480 e 3.736 bytes por iteração para 0.
+
+Encontrados ao implementá-lo:
+- **`sea_table_set` / `sea_map_set` liberavam o valor antigo antes de reter o novo.** Em `t.x = t.x`, quando só a tabela segurava o valor, ele era liberado e depois armazenado: use-after-free. Agora o valor novo é retido e armazenado antes de o antigo ser liberado; o mesmo vale para `sea_array_set` e `sea_struct_set`.
+- **Gravar um valor local num container compartilhado não o marcava como compartilhado.** Outra goroutine podia ler o valor e mexer no seu contador sem operações atômicas. Os containers agora têm uma barreira de escrita (`sea_store_barrier`).
+- **`math.random` atualizava um estado global sem sincronização** (corrida apontada pelo TSAN em `examples/pubsub`). Agora o estado é atualizado com compare-and-swap.
+- **O JIT lia o tipo do objeto como inteiro de 32 bits.** Com o byte de flags do coletor no cabeçalho, a checagem de tipo do caminho rápido de arrays falhava sempre que o array estava no buffer de candidatos, e o código JIT caía para o interpretador.
+- **Os Makefiles das bibliotecas nativas não dependiam dos headers do VM.** Uma mudança de layout deixava `.so` desatualizadas. Agora dependem de `src/*.h`.
+
+**Testes:** `tests/unit/106_gc_cycles.sea`. Estresse: a suíte e os exemplos sob ASAN com `SEA_GC_THRESHOLD=1` (coleta em quase todo ponto seguro), mais TSAN nos testes concorrentes.

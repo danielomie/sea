@@ -7,7 +7,7 @@ SEA_SRC = ../../src
 
 all: xml.so
 
-xml.so: xml.c
+xml.so: xml.c $(wildcard ../../src/*.h)
 	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $<
 
 clean:

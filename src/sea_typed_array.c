@@ -7,6 +7,7 @@ SeaIntArray *sea_int_array_new(uint32_t cap) {
     if (cap < 4) cap = 4;
     SeaIntArray *a = SEA_ALLOC(SeaIntArray);
     a->obj.type     = OBJ_INT_ARRAY;
+    a->obj.gc = 0;
     a->obj.refcount = 1;
     a->len  = 0;
     a->cap  = cap;
@@ -47,6 +48,7 @@ SeaFloatArray *sea_float_array_new(uint32_t cap) {
     if (cap < 4) cap = 4;
     SeaFloatArray *a = SEA_ALLOC(SeaFloatArray);
     a->obj.type     = OBJ_FLOAT_ARRAY;
+    a->obj.gc = 0;
     a->obj.refcount = 1;
     a->len  = 0;
     a->cap  = cap;

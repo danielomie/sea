@@ -21,6 +21,7 @@ source .sea ──► lexer ──► parser (AST) ──► compiler ──► 
 | Compiler | `sea_compiler.c`, `sea_chunk.c` | Single pass AST → register bytecode; register allocation, upvalue resolution, optimizer (below) |
 | VM | `sea_vm.c` | Register-based interpreter, computed-goto dispatch |
 | Values & objects | `sea_value.h`, `sea_object.c` | NaN-boxed values, reference-counted heap objects |
+| Cycle collector | `sea_gc.c` | Frees reference cycles (trial deletion over candidate roots, per goroutine); the `gc` module |
 | Data types | `sea_string.c`, `sea_rope.c`, `sea_array.c`, `sea_typed_array.c`, `sea_table.c`, `sea_map.c`, `sea_struct.c` | Strings (interned constants, lazy ropes for long concatenations), arrays, int/float arrays, tables, Swiss-table maps, sealed structs |
 | Concurrency | `sea_sched.c`, `sea_goroutine.c`, `sea_channel.c` | M:N scheduler (worker threads, work stealing), goroutines, channels and `select` |
 | Standard library | `sea_stdlib.c`, `sea_lib_*.c` | Built-in functions and the `math`, `string`, `io`, `os`, `sync`, `time` modules |
@@ -60,10 +61,11 @@ modes.
 
 ## Memory management
 
-Sea has **no garbage collector**: heap objects are reference counted, with
-atomic counts only for objects shared between goroutines. How ownership flows
-through registers, containers, closures, arenas and threads — and what that
-means for programs — is described in [memory.md](memory.md).
+Sea has **no tracing garbage collector**. Heap objects are reference counted,
+with atomic counts only for objects shared between goroutines, and a cycle
+collector (`sea_gc.c`) frees reference cycles a goroutine owns.
+[memory.md](memory.md) describes how ownership flows through registers,
+containers, closures, arenas and threads, and what that means for programs.
 
 ## Concurrency
 

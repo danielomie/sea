@@ -4,6 +4,7 @@
 SeaRope *sea_rope_new(void) {
     SeaRope *r = (SeaRope*)sea_malloc(sizeof(SeaRope));
     r->obj.type = OBJ_ROPE;
+    r->obj.gc = 0;
     r->obj.refcount = 1;
     r->total_len = 0;
     r->count     = 0;

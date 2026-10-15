@@ -623,8 +623,8 @@ static gcc_jit_block *emit_arr_access(JitCtx *J, gcc_jit_block *blk,
     emit_bail(J, b1, idx);
 
     gcc_jit_rvalue *arrptr = arr_ptr_of(J, reg(J, obj_reg));
-    gcc_jit_rvalue *typ = gcc_jit_lvalue_as_rvalue(
-        gcc_jit_rvalue_dereference_field(arrptr, NULL, J->f_atype));
+    gcc_jit_rvalue *typ = gcc_jit_context_new_cast(J->ctx, NULL, gcc_jit_lvalue_as_rvalue(
+        gcc_jit_rvalue_dereference_field(arrptr, NULL, J->f_atype)), J->t_int);
     gcc_jit_rvalue *typecond;
     if (type_const < 0) {
         typecond = bin(J, GCC_JIT_BINARY_OP_LOGICAL_OR, J->t_bool,
@@ -1297,8 +1297,8 @@ static void emit_instr(JitCtx *J, int idx) {
         gcc_jit_block *isarr = newblk(J), *chk = newblk(J), *slow = newblk(J);
         gcc_jit_block_end_with_conditional(blk, NULL, is_obj(J, reg(J, a)), chk, slow);
         gcc_jit_rvalue *arrptr = arr_ptr_of(J, reg(J, a));
-        gcc_jit_rvalue *typ = gcc_jit_lvalue_as_rvalue(
-            gcc_jit_rvalue_dereference_field(arrptr, NULL, J->f_atype));
+        gcc_jit_rvalue *typ = gcc_jit_context_new_cast(J->ctx, NULL, gcc_jit_lvalue_as_rvalue(
+            gcc_jit_rvalue_dereference_field(arrptr, NULL, J->f_atype)), J->t_int);
         gcc_jit_block_end_with_conditional(chk, NULL,
             cmp(J, GCC_JIT_COMPARISON_EQ, typ, cint(J, OBJ_ARRAY)), isarr, slow);
         gcc_jit_rvalue *pos = as_int(J, reg(J, a + 1));
@@ -1725,18 +1725,22 @@ static gcc_jit_context *emit_function(JitCtx *Jp, const uint8_t *entry) {
     gcc_jit_struct *frame_s = gcc_jit_context_new_struct_type(J.ctx, NULL, "SeaCallFrame", 8, ff);
     J.frame_ptr = gcc_jit_type_get_pointer(gcc_jit_struct_as_type(frame_s));
 
-    /* Model SeaArray for the inline array fast path (offsets: type@0, len@8,
-     * data@16 — verified against the C layout). The cap field is modeled only to
-     * keep `data` at the right offset. */
+    /* Model SeaArray for the inline array fast path (offsets: type@0 (one
+     * byte; gc flags@1), len@8, data@16 — verified against the C layout). The
+     * other fields are modeled only to keep the offsets right. */
     {
         gcc_jit_type *u32 = gcc_jit_context_get_int_type(J.ctx, 4, 0);
-        J.f_atype = gcc_jit_context_new_field(J.ctx, NULL, J.t_int, "type");
+        gcc_jit_type *u8  = gcc_jit_context_get_int_type(J.ctx, 1, 0);
+        gcc_jit_type *u16 = gcc_jit_context_get_int_type(J.ctx, 2, 0);
+        J.f_atype = gcc_jit_context_new_field(J.ctx, NULL, u8, "type");
+        gcc_jit_field *f_agc  = gcc_jit_context_new_field(J.ctx, NULL, u8, "gc");
+        gcc_jit_field *f_apad = gcc_jit_context_new_field(J.ctx, NULL, u16, "pad");
         gcc_jit_field *f_arc  = gcc_jit_context_new_field(J.ctx, NULL, u32, "rc");
         J.f_alen  = gcc_jit_context_new_field(J.ctx, NULL, u32, "len");
         gcc_jit_field *f_acap = gcc_jit_context_new_field(J.ctx, NULL, u32, "cap");
         J.f_adata = gcc_jit_context_new_field(J.ctx, NULL, J.u64p, "data");
-        gcc_jit_field *af[5] = { J.f_atype, f_arc, J.f_alen, f_acap, J.f_adata };
-        gcc_jit_struct *arr_s = gcc_jit_context_new_struct_type(J.ctx, NULL, "SeaArray", 5, af);
+        gcc_jit_field *af[7] = { J.f_atype, f_agc, f_apad, f_arc, J.f_alen, f_acap, J.f_adata };
+        gcc_jit_struct *arr_s = gcc_jit_context_new_struct_type(J.ctx, NULL, "SeaArray", 7, af);
         J.arr_ptr = gcc_jit_type_get_pointer(gcc_jit_struct_as_type(arr_s));
     }
 

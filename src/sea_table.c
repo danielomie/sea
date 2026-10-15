@@ -120,6 +120,7 @@ static void table_resize(SeaTable *t, uint32_t new_cap) {
 SeaTable* sea_table_new(SeaTableMode mode) {
     SeaTable *t = SEA_ALLOC(SeaTable);
     t->obj.type = OBJ_TABLE;
+    t->obj.gc = 0;
     t->obj.refcount = 1;
     t->mode = mode;
     t->count = 0;
@@ -152,8 +153,10 @@ bool sea_table_get_ic_slow(SeaTable *t, SeaValue key, SeaTableIC *ic, SeaValue *
     return true;
 }
 
-void sea_table_set(SeaTable *t, SeaValue key, SeaValue val) {
+static void table_set(SeaTable *t, SeaValue key, SeaValue val, bool retain_val) {
     if (SEA_UNLIKELY(sea_is_rope(key))) key = sea_rope_key(key);
+    sea_store_barrier(&t->obj, key);
+    sea_store_barrier(&t->obj, val);
     // Grow if load factor > 75%
     if (t->count + 1 > t->cap * 3 / 4) {
         table_resize(t, t->cap * 2);
@@ -161,19 +164,31 @@ void sea_table_set(SeaTable *t, SeaValue key, SeaValue val) {
     SeaTableEntry *e = find_entry(t->entries, t->cap, key);
     bool is_new = is_empty(e->key) || is_tombstone(e->key);
 
+    SeaValue old = SEA_NIL_VAL;
     if (is_new) {
         t->count++;
         val_retain(key);    /* table now owns a ref to the key */
         e->key = key;
     } else {
-        /* Overwrite: release old value. The stored key stays: `key` may be a
-         * different object with equal content that the table doesn't own
+        /* Overwrite: the old value is released after the store (`t.x = t.x`
+         * must not free what it is storing). The stored key stays: `key` may
+         * be a different object with equal content that the table doesn't own
          * (assigning it here used to leak the old key and keep an unowned
          * pointer to the new one). */
-        val_release(e->value);
+        old = e->value;
     }
-    val_retain(val);        /* table now owns a ref to the value */
+    if (retain_val) val_retain(val);   /* the table owns a ref to the value */
     e->value = val;
+    val_release(old);
+}
+
+void sea_table_set(SeaTable *t, SeaValue key, SeaValue val) {
+    table_set(t, key, val, true);
+}
+
+/* As sea_table_set, taking over the caller's reference to val. */
+void sea_table_set_move(SeaTable *t, SeaValue key, SeaValue val) {
+    table_set(t, key, val, false);
 }
 
 bool sea_table_delete(SeaTable *t, SeaValue key) {
@@ -228,6 +243,14 @@ void sea_table_destroy(SeaTable *t) {
     }
     t->count = 0;
     t->cap = 0;
+}
+
+/* Free the entry array without releasing keys/values (the cycle collector
+ * accounts for them itself). */
+void sea_table_free_storage(SeaTable *t) {
+    if (t->entries) sea_free(t->entries, sizeof(SeaTableEntry) * t->cap);
+    t->entries = NULL;
+    t->count = t->cap = 0;
 }
 
 void sea_table_set_str(SeaTable *t, const char *key, SeaValue val) {

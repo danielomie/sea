@@ -147,6 +147,7 @@ void sea_string_remove_intern(SeaString *s) {
 SeaString* sea_string_alloc(size_t len) {
     SeaString *s = (SeaString*)sea_malloc(sizeof(SeaString) + len + 1);
     s->obj.type     = OBJ_STRING;
+    s->obj.gc = 0;
     s->obj.refcount = 1;
     s->len          = (uint32_t)len;
     s->hash         = SEA_HASH_UNCOMPUTED;  // interned bit is 0 by default

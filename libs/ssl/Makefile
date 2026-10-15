@@ -10,7 +10,7 @@ OPENSSL_LIBS   = $(shell pkg-config --libs   openssl 2>/dev/null || echo "-lssl 
 
 all: ssl_native.so
 
-ssl_native.so: ssl_native.c
+ssl_native.so: ssl_native.c $(wildcard ../../src/*.h)
 	$(CC) $(CFLAGS) $(OPENSSL_CFLAGS) -I$(SEA_SRC) -o $@ $< $(OPENSSL_LIBS)
 
 clean:

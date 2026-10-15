@@ -1,14 +1,18 @@
 # Memory model
 
-Sea has **no garbage collector**. Every heap object (string, array, map, table,
-struct, closure, channel, error) carries a reference count. When the last
-reference to an object goes away, the object is freed **immediately**. There are
-no collection pauses, the heap never grows past what the program actually uses,
-and nothing has to be tuned.
+Sea has **no tracing garbage collector**. Every heap object (string, array,
+map, table, struct, closure, channel, error) carries a reference count. When the
+last reference to an object goes away, the object is freed **immediately**. There
+are no collection pauses over the whole heap, the heap does not grow past what the
+program uses, and nothing has to be tuned.
 
-This page covers what programs can rely on, the one case refcounting does not
-handle (cycles), and how the compiler and the VM keep the counts right. That last
-part matters if you work on the VM or write native libraries.
+Refcounting alone cannot free objects that reference each other in a cycle. A
+small **cycle collector** handles those. It only looks at containers whose counts
+went down, never at the whole heap.
+
+This page covers what programs can rely on, how cycles are collected, and how the
+compiler and the VM keep the counts right. The last two parts matter if you work
+on the VM or write native libraries.
 
 ---
 
@@ -40,7 +44,7 @@ Strings, numbers and booleans behave like values: assigning or passing them
 never aliases mutable state. Arrays, maps, tables and structs are shared by
 reference.
 
-### Cycles are not collected
+### Cycles
 
 Refcounting cannot free a group of objects that reference each other. Each one
 keeps the next alive, so none of the counts ever reaches zero.
@@ -49,26 +53,52 @@ keeps the next alive, so none of the counts ever reaches zero.
 local a = {}
 local b = {}
 a.peer = b
-b.peer = a          -- a ↔ b: both leak when the locals go out of scope
+b.peer = a          -- a ↔ b: unreachable once the locals go out of scope
 
 local obj = {}
 obj.handler = function() return obj.name end   -- obj → closure → obj
 ```
 
-A one-off structure like this costs little. It matters when such structures are
-created over and over, for example one per request in a long-running server. To
-avoid the leak, break the cycle when you are done (`a.peer = nil`), or keep one
-direction as a plain key (an id or a name) instead of a reference. Parent links in
-trees and back-references in graphs are the usual cases.
+The **cycle collector** frees these. It runs on its own once enough candidates
+pile up, and you can also call it explicitly:
 
-A `local function` that calls or names itself does **not** form a cycle: inside
-its own body it refers to the running closure directly. Two exceptions: if the
-enclosing function ever assigns to that name, or if a closure nested inside the
-function refers to it, the reference becomes an ordinary capture, and that is a
-cycle.
+```sea
+print(gc.collect())   -- runs a collection now; returns the number of objects freed
+local s = gc.stats()  -- collections, freed, traversed, candidates, buffered, threshold
+```
 
-A cycle collector (in the style of CPython's) is possible future work. It would
-only ever scan containers and closures.
+How it works: a release that drops a container's count to a value **above
+zero** might have just disconnected a cycle. That container becomes a
+*candidate*. Containers are arrays, tables, maps, structs, closures, their
+upvalues and errors; strings and numbers can never be part of a cycle. When the
+candidates pass a threshold, the collector walks the objects reachable from
+them and subtracts the references that come from *inside* that subgraph (trial
+deletion, Bacon & Rajan 2001):
+
+- whatever still has a positive count is referenced from outside (a variable, a
+  global, another goroutine) and is restored untouched, together with everything
+  it reaches;
+- whatever drops to zero is held only by the cycle, and is freed.
+
+The work is proportional to what the candidates reach, not to the heap. After
+each collection, the threshold grows to the number of objects the collection had
+to examine (with 10 000 candidates as the minimum). Large live structures that
+keep producing candidates are therefore re-examined less often.
+
+**Cost:** recording a candidate, and examining it later, costs a few tens of
+nanoseconds. Most code barely notices. Code that recurses over large structures
+and passes their nodes as arguments pays the most: every node returns from +2 to
++1 when the callee releases its parameter, so every node becomes a candidate.
+`binary_trees` in the benchmarks runs about 20% slower with the collector than
+with `SEA_GC=0`.
+
+**Limit:** each goroutine collects only objects it has not shared. A cycle made
+of objects that crossed a channel, a `go` call or a global is not collected. It
+still leaks unless you break it (`a.peer = nil`). Breaking a cycle by hand
+remains the cheapest option in hot code anyway.
+
+A `local function` that calls or names itself does not form a cycle in the first
+place: inside its own body it refers to the running closure directly.
 
 ### Goroutines
 
@@ -194,7 +224,8 @@ static SeaValue fn_pair(SeaVM *vm, int argc, SeaValue *args) {
 
 ## Known limits
 
-- **Cycles leak** (see above).
+- **Cycles of shared objects leak.** The collector skips objects that crossed
+  goroutines (see [Cycles](#cycles)).
 - **A function that drops the last reference to itself while running.** For
   example, an anonymous handler stored only in a table that removes itself from
   that table: the closure is freed under the running frame. Keep another reference
@@ -204,14 +235,23 @@ static SeaValue fn_pair(SeaVM *vm, int argc, SeaValue *args) {
 ## Checking for leaks
 
 Build with AddressSanitizer and LeakSanitizer (see `make asan`). The main script
-keeps its top-level data until exit, so a fixed amount of "leaked" memory at exit
-is expected. To find a real leak, compare a workload at two sizes: memory that
-grows with N is a leak.
+keeps its top-level data until exit, and candidates below the threshold are
+still pending when it ends, so some "leaked" memory at exit is expected. End the
+program with `gc.collect()` to settle the candidates. Then compare a workload at
+two sizes: memory that grows with N is a leak.
 
 ```sh
 ASAN_OPTIONS=detect_leaks=1 ./sea-asan probe.sea 200
 ASAN_OPTIONS=detect_leaks=1 ./sea-asan probe.sea 400   # same total → no leak per iteration
 ```
 
-`tests/unit/105_ownership.sea` covers the ownership rules. Each case in it used
-to be a use-after-free or a leak.
+`tests/unit/105_ownership.sea` covers the ownership rules; each case in it used
+to be a use-after-free or a leak. `tests/unit/106_gc_cycles.sea` covers the
+cycle collector.
+
+Environment knobs: `SEA_GC=0` turns the cycle collector off entirely (no
+candidates are recorded, `gc.collect()` finds nothing, and cycles leak). It is
+for programs known to be cycle-free that want the last bit of speed.
+`SEA_GC_THRESHOLD=n` sets the minimum number of candidates before a
+collection. `SEA_GC_THRESHOLD=1` collects at almost every
+safe point, which makes a good stress test under ASAN.

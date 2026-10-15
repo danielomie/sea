@@ -1,4 +1,5 @@
 #include "sea_sched.h"
+#include "sea_gc.h"
 #include "sea_goroutine.h"
 #include "sea_vm.h"
 #include "sea_memory.h"
@@ -238,6 +239,7 @@ static void* worker_thread(void *arg) {
         }
 
         g->vm->goroutine = g;
+        sea_gc_vm = g->vm;          /* this goroutine's cycle buffer */
         /* Cache the program-wide JIT flag per-VM (read shared once here, not in
          * the OP_CALL hot path — avoids cross-thread cache contention). */
         g->vm->jit_enabled = g->vm->shared->jit_enabled;
@@ -252,6 +254,7 @@ static void* worker_thread(void *arg) {
 
         /* A native function already ran inside sea_vm_goroutine_init. */
         int result = has_frame ? sea_vm_resume(g->vm) : SEA_OK;
+        sea_gc_vm = NULL;
 
         w->current = NULL;
 
@@ -274,6 +277,10 @@ static void* worker_thread(void *arg) {
             if (sea_is_obj(r)) sea_obj_release(sea_as_obj(r));
             if (sea_is_obj(g->fn)) sea_obj_release(sea_as_obj(g->fn));
             g->fn = SEA_NIL_VAL;
+            /* what is left in its cycle buffer is garbage or shared */
+            sea_gc_vm = g->vm;
+            sea_gc_vm_finish(g->vm);
+            sea_gc_vm = NULL;
         }
         g->done   = true;
         g->status = GORO_DONE;

@@ -53,6 +53,7 @@ SeaStruct *sea_struct_new(uint32_t n) {
         s->_pad      = 0;
     }
     s->obj.type     = OBJ_STRUCT;
+    s->obj.gc = 0;
     s->obj.refcount = 1;
     s->field_count  = 0;
 
@@ -78,6 +79,7 @@ void sea_struct_init_field(SeaStruct *s, SeaString *key, SeaValue v) {
      * the struct borrows them without an additional retain. */
     names[idx]  = key;
     values[idx] = v;
+    sea_store_barrier(&s->obj, v);
     val_retain(v);
     s->field_count++;
     s->building_remaining--;
@@ -91,7 +93,8 @@ void sea_struct_init_field_borrow(SeaStruct *s, SeaString *key, SeaValue v) {
     SeaValue   *values = sea_struct_values(s);
     names[idx]  = key;
     values[idx] = v;
-    /* No val_retain: arena struct borrows from the owning local. */
+    sea_store_barrier(&s->obj, v);
+    /* No val_retain: the caller hands over its reference (SET_FIELD_MOVE). */
     s->field_count++;
     s->building_remaining--;
     if (s->building_remaining == 0)
@@ -113,9 +116,27 @@ bool sea_struct_set(SeaStruct *s, SeaString *key, SeaValue v) {
     SeaValue   *values = sea_struct_values(s);
     for (uint32_t i = 0; i < s->field_count; i++) {
         if (names[i] == key) {
-            val_release(values[i]);
+            sea_store_barrier(&s->obj, v);
+            SeaValue old = values[i];
             val_retain(v);
             values[i] = v;
+            val_release(old);   /* after the store (as SETLOCAL) */
+            return true;
+        }
+    }
+    return false;
+}
+
+/* As sea_struct_set, taking over the caller's reference to v. */
+bool sea_struct_set_move(SeaStruct *s, SeaString *key, SeaValue v) {
+    SeaString **names  = sea_struct_names(s);
+    SeaValue   *values = sea_struct_values(s);
+    for (uint32_t i = 0; i < s->field_count; i++) {
+        if (names[i] == key) {
+            sea_store_barrier(&s->obj, v);
+            SeaValue old = values[i];
+            values[i] = v;
+            val_release(old);
             return true;
         }
     }
@@ -141,6 +162,10 @@ void sea_struct_free(SeaStruct *s) {
     for (uint32_t i = 0; i < s->field_count; i++) {
         val_release(values[i]);
     }
+    sea_struct_free_block(s);
+}
+
+void sea_struct_free_block(SeaStruct *s) {
     if (!pool_free(s))
         sea_free(s, struct_alloc_size(s->field_cap));
 }

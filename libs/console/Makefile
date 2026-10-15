@@ -7,7 +7,7 @@ SEA_SRC = ../../src
 
 all: console.so
 
-console.so: console.c
+console.so: console.c $(wildcard ../../src/*.h)
 	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $< -lm -lpthread
 
 clean:

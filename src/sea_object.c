@@ -10,6 +10,7 @@
 #include "sea_memory.h"
 #include "sea_struct.h"
 #include "sea_typed_array.h"
+#include "sea_gc.h"
 
 // These are defined in their respective files; we need them for freeing
 extern void sea_array_destroy(SeaArray *a);
@@ -25,6 +26,13 @@ void sea_obj_mark_shared(SeaObject *obj) {
     if (!obj) return;
     if (__atomic_load_n(&obj->refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT)
         return; /* already shared; subgraph also marked */
+    /* In this goroutine's cycle buffer: once shared, another goroutine could
+     * drop it to zero while the buffer still points at it — so the buffer
+     * takes a reference (released when the collector discards the entry). */
+    if (obj->gc & SEA_GC_BUFFERED) {
+        obj->gc |= SEA_GC_BUFREF;
+        obj->refcount++;
+    }
     __atomic_fetch_or(&obj->refcount, SEA_RC_SHARED_BIT, __ATOMIC_RELEASE);
 
     switch (obj->type) {
@@ -116,6 +124,13 @@ void sea_obj_arena_teardown(SeaObject *obj) {
 
 void sea_obj_free(SeaObject *obj) {
     if (!obj) return;
+    if (SEA_UNLIKELY(obj->gc & SEA_GC_BUFFERED) && !sea_gc_unbuffer_dying(obj)) {
+        /* in a cycle buffer at an unknown slot: release the contents now,
+         * leave the header to the collector (sea_gc_collect) */
+        sea_gc_release_contents(obj);
+        obj->gc |= SEA_GC_DEAD;
+        return;
+    }
     switch (obj->type) {
         case OBJ_STRING: {
             SeaString *s = (SeaString*)obj;

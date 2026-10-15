@@ -35,3 +35,4 @@ bool     sea_map_delete(SeaMap *m, SeaValue key);
 bool     sea_map_next(SeaMap *m, uint32_t *iter, SeaValue *key, SeaValue *val);
 uint32_t sea_map_count(SeaMap *m);
 void     sea_map_destroy(SeaMap *m);
+void     sea_map_free_storage(SeaMap *m);   /* no key/value release (cycle collector) */

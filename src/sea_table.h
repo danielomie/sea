@@ -57,6 +57,8 @@ bool sea_table_get(SeaTable *t, SeaValue key, SeaValue *out);
 
 // Set a key-value pair
 void sea_table_set(SeaTable *t, SeaValue key, SeaValue val);
+// Set, taking over the caller's reference to val (no retain)
+void sea_table_set_move(SeaTable *t, SeaValue key, SeaValue val);
 
 // Delete a key (returns true if key existed)
 bool sea_table_delete(SeaTable *t, SeaValue key);
@@ -73,6 +75,8 @@ uint32_t sea_table_count(SeaTable *t);
 
 // Free internal storage
 void sea_table_destroy(SeaTable *t);
+// Free internal storage without releasing the entries (cycle collector)
+void sea_table_free_storage(SeaTable *t);
 
 // Key sentinels
 // We use SEA_NIL_VAL as tombstone marker for deleted entries

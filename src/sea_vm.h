@@ -114,6 +114,14 @@ struct SeaVM {
     // init. The hot path (OP_CALL) reads THIS (thread-local) and not the shared
     // copy, to avoid cache contention/false-sharing across goroutine threads.
     bool jit_enabled;
+
+    /* Cycle collector (sea_gc.c): this goroutine's possible cycle roots and
+     * statistics. A collection runs at a safe point once gc_nroots reaches
+     * gc_threshold. */
+    SeaObject **gc_roots;
+    uint32_t    gc_nroots, gc_cap, gc_threshold;
+    bool        gc_running;
+    uint64_t    gc_collections, gc_freed, gc_traversed, gc_buffered;
 };
 
 /* Convenience accessors — keep existing code working with minimal churn */

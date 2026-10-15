@@ -30,8 +30,8 @@ for i = 1, 6 do print(<-results) end
   plus `defer`, `panic` and `recover`.
 - **Data types** — arrays (`[]`), hash maps (`[=]`), sealed structs (`{x = 1}`),
   dynamic tables, typed `int_array` / `float_array`.
-- **No garbage collector** — reference counting, atomic only for values shared
-  between goroutines; see [memory](docs/memory.md).
+- **No tracing GC** — reference counting (atomic only for values shared between
+  goroutines) plus a cycle collector; see [memory](docs/memory.md).
 - **Fast** — NaN-boxed values, computed-goto dispatch, an optimizing compiler,
   and an optional JIT (libgccjit) that speeds hot numeric code up 2–4×.
 - **Batteries** — `math`, `string`, `io`, `os`, `sync`, `time`; external
@@ -90,10 +90,10 @@ A few results from [benchmarks.md](docs/benchmarks.md) (wall-clock, lower is bet
 
 | Benchmark | Sea | Sea + JIT | Lua 5.4 | Python 3.12 |
 |-----------|-----|-----------|---------|-------------|
-| Insertion sort, 10K numbers | 819 ms | 247 ms | 777 ms | 8.59 s |
-| Loop sum, 50M iterations | 267 ms | 78 ms | 382 ms | 6.90 s |
-| Mandelbrot 400×400 | 401 ms | 167 ms | 520 ms | 4.69 s |
-| Binary trees, depth 16 | 2.35 s | 2.01 s | 5.17 s | 2.67 s |
+| Insertion sort, 10K numbers | 837 ms | 246 ms | 777 ms | 7.96 s |
+| Loop sum, 50M iterations | 262 ms | 78 ms | 383 ms | 6.86 s |
+| Mandelbrot 400×400 | 410 ms | 165 ms | 518 ms | 4.58 s |
+| Binary trees, depth 16 | 2.90 s | 2.43 s | 4.87 s | 2.67 s |
 
 ## Development
 

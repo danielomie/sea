@@ -12,6 +12,7 @@ SEA_INLINE void arr_val_release(SeaValue v) {
 SeaArray* sea_array_new(uint32_t initial_cap) {
     SeaArray *a = SEA_ALLOC(SeaArray);
     a->obj.type = OBJ_ARRAY;
+    a->obj.gc = 0;
     a->obj.refcount = 1;
     a->len = 0;
     a->cap = initial_cap < 4 ? 4 : initial_cap;
@@ -21,6 +22,7 @@ SeaArray* sea_array_new(uint32_t initial_cap) {
 
 void sea_array_init_header(SeaArray *a, uint32_t initial_cap) {
     a->obj.type = OBJ_ARRAY;
+    a->obj.gc = 0;
     /* refcount set by caller (e.g. SEA_RC_ARENA_BIT for arena-allocated headers) */
     a->len = 0;
     a->cap = initial_cap < 4 ? 4 : initial_cap;
@@ -33,7 +35,19 @@ void sea_array_push(SeaArray *a, SeaValue v) {
         a->data = SEA_REALLOC_N(a->data, SeaValue, a->cap, new_cap);
         a->cap = new_cap;
     }
+    sea_store_barrier(&a->obj, v);
     arr_val_retain(v);
+    a->data[a->len++] = v;
+}
+
+/* Append, taking over the caller's reference to v (no retain). */
+void sea_array_push_move(SeaArray *a, SeaValue v) {
+    if (a->len >= a->cap) {
+        uint32_t new_cap = a->cap * 2;
+        a->data = SEA_REALLOC_N(a->data, SeaValue, a->cap, new_cap);
+        a->cap = new_cap;
+    }
+    sea_store_barrier(&a->obj, v);
     a->data[a->len++] = v;
 }
 
@@ -48,9 +62,11 @@ void sea_array_set(SeaArray *a, int64_t idx, SeaValue v) {
     int64_t len = (int64_t)a->len;
     if (idx < 0) idx += len;
     if (idx < 0 || idx >= len) return;
-    arr_val_release(a->data[(uint32_t)idx]);
+    sea_store_barrier(&a->obj, v);
+    SeaValue old = a->data[(uint32_t)idx];
     arr_val_retain(v);
     a->data[(uint32_t)idx] = v;
+    arr_val_release(old);   /* after the store: v may be reachable only through old */
 }
 
 uint32_t sea_array_len(SeaArray *a) {

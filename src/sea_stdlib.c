@@ -13,6 +13,7 @@
 #include "sea_ast.h"
 #include "sea_chunk.h"
 #include "sea_sched.h"
+#include "sea_gc.h"
 #include <math.h>
 #include <unistd.h>
 #include <limits.h>
@@ -429,4 +430,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_os_register(vm);
     sea_lib_sync_register(vm);
     sea_lib_time_register(vm);
+    sea_lib_gc_register(vm);
 }

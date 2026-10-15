@@ -58,12 +58,15 @@ SeaValue sea_struct_get(SeaStruct *s, SeaString *key);
 
 /* Update an existing field; returns false if field not found (sealed). */
 bool sea_struct_set(SeaStruct *s, SeaString *key, SeaValue v);
+bool sea_struct_set_move(SeaStruct *s, SeaString *key, SeaValue v);   /* takes over v */
 
 /* For-in iteration; *iter starts at 0. Returns false when exhausted. */
 bool sea_struct_next(SeaStruct *s, uint32_t *iter, SeaValue *k, SeaValue *v);
 
 /* Release all refs and free memory. */
 void sea_struct_free(SeaStruct *s);
+/* Free the block only (field values already released or handed elsewhere). */
+void sea_struct_free_block(SeaStruct *s);
 
 /* Convenience macros */
 #define SEA_AS_STRUCT(v)  ((SeaStruct*)sea_as_obj(v))

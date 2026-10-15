@@ -44,9 +44,40 @@ typedef enum {
 } SeaObjType;
 
 struct SeaObject {
-    SeaObjType type;
-    uint32_t   refcount;   /* bits 0–30: reference count; bit 31: shared flag */
+    uint8_t    type;       /* SeaObjType */
+    uint8_t    gc;         /* cycle collector flags (SEA_GC_*), 0 when created */
+    uint16_t   gc_idx;     /* position in the cycle buffer while SEA_GC_BUFFERED
+                              (SEA_GC_NO_IDX when it does not fit) */
+    uint32_t   refcount;   /* count + SEA_RC_* flag bits */
 };
+
+/* ---- Cycle collector hooks (sea_gc.c, docs/memory.md) ----
+ * Containers (arrays, tables, maps, structs, closures, upvalues, errors) can
+ * form reference cycles. A release that leaves one with a non-zero count makes
+ * it a possible cycle root: it is buffered once, and the collector later
+ * checks whether only references from inside its subgraph keep it alive. */
+#define SEA_GC_COLOR_MASK  0x03
+#define SEA_GC_BLACK       0x00   /* in use (the state outside a collection) */
+#define SEA_GC_GRAY        0x01   /* possible garbage, internal refs subtracted */
+#define SEA_GC_WHITE       0x02   /* garbage */
+#define SEA_GC_BUFFERED    0x04   /* in a goroutine's candidate buffer */
+#define SEA_GC_BUFREF      0x08   /* the buffer holds a reference (shared while buffered) */
+#define SEA_GC_DEAD        0x10   /* count hit zero while buffered: contents released,
+                                     header kept until the collector drops it */
+#define SEA_GC_NO_IDX      0xFFFFu
+#define SEA_GC_TRACKED_MASK ((1u << OBJ_ARRAY) | (1u << OBJ_TABLE) | (1u << OBJ_MAP) | \
+                             (1u << OBJ_STRUCT) | (1u << OBJ_CLOSURE) | (1u << OBJ_UPVALUE) | \
+                             (1u << OBJ_ERROR))
+/* a macro: used inside the extern-inline sea_obj_release */
+#define sea_gc_tracked(o) ((SEA_GC_TRACKED_MASK >> (o)->type) & 1u)
+void sea_gc_possible_root(SeaObject *obj);
+
+static inline void sea_obj_init(SeaObject *o, SeaObjType t, uint32_t rc) {
+    o->type = (uint8_t)t;
+    o->gc = 0;
+    o->gc_idx = 0;
+    o->refcount = rc;
+}
 
 /* Unconditionally free the object (called when RC drops to zero). */
 void sea_obj_free(SeaObject *obj);
@@ -63,6 +94,14 @@ void sea_obj_mark_shared(SeaObject *obj);
 
 static inline void sea_val_mark_shared(SeaValue v) {
     if (sea_is_obj(v)) sea_obj_mark_shared(sea_as_obj(v));
+}
+
+/* Storing v into container c: a value reachable from a shared container is
+ * shared (other goroutines may read it), so its counts must become atomic.
+ * (sea_val_mark_shared is a no-op on an already shared value.) */
+static inline void sea_store_barrier(const SeaObject *c, SeaValue v) {
+    if (SEA_UNLIKELY(__atomic_load_n(&c->refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT))
+        sea_val_mark_shared(v);
 }
 
 /* Inline retain/release: hot paths benefit from inlining; sea_object.c provides
@@ -99,6 +138,8 @@ inline void sea_obj_release(SeaObject *obj) {
     } else {
         uint32_t prev = obj->refcount--;
         if (SEA_UNLIKELY((prev & SEA_RC_COUNT_MASK) <= 1u)) sea_obj_free(obj);
+        else if (SEA_UNLIKELY(sea_gc_tracked(obj) && !(obj->gc & SEA_GC_BUFFERED)))
+            sea_gc_possible_root(obj);   /* may now be garbage held only by a cycle */
     }
 }
 

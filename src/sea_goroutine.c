@@ -17,6 +17,7 @@ SeaGoroutine* sea_goroutine_spawn(SeaVM *parent, SeaValue fn, SeaValue *args, in
     if (!g) {
         g = SEA_ALLOC(SeaGoroutine);
         g->obj.type    = OBJ_GOROUTINE;
+        g->obj.gc = 0;
         g->vm          = NULL;
     }
 

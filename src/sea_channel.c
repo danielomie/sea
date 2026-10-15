@@ -14,6 +14,7 @@ static inline void chan_retain(SeaValue v) {
 SeaChannel* sea_chan_new(uint32_t cap) {
     SeaChannel *ch = SEA_ALLOC(SeaChannel);
     ch->obj.type = OBJ_CHANNEL;
+    ch->obj.gc = 0;
     ch->obj.refcount = 1;
     ch->cap = cap;
     ch->head = 0;

@@ -12,6 +12,7 @@
 #include "sea_goroutine.h"
 #include "sea_sched.h"
 #include "sea_jit.h"
+#include "sea_gc.h"
 #include <math.h>
 #include <stdarg.h>
 #include <setjmp.h>
@@ -49,6 +50,8 @@ SeaVM* sea_vm_new_child(SeaShared *shared) {
 
 void sea_vm_free(SeaVM *vm) {
     if (!vm) return;
+    if (sea_gc_vm == vm) sea_gc_vm = NULL;
+    if (vm->gc_roots) sea_free(vm->gc_roots, sizeof(SeaObject*) * vm->gc_cap);
 
     SeaChunk *c = vm->module_chunks;
     while (c) {
@@ -64,6 +67,8 @@ void sea_vm_free(SeaVM *vm) {
 
 void sea_vm_reset_child(SeaVM *vm) {
     if (!vm) return;
+    if (sea_gc_vm == vm) sea_gc_vm = NULL;
+    if (vm->gc_roots) sea_free(vm->gc_roots, sizeof(SeaObject*) * vm->gc_cap);
     /* Free module chunks from the previous run (child VMs never own shared) */
     SeaChunk *c = vm->module_chunks;
     while (c) {
@@ -128,6 +133,7 @@ void sea_vm_error_noreturn(SeaVM *vm, const char *fmt, ...) {
 SeaClosure* sea_native_closure(const char *name, SeaValue (*fn)(SeaVM*, int, SeaValue*)) {
     SeaClosure *cl = SEA_ALLOC(SeaClosure);
     cl->obj.type = OBJ_CLOSURE;
+    cl->obj.gc = 0;
     cl->obj.refcount = 1;
     cl->chunk = NULL;
     cl->is_native = true;
@@ -176,6 +182,7 @@ static SeaUpvalue* capture_upvalue(SeaVM *vm, SeaValue *location) {
     // its upvalue is still open cannot leave a dangling list entry.
     SeaUpvalue *new_up = SEA_ALLOC(SeaUpvalue);
     new_up->obj.type = OBJ_UPVALUE;
+    new_up->obj.gc = 0;
     new_up->obj.refcount = 2;
     new_up->location = location;
     new_up->closed = SEA_NIL_VAL;
@@ -357,6 +364,7 @@ SeaValue sea_make_error(SeaVM *vm, SeaValue msg) {
     (void)vm;
     SeaError *err = SEA_ALLOC(SeaError);
     err->obj.type = OBJ_ERROR;
+    err->obj.gc = 0;
     err->obj.refcount = 1;
     err->message = msg;          /* the error owns its message */
     if (sea_is_obj(msg)) sea_obj_retain(sea_as_obj(msg));
@@ -918,26 +926,26 @@ static void vm_set_field_move(SeaVM *vm, SeaValue *base, int a, int c, SeaValue 
         SeaStruct *st = SEA_AS_STRUCT(obj_v);
         if (st->building_remaining > 0) {
             sea_struct_init_field_borrow(st, SEA_AS_STRING(key), v);
-            return;
-        }
-        if (!sea_struct_set(st, SEA_AS_STRING(key), v)) {
+        } else if (!sea_struct_set_move(st, SEA_AS_STRING(key), v)) {
             vm_release_val(v);
             sea_vm_error_noreturn(vm, "attempt to add field '%s' to sealed struct",
                                   SEA_AS_STRING(key)->data);
         }
+    } else if (sea_is_obj(obj_v) && sea_as_obj(obj_v)->type == OBJ_TABLE) {
+        sea_table_set_move(SEA_AS_TABLE(obj_v), key, v);
     } else {
-        table_set(vm, obj_v, key, v);
+        table_set(vm, obj_v, key, v);   /* retains: drop ours */
+        vm_release_val(v);
     }
-    vm_release_val(v);
 }
 
 /* OP_ARRAY_PUSH_MOVE: append R[b] to the array R[a], taking over its
- * reference. Shared with the JIT. */
+ * reference (no retain/release pair: that would make every appended
+ * container a cycle-collector candidate). Shared with the JIT. */
 static inline void vm_array_push_move(SeaValue *base, int a, int b) {
     SeaValue arr_v = base[a], v = base[b];
     if (sea_is_array(arr_v)) {
-        sea_array_push(SEA_AS_ARRAY(arr_v), v);   /* retains... */
-        vm_release_val(v);                        /* ...so drop ours */
+        sea_array_push_move(SEA_AS_ARRAY(arr_v), v);
         return;
     }
     if (sea_is_int_array(arr_v))
@@ -1009,6 +1017,12 @@ static int vm_run(SeaVM *vm, int base_frame) {
 #else
 #define JIT_BACKEDGE() ((void)0)
 #endif
+
+/* Cycle-collector safe point (sea_gc.h): between instructions, where no C
+ * code holds borrowed pointers. Placed at allocations and returns. */
+#define GC_SAFEPOINT() do { \
+    if (SEA_UNLIKELY(vm->gc_nroots > vm->gc_threshold)) { SAVE_IP(); sea_gc_collect(vm); } \
+} while (0)
 
 /* Run all deferred calls registered for the current frame (LIFO order),
  * then restore the defer stack pointer. Must be called before any RETURN. */
@@ -1671,6 +1685,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
     // ---- Tables ----
 
     lbl_NEW_TABLE: {
+        GC_SAFEPOINT();
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i), b = SEA_INSTR_B(i);
         SeaTable *t = sea_table_new(b ? TABLE_STRUCT : TABLE_MAP);
@@ -1708,6 +1723,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
             int64_t  _idx  = sea_as_int(_key);
             if (SEA_LIKELY(_idx >= 0 && (uint64_t)_idx < _arr->len)) {
                 SeaValue _old = _arr->data[_idx];
+                sea_store_barrier(&_arr->obj, _val);
                 vm_retain_val(_val);
                 _arr->data[_idx] = _val;
                 vm_release_val(_old);
@@ -1760,6 +1776,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
         DISPATCH();
     }
     lbl_NEW_STRUCT: {
+        GC_SAFEPOINT();
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i), b = SEA_INSTR_B(i);
         SeaStruct *st = sea_struct_new((uint32_t)b);
@@ -1770,6 +1787,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
     // ---- Arrays ----
 
     lbl_NEW_ARRAY: {
+        GC_SAFEPOINT();
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i), b = SEA_INSTR_B(i);
         uint32_t cap = 0;
@@ -1826,6 +1844,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
     }
 
     lbl_NEW_MAP: {
+        GC_SAFEPOINT();
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i);
         SeaMap *m = sea_map_new();
@@ -1884,6 +1903,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
     // ---- Closures ----
 
     lbl_CLOSURE: {
+        GC_SAFEPOINT();
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i);
         int proto_idx = SEA_INSTR_Bx(i);
@@ -1891,6 +1911,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
 
         SeaClosure *cl = SEA_ALLOC(SeaClosure);
         cl->obj.type = OBJ_CLOSURE;
+        cl->obj.gc = 0;
         cl->obj.refcount = 1;
         cl->chunk = proto;
         cl->is_native = false;
@@ -2178,6 +2199,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
         base = frame->base;
         ip = frame->ip;
         chunk = frame->closure->chunk;
+        GC_SAFEPOINT();
         DISPATCH();
     }
 
@@ -2214,6 +2236,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
         base = frame->base;
         ip = frame->ip;
         chunk = frame->closure->chunk;
+        GC_SAFEPOINT();
         DISPATCH();
     }
 
@@ -2817,6 +2840,7 @@ static int vm_run(SeaVM *vm, int base_frame) {
             st = sea_struct_new((uint32_t)b);
         } else {
             st->obj.type           = OBJ_STRUCT;
+            st->obj.gc = 0;
             st->obj.refcount       = SEA_RC_ARENA_BIT | 1u;  /* arena, owned by the local */
             st->field_count        = 0;
             st->field_cap          = (uint32_t)b;
@@ -2922,6 +2946,7 @@ static int jit_run_callee(SeaVM *vm, SeaClosure *cl, SeaValue *base, int a, int 
 }
 
 int sea_jit_call(SeaVM *vm, SeaValue *base, int a, int b, int c) {
+    sea_gc_maybe_collect(vm);   /* call boundary: a safe point (sea_gc.h) */
     /* Inside a goroutine, a callee may park on a channel and the re-entrant
      * vm_run would return SEA_SUSPENDED — which we cannot resume across the
      * native JIT frame. Bail so the interpreter performs the call inline, where
@@ -2967,6 +2992,7 @@ int sea_jit_apush(SeaVM *vm, SeaValue *base, int a, int b) {
 /* OP_NEW_ARRAY: R[a] = new array (capacity from R[b] when b != a). */
 int sea_jit_new_array(SeaVM *vm, SeaValue *base, int a, int b) {
     (void)vm;
+    sea_gc_maybe_collect(vm);   /* allocation: a safe point (sea_gc.h) */
     uint32_t cap = 0;
     if (b != a) {
         SeaValue cv = base[b];
@@ -3070,6 +3096,7 @@ int sea_jit_set_field_borrow(SeaVM *vm, SeaValue *base, int a, int c, SeaValue k
  * (arena, fields=b) / NEW_TABLE(struct-mode=b) / NEW_MAP — mirroring the
  * interpreter handlers. */
 int sea_jit_new_obj(SeaVM *vm, SeaValue *base, int op, int a, int b) {
+    sea_gc_maybe_collect(vm);   /* allocation: a safe point (sea_gc.h) */
     switch (op) {
     case OP_NEW_STRUCT: {
         SeaStruct *st = sea_struct_new((uint32_t)b);
@@ -3083,6 +3110,7 @@ int sea_jit_new_obj(SeaVM *vm, SeaValue *base, int op, int a, int b) {
             st = sea_struct_new((uint32_t)b);
         } else {
             st->obj.type           = OBJ_STRUCT;
+            st->obj.gc = 0;
             st->obj.refcount       = SEA_RC_ARENA_BIT | 1u;
             st->field_count        = 0;
             st->field_cap          = (uint32_t)b;
@@ -3195,9 +3223,11 @@ int sea_jit_go(SeaVM *vm, SeaValue *base, int a, int b, int c) {
  * lbl_CLOSURE). Open upvalues it creates point into frame->base; native
  * returns close them like lbl_RETURN does. */
 int sea_jit_closure(SeaVM *vm, SeaCallFrame *frame, SeaValue *base, int a, int bx) {
+    sea_gc_maybe_collect(vm);   /* allocation: a safe point (sea_gc.h) */
     SeaChunk *proto = frame->closure->chunk->protos[bx];
     SeaClosure *cl = SEA_ALLOC(SeaClosure);
     cl->obj.type = OBJ_CLOSURE;
+    cl->obj.gc = 0;
     cl->obj.refcount = 1;
     cl->chunk = proto;
     cl->is_native = false;
@@ -3274,6 +3304,7 @@ int sea_jit_store_up(SeaCallFrame *frame, SeaValue *base, int a, int b) {
 /* OP_NEW_ARRAY_LOCAL: arena-allocate the header (heap data buffer), mirroring
  * the interpreter; falls back to a heap array if the arena is full. */
 int sea_jit_new_array_local(SeaVM *vm, SeaValue *base, int a, int b) {
+    sea_gc_maybe_collect(vm);   /* allocation: a safe point (sea_gc.h) */
     uint32_t cap = (uint32_t)(int)b;
     SeaArray *arr = (SeaArray*)sea_arena_alloc(vm, sizeof(SeaArray));
     if (SEA_UNLIKELY(!arr)) {
@@ -3293,6 +3324,7 @@ int sea_vm_exec(SeaVM *vm, SeaChunk *chunk) {
     // Create a top-level closure for the chunk
     SeaClosure *cl = SEA_ALLOC(SeaClosure);
     cl->obj.type = OBJ_CLOSURE;
+    cl->obj.gc = 0;
     cl->obj.refcount = 1;
     cl->chunk = chunk;
     cl->is_native = false;
@@ -3315,6 +3347,7 @@ int sea_vm_exec(SeaVM *vm, SeaChunk *chunk) {
 
     /* The top-level chunk is JIT-compiled like any other once one of its loops
      * gets hot (back-edge counter in vm_run), and entered there via OSR. */
+    sea_gc_vm = vm;                  /* cycle buffer of the main goroutine */
     int result = vm_run(vm, 0);
     sea_obj_release(&cl->obj);
     return result;
@@ -3331,6 +3364,7 @@ int sea_vm_exec_mod(SeaVM *vm, SeaChunk *chunk, SeaValue *result) {
 
     SeaClosure *cl = SEA_ALLOC(SeaClosure);
     cl->obj.type      = OBJ_CLOSURE;
+    cl->obj.gc = 0;
     cl->obj.refcount  = 1;
     cl->chunk         = chunk;
     cl->is_native     = false;

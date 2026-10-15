@@ -7,7 +7,7 @@ SEA_SRC = ../../src
 
 all: http_native.so
 
-http_native.so: http_native.c
+http_native.so: http_native.c $(wildcard ../../src/*.h)
 	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $<
 
 clean:

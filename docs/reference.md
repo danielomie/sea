@@ -286,7 +286,7 @@ An initial newline immediately after the opening bracket is ignored. The number 
 | `math.atan` | `atan(x [, y]) → number` | Arc-tangent; two-arg form computes `atan2(x, y)` |
 | `math.max` | `max(...) → x` | Maximum of all arguments |
 | `math.min` | `min(...) → x` | Minimum of all arguments |
-| `math.random` | `random() → number`<br>`random(n) → int ∈ [1,n]`<br>`random(lo, hi) → int ∈ [lo,hi]` | Pseudo-random number (xorshift64) |
+| `math.random` | `random() → number`<br>`random(n) → int ∈ [1,n]`<br>`random(lo, hi) → int ∈ [lo,hi]` | Pseudo-random number (xorshift64; one shared generator, safe to call from several goroutines) |
 | `math.randomseed` | `randomseed([seed])` | Seed the RNG; defaults to `time()` |
 | `math.isnan` | `isnan(x) → bool` | Same as global `isnan` |
 | `math.isinf` | `isinf(x) → bool` | Same as global `isinf` |
@@ -472,6 +472,33 @@ Returned by `time.now()`, `time.unix()`, etc. All methods take the Time object a
 | `t.equal(t, other)` | `(other) → bool` | True if the two Times are equal |
 | `t.format(t, layout)` | `(layout) → string` | Format using Go reference-time tokens (`2006`, `01`, `02`, `15`, `04`, `05`, etc.) |
 | `t.string(t)` | `() → string` | Format as `"YYYY-MM-DD HH:MM:SS"` |
+
+---
+
+## Module: `gc`
+
+Memory is reference counted; the cycle collector frees objects that only keep
+each other alive (see [memory.md](memory.md#cycles)). It runs on its own; these
+functions are for forcing and inspecting it.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `gc.collect()` | `() → int` | Run a cycle collection now (current goroutine); returns the number of objects freed |
+| `gc.stats()` | `() → table` | For the current goroutine: `collections`, `freed` (objects), `traversed` (objects examined), `candidates` (pending now), `buffered` (candidates recorded in total), `threshold` (`-1` when the collector is off) |
+
+```sea
+local a = {}
+local b = {}
+a.peer = b
+b.peer = a
+a = nil
+b = nil
+print(gc.collect())        -- 2
+```
+
+Environment: `SEA_GC=0` turns the cycle collector off (cycles leak, but no
+candidates are tracked); `SEA_GC_THRESHOLD=n` sets the minimum number of
+candidates before a collection runs (default 10000).
 
 ---
 
@@ -740,7 +767,7 @@ end
 | `mu.unlock(mu)` | `mu.release(mu)` |
 | Long ns arithmetic (weeks) | use `time.unix(sec, 0)` instead of `base.add(base, 7*24*time.Hour)` |
 | `json.encode([=])` | works — `[=]` maps are serialized as JSON objects |
-| expecting `a.peer = b; b.peer = a` to be collected | memory is reference counted, with no GC: objects in a cycle are never freed; set one link to nil when done (see [memory.md](memory.md)) |
+| expecting a cycle of objects shared between goroutines to be collected | the cycle collector only frees cycles of objects a single goroutine owns; break shared cycles yourself (`a.peer = nil`, see [memory.md](memory.md#cycles)) |
 
 ---
 

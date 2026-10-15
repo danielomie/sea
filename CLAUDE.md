@@ -48,13 +48,14 @@ All values are NaN-boxed 64-bit words (`sea_value.h`). The quiet-NaN space encod
 
 ### Memory Management
 
-Objects are **reference-counted** (no GC); the full model is in `docs/memory.md`. Ownership is decided at compile time, not by the register file:
+Objects are **reference-counted**, plus a **cycle collector** for reference cycles (`src/sea_gc.c`, no tracing GC); the full model is in `docs/memory.md`. Ownership is decided at compile time, not by the register file:
 
 - **Named locals (and parameters) own their value** (+1). The compiler releases them at every scope exit: end of block, `break`/`continue`, `return`, `?`. Assignment uses `OP_SETLOCAL`, which stores the new value (retaining it if borrowed) and then releases the old one.
 - **Temporaries** carry `is_owned` in `SeaRegMeta` when they hold a reference that must be consumed: moved into a local, passed, returned, stored with a `*_MOVE` op, or released (`own_temp` / `drop_temp` in `sea_compiler.c`).
 - **Arguments are passed owned**; the callee owns its parameters. **Return values are owned.** The VM releases a native call's args after the call, and releases results nobody takes.
 - `is_scalar` facts (numbers, bools, nil, pinned string constants) let the compiler skip RC entirely. They are tracked with the same sound dataflow as `is_int`.
-- **Cycles are not collected.**
+- **Cycles:** a release that leaves a container (array/table/map/struct/closure/upvalue/error) with a non-zero count buffers it as a possible root, in the running goroutine's VM. At safe points (allocations, returns, JIT helpers, goroutine end, `gc.collect()`), the collector frees what only internal references keep alive (Bacon–Rajan trial deletion). It handles only objects that are not shared; `SeaObject.gc` and `gc_idx` hold its flags. Any VM code that frees objects outside a safe point must not hold borrowed pointers across a collection.
+- **Storing into a shared container marks the value shared** (`sea_store_barrier`), so "not shared" really means "seen by one goroutine".
 
 **Native C functions** (`sea_obj_val(&x->obj)` makes a `SeaValue` *without* changing RC):
 - Arguments are **borrowed**: never release them.
@@ -113,6 +114,6 @@ writes into a visible poison value; `SEA_NO_DWE=1` disables elimination).
 - **Numeric for is inclusive on both ends:** `for i = 0, n-1 do` iterates n times. When n=0 this becomes `for i = 0, -1 do` — correctly executes zero iterations (fixed 2026-05; no guard needed).
 - **Loop variables are fresh per iteration** (numeric `for` and `for-in`, as in Lua 5.4 / Go 1.22): closures and goroutines created in a loop body capture that iteration's value — no `local j = i` copy needed (changed 2026-10).
 - **String indexing is 1-based** in `string.sub`, `string.find`, `string.byte` (matching Lua convention), but array/table indexing is 0-based.
-- **Cycles leak** (refcounting, no GC): `a.peer = b; b.peer = a`, or a closure stored in the table it captures. Break them by setting a field to nil (see `docs/memory.md`).
+- **Cycles** are freed by the cycle collector (automatically, or `gc.collect()`), except cycles of objects shared between goroutines, which still leak; break those by setting a field to nil (see `docs/memory.md`).
 - **`isnan` / `isinf`** are registered as bare globals (in addition to `math.isnan` / `math.isinf`).
 - **Stack traceback**: runtime errors print `file:line: in main chunk` or `[?]:line: in function 'name'`. The `[?]` prefix means it's a named function chunk (no `/` in chunk name); a path-like name means a file-level chunk.

@@ -142,33 +142,45 @@ static SeaValue math_min(SeaVM *vm, int argc, SeaValue *args) {
 
 static uint64_t g_rand_state = 1234567890ULL;
 
+/* One xorshift64 step on the shared state: goroutines on several threads call
+ * math.random concurrently, so the update is a compare-and-swap loop (each
+ * call gets its own step; a single-threaded program sees the same sequence). */
+static uint64_t rand_next(void) {
+    uint64_t old = __atomic_load_n(&g_rand_state, __ATOMIC_RELAXED), x;
+    do {
+        x = old;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+    } while (!__atomic_compare_exchange_n(&g_rand_state, &old, x, true,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return x;
+}
+
 static SeaValue math_random(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    // xorshift64
-    g_rand_state ^= g_rand_state << 13;
-    g_rand_state ^= g_rand_state >> 7;
-    g_rand_state ^= g_rand_state << 17;
+    uint64_t r = rand_next();
 
     if (argc == 0) {
-        return sea_number_val((double)g_rand_state / (double)UINT64_MAX);
+        return sea_number_val((double)r / (double)UINT64_MAX);
     } else if (argc == 1) {
         int64_t n = sea_is_int(args[0]) ? sea_as_int(args[0]) : (int64_t)sea_as_number(args[0]);
-        return sea_int_val((int64_t)(g_rand_state % (uint64_t)n) + 1);
+        return sea_int_val((int64_t)(r % (uint64_t)n) + 1);
     } else {
         int64_t lo = sea_is_int(args[0]) ? sea_as_int(args[0]) : (int64_t)sea_as_number(args[0]);
         int64_t hi = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
         int64_t range = hi - lo + 1;
-        return sea_int_val(lo + (int64_t)(g_rand_state % (uint64_t)range));
+        return sea_int_val(lo + (int64_t)(r % (uint64_t)range));
     }
 }
 
 static SeaValue math_randomseed(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc > 0) {
-        g_rand_state = sea_is_int(args[0]) ? (uint64_t)sea_as_int(args[0]) : (uint64_t)sea_as_number(args[0]);
-        if (g_rand_state == 0) g_rand_state = 1;
+        uint64_t seed = sea_is_int(args[0]) ? (uint64_t)sea_as_int(args[0]) : (uint64_t)sea_as_number(args[0]);
+        __atomic_store_n(&g_rand_state, seed ? seed : 1, __ATOMIC_RELAXED);
     } else {
-        g_rand_state = (uint64_t)time(NULL);
+        __atomic_store_n(&g_rand_state, (uint64_t)time(NULL), __ATOMIC_RELAXED);
     }
     return SEA_NIL_VAL;
 }

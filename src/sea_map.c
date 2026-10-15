@@ -212,6 +212,7 @@ static void smap_resize(SeaMap *m, uint32_t new_cap) {
 SeaMap* sea_map_new(void) {
     SeaMap *m = SEA_ALLOC(SeaMap);
     m->obj.type     = OBJ_MAP;
+    m->obj.gc = 0;
     m->obj.refcount = 1;
     m->count = 0;
     m->cap   = SMAP_INIT_CAP;
@@ -234,6 +235,8 @@ bool sea_map_get(SeaMap *m, SeaValue key, SeaValue *out) {
 
 void sea_map_set(SeaMap *m, SeaValue key, SeaValue val) {
     if (SEA_UNLIKELY(sea_is_rope(key))) key = sea_rope_key(key);
+    sea_store_barrier(&m->obj, key);
+    sea_store_barrier(&m->obj, val);
     if (m->count + 1 > m->cap * 3 / 4)
         smap_resize(m, m->cap * 2);
 
@@ -241,8 +244,9 @@ void sea_map_set(SeaMap *m, SeaValue key, SeaValue val) {
     bool found;
     uint32_t idx = smap_probe(m, key, hash, &found);
 
+    SeaValue old = SEA_NIL_VAL;
     if (found) {
-        val_release(m->slots[idx].value);
+        old = m->slots[idx].value;   /* released after the store (as tables) */
     } else {
         val_retain(key);
         m->slots[idx].key = key;
@@ -251,6 +255,7 @@ void sea_map_set(SeaMap *m, SeaValue key, SeaValue val) {
     }
     val_retain(val);
     m->slots[idx].value = val;
+    val_release(old);
 }
 
 bool sea_map_delete(SeaMap *m, SeaValue key) {
@@ -282,6 +287,15 @@ bool sea_map_next(SeaMap *m, uint32_t *iter, SeaValue *key, SeaValue *val) {
 }
 
 uint32_t sea_map_count(SeaMap *m) { return m->count; }
+
+/* Free the storage without releasing keys/values (cycle collector). */
+void sea_map_free_storage(SeaMap *m) {
+    if (m->ctrl)  sea_free(m->ctrl,  SMAP_CTRL_SIZE(m->cap));
+    if (m->slots) sea_free(m->slots, sizeof(SeaMapEntry) * m->cap);
+    m->ctrl = NULL;
+    m->slots = NULL;
+    m->count = m->cap = 0;
+}
 
 void sea_map_destroy(SeaMap *m) {
     if (!m->ctrl) return;

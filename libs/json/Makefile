@@ -7,7 +7,7 @@ SEA_SRC = ../../src
 
 all: json.so
 
-json.so: json.c
+json.so: json.c $(wildcard ../../src/*.h)
 	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $< -lm
 
 clean:

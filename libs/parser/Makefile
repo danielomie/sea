@@ -12,8 +12,8 @@ SRCS = parser.c \
 
 all: parser.so
 
-parser.so: $(SRCS)
-	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $^ -lm
+parser.so: $(SRCS) $(wildcard ../../src/*.h)
+	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $(SRCS) -lm
 
 clean:
 	rm -f parser.so

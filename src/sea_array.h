@@ -42,3 +42,4 @@ void sea_array_del(SeaArray *a, int64_t idx);
 
 // Free array contents (but not the SeaArray struct itself - handled by obj_release)
 void sea_array_destroy(SeaArray *a);
+void sea_array_push_move(SeaArray *a, SeaValue v);   /* takes over v's reference */

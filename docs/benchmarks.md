@@ -3,24 +3,24 @@
 Comparison of Sea, Sea with JIT (`--jit`), Lua 5.4, and Python 3.12 on common workloads.
 Each benchmark was run 3 times; results show average time and peak memory.
 
-> Generated: 2026-10-14T20:54:13Z
+> Generated: 2026-10-15T11:52:32Z
 
 | Benchmark | Sea | Sea+JIT | Lua | Python |
 |-----------|-----|---------|-----|--------|
-| Fibonacci(35) recursive | 910ms / 3.8MB | 607ms / 4.1MB | 1.02s / 2.5MB | 2.07s / 9.3MB |
-| Fibonacci(1M) iterative | 34ms / 3.7MB | 34ms / 4.0MB | 32ms / 2.5MB | 324ms / 9.2MB |
-| Loop sum 50M iterations | 267ms / 3.6MB | 78ms / 4.0MB | 382ms / 2.5MB | 6.90s / 9.3MB |
-| Sieve primes to 500K | 38ms / 7.6MB | 43ms / 7.9MB | 51ms / 10.5MB | 233ms / 9.7MB |
-| String ops (1K concat + 10K upper/lower) | 42ms / 4.8MB | 43ms / 5.1MB | 4.05s / 5.8MB | 4.63s / 10.9MB |
-| 100K closures + 100K calls | 33ms / 18.2MB | 35ms / 18.6MB | 36ms / 13.5MB | 220ms / 37.8MB |
-| Map 10M insert + lookup | 8.86s / 603.5MB | 9.02s / 603.8MB | 17.65s / 1090.5MB | 11.46s / 1009.8MB |
-| Insertion sort 10K numbers | 819ms / 3.8MB | 247ms / 4.0MB | 777ms / 2.8MB | 8.59s / 9.7MB |
-| Matrix multiply 100x100 x50 | 1.36s / 4.0MB | 606ms / 4.3MB | 2.34s / 3.1MB | 12.68s / 10.0MB |
-| Binary trees depth 16 | 2.35s / 35.8MB | 2.01s / 36.1MB | 5.17s / 113.4MB | 2.67s / 25.4MB |
-| Quicksort 300K numbers | 278ms / 6.1MB | 211ms / 6.5MB | 262ms / 10.5MB | 940ms / 20.8MB |
-| Mandelbrot 400x400 200iter | 401ms / 3.8MB | 167ms / 4.0MB | 520ms / 2.6MB | 4.69s / 9.2MB |
-| Hot int fn: 300K calls x100-loop (JIT-friendly) | 603ms / 3.8MB | 294ms / 4.0MB | 510ms / 2.5MB | 2.71s / 9.3MB |
-| Hot float fn: 300K calls x100-loop (JIT-friendly) | 553ms / 3.8MB | 160ms / 4.0MB | 533ms / 2.6MB | 1.40s / 9.3MB |
+| Fibonacci(35) recursive | 952ms / 3.9MB | 614ms / 4.2MB | 1.02s / 2.6MB | 2.07s / 9.4MB |
+| Fibonacci(1M) iterative | 33ms / 3.8MB | 34ms / 4.1MB | 32ms / 2.5MB | 336ms / 9.4MB |
+| Loop sum 50M iterations | 262ms / 3.8MB | 78ms / 4.1MB | 383ms / 2.6MB | 6.86s / 9.4MB |
+| Sieve primes to 500K | 39ms / 7.8MB | 42ms / 8.0MB | 53ms / 10.5MB | 216ms / 9.7MB |
+| String ops (1K concat + 10K upper/lower) | 43ms / 5.0MB | 43ms / 5.2MB | 4.07s / 5.9MB | 4.59s / 11.0MB |
+| 100K closures + 100K calls | 34ms / 18.5MB | 36ms / 18.8MB | 36ms / 13.5MB | 222ms / 37.9MB |
+| Map 10M insert + lookup | 8.89s / 603.5MB | 8.87s / 603.8MB | 17.60s / 1090.5MB | 11.63s / 1009.9MB |
+| Insertion sort 10K numbers | 837ms / 3.9MB | 246ms / 4.2MB | 777ms / 2.8MB | 7.96s / 9.8MB |
+| Matrix multiply 100x100 x50 | 1.34s / 4.2MB | 600ms / 4.4MB | 2.34s / 3.2MB | 12.41s / 10.0MB |
+| Binary trees depth 16 | 2.90s / 41.9MB | 2.43s / 42.2MB | 4.87s / 113.5MB | 2.67s / 25.4MB |
+| Quicksort 300K numbers | 282ms / 6.3MB | 212ms / 6.5MB | 263ms / 10.5MB | 933ms / 20.9MB |
+| Mandelbrot 400x400 200iter | 410ms / 3.9MB | 165ms / 4.2MB | 518ms / 2.6MB | 4.58s / 9.4MB |
+| Hot int fn: 300K calls x100-loop (JIT-friendly) | 598ms / 3.9MB | 294ms / 4.2MB | 511ms / 2.5MB | 2.70s / 9.4MB |
+| Hot float fn: 300K calls x100-loop (JIT-friendly) | 717ms / 3.9MB | 158ms / 4.2MB | 535ms / 2.6MB | 1.36s / 9.4MB |
 
 _Time: wall-clock average. Memory: peak RSS. Lower is better. The JIT (off by default)
 compiles hot functions and hot loops (incl. the top-level chunk, entered mid-loop via OSR)
@@ -35,20 +35,20 @@ gain little._
 
 | Name | Description | JIT vs Sea | Sea vs Lua | Sea vs Python |
 |------|-------------|------------|------------|---------------|
-| `fib_recursive` | Fibonacci(35) recursive | +33.3% | +10.4% | +56.1% |
-| `fib_iterative` | Fibonacci(1M) iterative | +0.0% | -6.2% | +89.5% |
-| `loops` | Loop sum 50M iterations | +70.8% | +30.1% | +96.1% |
-| `primes` | Sieve primes to 500K | -13.2% | +25.5% | +83.7% |
-| `string_ops` | String ops (1K concat + 10K upper/lower) | -2.4% | +99.0% | +99.1% |
-| `closures` | 100K closures + 100K calls | -6.1% | +8.3% | +85.0% |
-| `map_ops` | Map 10M insert + lookup | -1.8% | +49.8% | +22.7% |
-| `sort` | Insertion sort 10K numbers | +69.8% | -5.4% | +90.5% |
-| `matrix_mul` | Matrix multiply 100x100 x50 | +55.4% | +42.0% | +89.3% |
-| `binary_trees` | Binary trees depth 16 | +14.4% | +54.6% | +12.1% |
-| `quicksort` | Quicksort 300K numbers | +24.1% | -6.1% | +70.4% |
-| `mandelbrot` | Mandelbrot 400x400 200iter | +58.4% | +22.9% | +91.4% |
-| `hot_calls` | Hot int fn: 300K calls x100-loop (JIT-friendly) | +51.2% | -18.2% | +77.7% |
-| `hot_float` | Hot float fn: 300K calls x100-loop (JIT-friendly) | +71.1% | -3.8% | +60.4% |
+| `fib_recursive` | Fibonacci(35) recursive | +35.5% | +6.8% | +53.9% |
+| `fib_iterative` | Fibonacci(1M) iterative | -3.0% | -3.1% | +90.2% |
+| `loops` | Loop sum 50M iterations | +70.2% | +31.6% | +96.2% |
+| `primes` | Sieve primes to 500K | -7.7% | +26.4% | +81.9% |
+| `string_ops` | String ops (1K concat + 10K upper/lower) | +0.0% | +98.9% | +99.1% |
+| `closures` | 100K closures + 100K calls | -5.9% | +5.6% | +84.7% |
+| `map_ops` | Map 10M insert + lookup | +0.2% | +49.5% | +23.6% |
+| `sort` | Insertion sort 10K numbers | +70.6% | -7.7% | +89.5% |
+| `matrix_mul` | Matrix multiply 100x100 x50 | +55.3% | +42.6% | +89.2% |
+| `binary_trees` | Binary trees depth 16 | +16.2% | +40.5% | -8.7% |
+| `quicksort` | Quicksort 300K numbers | +24.8% | -7.2% | +69.8% |
+| `mandelbrot` | Mandelbrot 400x400 200iter | +59.8% | +20.8% | +91.1% |
+| `hot_calls` | Hot int fn: 300K calls x100-loop (JIT-friendly) | +50.8% | -17.0% | +77.8% |
+| `hot_float` | Hot float fn: 300K calls x100-loop (JIT-friendly) | +78.0% | -34.0% | +47.4% |
 
 > Run benchmarks: `bash tests/compare/run_benchmarks.sh` (auto-builds `bin/sea-jit` via `make sea-jit`)
 
