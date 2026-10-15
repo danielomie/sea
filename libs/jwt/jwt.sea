@@ -61,7 +61,7 @@ function M.sign(claims, key, opts)
 
     -- header
     local header = json.encode({ alg = alg, typ = "JWT" })
-    if not header then return nil end
+    if is_error(header) then return nil end
 
     -- monta payload
     local payload = {}
@@ -82,7 +82,7 @@ function M.sign(claims, key, opts)
     end
 
     local payload_json = json.encode(payload)
-    if not payload_json then return nil end
+    if is_error(payload_json) then return nil end   -- e.g. a cycle in the claims
 
     local h64 = b64(header)
     local p64 = b64(payload_json)
@@ -118,7 +118,7 @@ function M.verify(token, key, opts)
     local header_json = unb64(h64)
     if not header_json then return nil, "header inválido" end
     local header = json.decode(header_json)
-    if not header then return nil, "header JSON inválido" end
+    if is_error(header) or type(header) ~= "table" then return nil, "header JSON inválido" end
 
     local alg = header.alg
     if not alg then return nil, "alg ausente no header" end
@@ -132,7 +132,7 @@ function M.verify(token, key, opts)
     local payload_json = unb64(p64)
     if not payload_json then return nil, "payload inválido" end
     local claims = json.decode(payload_json)
-    if not claims then return nil, "payload JSON inválido" end
+    if is_error(claims) or type(claims) ~= "table" then return nil, "payload JSON inválido" end
 
     -- valida exp
     local check_exp = not opts or opts.verify_exp ~= false
@@ -168,7 +168,10 @@ function M.decode(token)
     local payload_json = unb64(parts[1])
     if not header_json or not payload_json then return nil, nil end
 
-    return json.decode(header_json), json.decode(payload_json)
+    local header, payload = json.decode(header_json), json.decode(payload_json)
+    if is_error(header) then header = nil end
+    if is_error(payload) then payload = nil end
+    return header, payload
 end
 
 -- ---- jwt.algs() → array com algoritmos suportados -----------------------

@@ -1,0 +1,80 @@
+-- invalid JSON is rejected
+json.decode: invalid number at line 1, column 1
+json.decode: invalid number (leading zero) at line 1, column 1
+json.decode: invalid number (digit expected after '.') at line 1, column 1
+json.decode: invalid number (digit expected in exponent) at line 1, column 1
+json.decode: unexpected character '+' at line 1, column 1
+json.decode: unexpected character '.' at line 1, column 1
+json.decode: unexpected character ']' at line 1, column 4
+json.decode: expected a string key at line 1, column 8
+json.decode: unexpected character 'n' at line 1, column 1
+json.decode: unexpected character ''' at line 1, column 1
+json.decode: control character in string at line 1, column 3
+json.decode: invalid escape in string at line 1, column 2
+json.decode: invalid \u escape at line 1, column 2
+json.decode: expected ',' or ']' at line 1, column 4
+json.decode: expected ':' after key at line 1, column 6
+json.decode: expected a string key at line 1, column 2
+json.decode: unexpected data after the JSON value at line 1, column 4
+json.decode: unexpected end of input at line 1, column 1
+-- error positions
+json.decode: invalid number (leading zero) at line 3, column 8
+-- valid edge cases
+0	0.5	1000	-0.015
+140737488355327	number
+1e+20
+0.11111111111111
+true	é/
+true
+1
+nil	false
+-- depth limit
+json.decode: nesting too deep at line 1, column 513
+false
+json.decode: nesting too deep at line 1, column 3
+-- valid()
+true	false	false	true
+-- encode conversions
+0.1	3.0	-0.0	1e+300	2.5e-08
+null	null
+{"1":"a","x":true}
+{"42":"int key","true":"bool key"}
+[1,-2]	[0.5,2.0]
+{"name":"x"}
+[1,null]
+"� ok é"	"\ufffd \u00e9"
+"tab\t nl\n ctl\u0001 q\" bs\\"
+-- encode errors
+json.encode: cycle detected (a value contains itself)
+json.encode: cannot encode a value of type function
+{"a":{"v":1},"b":{"v":1}}
+-- encode options
+{
+  "a": "é",
+  "b": [
+    1,
+    {
+      "x": 2,
+      "y": null
+    }
+  ],
+  "c": {}
+}
+{
+	"a": "\u00e9",
+	"b": [
+		1,
+		{
+			"x": 2,
+			"y": null
+		}
+	],
+	"c": {}
+}
+[
+  [],
+  {}
+]
+-- round trip
+{"id":7,"name":"sea","nested":{"x":[1,2,{"y":"z"}]},"none":null,"ok":true,"score":98.25,"tags":["a","b"]}
+true

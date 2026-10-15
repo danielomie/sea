@@ -178,6 +178,18 @@ SeaString* sea_string_from_cstr(const char *cstr) {
     return sea_string_new(cstr, strlen(cstr));
 }
 
+/* The interned string with these bytes (+1), or NULL. Never inserts: for
+ * data from outside (e.g. JSON keys), which must not grow the intern table,
+ * but can share an instance the program already interned (a constant). */
+SeaString* sea_string_find_intern(const char *data, size_t len) {
+    uint32_t hash = sea_string_hash(data, len) & SEA_STRING_HASH_MASK;
+    pthread_mutex_lock(&g_interns_mu);
+    SeaString *s = intern_find(data, len, hash);
+    if (s) sea_obj_retain(&s->obj);
+    pthread_mutex_unlock(&g_interns_mu);
+    return s;
+}
+
 SeaString* sea_string_intern(const char *data, size_t len) {
     uint32_t hash = sea_string_hash(data, len) & SEA_STRING_HASH_MASK;
     pthread_mutex_lock(&g_interns_mu);

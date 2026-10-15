@@ -29,39 +29,69 @@ short, functions borrow their arguments and return an owned value
 
 ## `json`
 
+JSON (RFC 8259) in C. Build: `make -C libs/json`.
+
 ```sea
-local json = require("./libs/json/json")
+local json = require("../libs/json/json")   -- relative to the requiring file
 ```
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `json.encode` | `encode(v) → string\|nil` | Serialize a Sea value to JSON. Returns `nil` on circular reference or encoding error |
-| `json.decode` | `decode(s) → value\|nil` | Parse a JSON string. Returns `nil` on any parse error |
+| `json.encode` | `encode(v [, opts]) → string\|error` | Serialize a Sea value |
+| `json.decode` | `decode(s [, opts]) → value\|error` | Parse a JSON document |
+| `json.valid` | `valid(s) → bool` | Check that `s` is valid JSON without building values |
+
+Failures are **error values** (`is_error(e)`, `e.message`), so a JSON `null`
+(→ `nil`) is never confused with a failure and `json.decode(s)?` passes a
+failure up. Messages say where: `json.decode: invalid number (leading zero) at
+line 3, column 8`, `json.encode: cycle detected (a value contains itself)`.
+
+**`encode` options** (table, map or struct):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `indent` | — | Pretty-print: a number of spaces (up to 16) or a string such as `"\t"` |
+| `sort_keys` | `false` | Sort object keys (byte order). Tables, maps and structs have no key order of their own, so use this for stable output |
+| `ascii` | `false` | Escape every non-ASCII character as `\uXXXX` (a surrogate pair above U+FFFF) |
+| `max_depth` | `512` | Deepest nesting allowed |
+
+**`decode` options:** `max_depth` (default 512, at most 10000). Deeper input is
+an error ("nesting too deep"), never a stack overflow.
 
 **Type mapping — encode:**
 
-| Sea type | JSON output |
-|----------|-------------|
+| Sea value | JSON |
+|-----------|------|
 | `nil` | `null` |
 | `bool` | `true` / `false` |
 | `int` | integer |
-| `number` | float (`NaN`/`Inf` → `null`) |
-| `string` | `"..."` with standard escapes + `\uXXXX` |
-| table `{0..n-1}` | array `[...]` |
-| table with string keys | object `{...}` |
-| `array` (SeaArray) | array `[...]` |
+| `number` | shortest form that reads back exactly (`0.1`, `2.5e-08`); integral values keep a `.0` (`3.0`) so they decode as floats again; `NaN`/`Inf` → `null` |
+| `string` | `"..."` with `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f` and `\u00XX` for other control characters; invalid UTF-8 bytes become U+FFFD |
+| `array`, `int_array`, `float_array` | array |
+| table with keys `0..n-1` (`{a, b, c}`) | array |
+| other table, map `[=]`, struct | object. Integer, number and bool keys become strings (`{"1": …}`); other keys are skipped |
+| function, channel, error, goroutine | left out of objects, `null` in arrays, an error at the top level |
+
+A value that contains itself is an error; the same value appearing twice (not
+nested in itself) is fine.
 
 **Type mapping — decode:**
 
-| JSON | Sea type |
-|------|----------|
+| JSON | Sea value |
+|------|-----------|
 | `null` | `nil` |
-| `true`/`false` | `bool` |
-| integer | `int` |
-| float | `number` |
-| `"string"` | `string` |
-| `[...]` | `array` (**0-indexed**) |
-| `{...}` | table (TABLE_MAP, string keys) |
+| `true` / `false` | `bool` |
+| integer within ±2^47 | `int` |
+| other numbers (fraction, exponent, larger integers) | `number` |
+| string | `string` (escapes and surrogate pairs decoded to UTF-8; a lone surrogate becomes U+FFFD) |
+| array | `array` (**0-indexed**) |
+| object | table (string keys; for a repeated key the last value wins) |
+
+Decoding is strict: leading zeros, `1.`, `-`, trailing commas, single quotes,
+raw control characters or unknown escapes in strings, and data after the value
+are rejected. A UTF-8 byte-order mark at the start is skipped. Object keys are
+shared: one string per distinct key per document, and the program's own
+constant when it has one, so `obj.name` lookups compare pointers.
 
 ---
 
@@ -255,7 +285,7 @@ The client sends `Host` (with the port when it is not the default), `User-Agent:
 | `url` | Final URL after redirects |
 | `error` | Message, only when `status == 0` |
 | `uncompressed` | `true` when a gzip/deflate body was decoded (`Content-Encoding` and `Content-Length` are then removed from `headers`) |
-| `resp:json()` | Decodes the body as JSON |
+| `resp:json()` | Decodes the body as JSON (an error value if it is not valid JSON) |
 
 ### Server
 
@@ -303,7 +333,7 @@ The server supports keep-alive and pipelining, chunked request bodies, `Expect: 
 | `tls` | `true` over HTTPS |
 | `cookies` | Map from the `Cookie` header |
 | `params` | Route parameters (router only) |
-| `req:json()` | Decodes the body as JSON |
+| `req:json()` | Decodes the body as JSON (an error value if it is not valid JSON) |
 
 **Response** (what the handler returns): a table/map `{status = 200, body = "", headers = {...}, close = false}`, or just a string (200, `text/plain`). A non-string `body` is converted with `tostring`. Header values may be arrays (repeated headers). `close = true` closes the connection after the response. Anything else — `nil`, an invalid status, a header with CR/LF — becomes a 500 and is logged. A handler that panics or hits a runtime error (indexing nil, …) also gets the client a 500; the error goes to `on_error` (by default printed with the request) and the server keeps running. Without a `Content-Type`, `text/plain; charset=utf-8` is used.
 
@@ -313,7 +343,7 @@ The server supports keep-alive and pipelining, chunked request bodies, `Expect: 
 |----------|-------------|
 | `http.text(body [, status])` | `text/plain` response |
 | `http.html(body [, status])` | `text/html` response |
-| `http.json(value [, status [, headers]])` | JSON-encoded `value`, `application/json` |
+| `http.json(value [, status [, headers]])` | JSON-encoded `value`, `application/json` (a value that cannot be encoded, e.g. a cycle, panics, so the server answers 500) |
 | `http.redirect(url [, status])` | Redirect (302 by default) with `Location` |
 | `http.set_cookie(resp, name, value [, opts]) → resp` | Adds a `Set-Cookie`; `opts`: `path, domain, max_age, expires, secure, http_only, same_site` |
 | `http.static(dir [, opts]) → handler` | Serves files under `dir` with a MIME type by extension; `opts`: `index` (`"index.html"`), `prefix` (URL prefix to strip). GET/HEAD only; `..` and NUL in paths are refused |

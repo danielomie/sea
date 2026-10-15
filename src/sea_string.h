@@ -53,6 +53,7 @@ void sea_string_ensure_hash(SeaString *s);
 
 // Intern a string (returns existing if identical string is interned)
 SeaString* sea_string_intern(const char *data, size_t len);
+SeaString* sea_string_find_intern(const char *data, size_t len);   /* lookup only, +1 or NULL */
 
 // String comparison (content equality)
 bool sea_string_equal(SeaString *a, SeaString *b);

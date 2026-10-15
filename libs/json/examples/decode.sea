@@ -1,7 +1,7 @@
 -- decode.sea — json.decode examples
 -- Usage: bin/sea libs/json/examples/decode.sea
 
-local json = require("./libs/json/json")
+local json = require("../json")
 
 -- primitives
 print(json.decode("null"))    -- nil  → printed as "nil"
@@ -26,10 +26,21 @@ print(resp["ok"])                    -- true
 print(resp["data"]["total"])         -- 3
 print(resp["data"]["items"][0])      -- 1
 
--- error handling: returns nil on invalid JSON
+-- errors are error values (a JSON null is nil, a failure is not)
 local bad = json.decode("{invalid}")
-print(bad)         -- nil
-print(bad == nil)  -- true
+print(is_error(bad))   -- true
+print(bad.message)     -- json.decode: expected a string key at line 1, column 2
+
+-- in a function returning errors, `?` passes the failure up
+local function load_config(text)
+    local cfg = json.decode(text)?
+    return cfg["port"]
+end
+print(load_config('{"port": 8080}'))      -- 8080
+print(load_config('{"port": }').message)  -- json.decode: unexpected character '}' ...
+
+-- validate without building anything
+print(json.valid('{"a": [1, 2]}'), json.valid("[1,"))   -- true  false
 
 -- round-trip
 local original = { x = 1, y = "hello", flags = {true, false, true} }

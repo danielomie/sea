@@ -1,0 +1,79 @@
+-- json: strict parsing, error values with positions, depth limit, encode
+-- options and conversions (see docs/libs.md)
+local json = require("../../libs/json/json")
+
+local function err(v) return is_error(v) and v.message or ("not an error: " .. tostring(v)) end
+
+print("-- invalid JSON is rejected")
+local bad = {"-", "01", "1.", "1e", "+1", ".5", "[1,]", '{"a":1,}', "nul", "'x'", '"a\tb"', '"\\x41"',
+             '"\\u12zz"', "[1 2]", '{"a" 1}', '{1:2}', "[1]x", ""}
+for i = 0, len(bad) - 1 do print(err(json.decode(bad[i]))) end
+
+print("-- error positions")
+print(err(json.decode("{\n  \"name\": \"sea\",\n  \"n\": 01\n}")))
+
+print("-- valid edge cases")
+print(json.decode("-0"), json.decode("0.5"), json.decode("1E3"), json.decode("-1.5e-2"))
+print(json.decode("140737488355327"), type(json.decode("140737488355328")))
+print(json.decode("100000000000000000000"))
+print(json.decode("0." .. string.rep("1", 70)))
+print(json.decode('"\\uD83D\\uDE00"') == "😀", json.decode('"\\u00e9\\/"'))
+print(json.decode('"\\uD800\\u0041"') == "\xEF\xBF\xBDA")
+print(json.decode("\xEF\xBB\xBF[1]")[0])
+print(json.decode("null"), is_error(json.decode("null")))
+
+print("-- depth limit")
+print(err(json.decode(string.rep("[", 100000) .. string.rep("]", 100000))))
+print(is_error(json.decode(string.rep("[", 512) .. string.rep("]", 512))))
+print(err(json.decode('[[["deep"]]]', { max_depth = 2 })))
+
+print("-- valid()")
+print(json.valid('{"a":[1,2.5,"x",null,true]}'), json.valid("{"), json.valid("01"), json.valid(" 1 "))
+
+print("-- encode conversions")
+print(json.encode(0.1), json.encode(3.0), json.encode(-0.0), json.encode(1e300), json.encode(2.5e-8))
+print(json.encode(1 / 0), json.encode(0 / 0))
+local t = {}
+t[1] = "a"
+t["x"] = true
+print(json.encode(t, { sort_keys = true }))
+local m = [=]
+m[42] = "int key"
+m[true] = "bool key"
+print(json.encode(m, { sort_keys = true }))
+local ia = int_array(0)
+ia[] = 1
+ia[] = -2
+local fa = float_array(0)
+fa[] = 0.5
+fa[] = 2.0
+print(json.encode(ia), json.encode(fa))
+local obj = { name = "x", greet = function() return 1 end }
+print(json.encode(obj))
+local arr = []
+arr[] = 1
+arr[] = function() end
+print(json.encode(arr))
+print(json.encode("\xff ok \xc3\xa9"), json.encode("\xff é", { ascii = true }))
+print(json.encode("tab\t nl\n ctl\x01 q\" bs\\"))
+
+print("-- encode errors")
+local cyc = {}
+cyc.self = cyc
+print(err(json.encode(cyc)))
+print(err(json.encode(function() end)))
+local shared = { v = 1 }
+local twice = { a = shared, b = shared }
+print(json.encode(twice, { sort_keys = true }))
+
+print("-- encode options")
+local doc = json.decode('{"b":[1,{"y":null,"x":2}],"a":"é","c":{}}')
+print(json.encode(doc, { indent = 2, sort_keys = true }))
+print(json.encode(doc, { indent = "\t", sort_keys = true, ascii = true }))
+print(json.encode(json.decode("[[],{}]"), { indent = 2 }))
+
+print("-- round trip")
+local src = '{"id":7,"name":"sea","score":98.25,"ok":true,"tags":["a","b"],"none":null,"nested":{"x":[1,2,{"y":"z"}]}}'
+local once = json.encode(json.decode(src), { sort_keys = true })
+print(once)
+print(json.encode(json.decode(once), { sort_keys = true }) == once)

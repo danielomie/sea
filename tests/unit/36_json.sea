@@ -99,10 +99,12 @@ check("dec ws", json.decode("  [ 1 , 2 ]  ")[0], 1)
 
 -- ---- decode: error cases ------------------------------------------------------
 
-check("dec bad trailing", json.decode("42 garbage"), nil)
-check("dec bad empty",    json.decode(""),            nil)
-check("dec bad partial",  json.decode("{"),           nil)
-check("dec bad unclosed", json.decode("[1,2"),        nil)
+-- failures are error values (a JSON null decodes to nil)
+check("dec bad trailing", is_error(json.decode("42 garbage")), true)
+check("dec bad empty",    is_error(json.decode("")),           true)
+check("dec bad partial",  is_error(json.decode("{")),          true)
+check("dec bad unclosed", is_error(json.decode("[1,2")),       true)
+check("dec null not err", is_error(json.decode("null")),       false)
 
 -- ---- round-trip ---------------------------------------------------------------
 

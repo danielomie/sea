@@ -24,7 +24,7 @@ local M = {}
 -- inside a handler would resolve them relative to the running script)
 local json_lib = require("../json/json")
 local function json_mod()
-    if json_lib == nil then error("http: libs/json is not built (make -C libs/json)") end
+    if json_lib == nil then panic("http: libs/json is not built (make -C libs/json)") end
     return json_lib
 end
 
@@ -347,9 +347,11 @@ function M.json(value, status, headers)
         for k, v in headers do h[k] = v end
     end
     h["Content-Type"] = "application/json"
+    local body = json_mod().encode(value)
+    if is_error(body) then panic(body) end   -- a cycle, a function...: the server sends a 500
     local r = [=]
     r["status"] = status or 200
-    r["body"] = json_mod().encode(value)
+    r["body"] = body
     r["headers"] = h
     return r
 end
@@ -905,6 +907,7 @@ local function do_request(method, url, o, redirects_left)
     local ctype = o.content_type
     if o.json ~= nil then
         body = json_mod().encode(o.json)
+        if is_error(body) then return make_error(body.message, url) end
         ctype = ctype or "application/json"
     elseif o.form ~= nil then
         body = M.build_query(o.form)

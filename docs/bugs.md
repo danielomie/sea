@@ -407,3 +407,36 @@ Também testamos a suíte com `char` sem sinal (`-funsigned-char`, como no aarch
 Encontrados no caminho:
 - **O build quebrava em toda máquina com `libreadline-dev`.** O `sea_main.c` usa readline quando acha o header (`__has_include`), mas o Makefile nunca linkava `-lreadline`. Agora o Makefile detecta o header e linka.
 - **`107_net` dependia de tempo.** O servidor de eco fechava conexões ociosas depois de 2 s, e a checagem dos sleepers exigia menos de 1 s. Numa máquina lenta (ou emulada, com JIT síncrono), a leitura com timeout via EOF. Os limites agora são 30 s e 5 s.
+
+## Revisão da lib json **(2026-10)**
+
+Confirmados por teste antes da correção:
+- **Segfault com JSON muito aninhado.** `[[[…]]]` com 100 mil níveis (200 KB) estourava a pilha do decoder recursivo. Uma única requisição a um servidor que fizesse `req:json()` o derrubava. Agora há um limite de profundidade (512 por padrão, opção `max_depth`), e acima dele o decode devolve erro.
+- **Erro indistinguível de `null`.** `decode("null")` e `decode("nul")` devolviam `nil`. Agora falhas são valores de erro com linha e coluna.
+- **Dados decodificados errados:**
+  - `"\uD800A"` perdia o `A` e gerava UTF-8 inválido;
+  - inteiros maiores que int64 saturavam (`1e20` virava `9.22e18`);
+  - decimais válidos com mais de 63 caracteres eram rejeitados.
+- **JSON inválido aceito:** `-` (virava 0), `01`, `1.`, `1e`, caracteres de controle crus e escapes desconhecidos ou inválidos em strings (`\x41`, `\u12zz`).
+- **Perda de dados no encode:**
+  - chaves inteiras ou booleanas eram descartadas (`t[1]`, map com chave int);
+  - `int_array`/`float_array` viravam `null`;
+  - métodos de structs saíam como `null`;
+  - UTF-8 inválido gerava JSON inválido.
+- **Formato e ciclos no encode:**
+  - `0.1` saía como `0.10000000000000001`;
+  - `3.0` voltava como int;
+  - um ciclo só era percebido depois de 256 níveis, e o resultado era um `nil` sem explicação.
+
+Novidades:
+- opções `indent`, `sort_keys` e `ascii` no encode;
+- `json.valid`.
+
+Desempenho:
+- o decode ficou 40% mais rápido, porque strings sem escape saem direto da entrada e os valores vão para os containers sem par retain/release;
+- as chaves de objeto são compartilhadas por documento e reaproveitam a constante interned do programa (novo `sea_string_find_intern`, que só consulta, para não deixar a entrada crescer a tabela de intern);
+- o acesso `obj.campo` ficou 15% mais rápido.
+
+Encontrados no caminho:
+- **`libs/jwt`** testava `if not claims` depois do decode: com valores de erro, um payload inválido passaria. Agora usa `is_error` e exige uma tabela.
+- **`libs/http`** chamava `error(...)` esperando interromper, mas em Sea `error()` só cria um valor. Agora usa `panic`: um `http.json` de valor que não pode ser codificado vira 500, e o client recusa um `opts.json` assim.

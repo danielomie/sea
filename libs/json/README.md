@@ -1,129 +1,57 @@
 # libs/json
 
-JSON encode and decode for Sea. Implemented entirely in C for correctness and performance.
+JSON (RFC 8259) encode and decode for Sea, in C. The full reference (options,
+type mapping, rules) is in [docs/libs.md](../../docs/libs.md#json).
 
 ## Build
 
 ```sh
-cd libs/json
-make          # produces json.so
+make -C libs/json     # json.so
 ```
 
 ## Usage
 
 ```sea
-local json = require("./libs/json/json")
+local json = require("../libs/json/json")   -- relative to your file
 
-local s = json.encode({ name = "sea", version = 1 })
--- '{"name":"sea","version":1}'
+local s = json.encode({ name = "sea", version = 1 }, { sort_keys = true })
+-- {"name":"sea","version":1}
 
-local v = json.decode('{"name":"sea","version":1}')
-print(v["name"])   -- sea
+local v = json.decode('{"name": "sea", "tags": ["fast", "simple"]}')
+print(v.name, v.tags[0])          -- sea  fast
+
+-- failures are error values, with the position
+local bad = json.decode('{"port": 08}')
+if is_error(bad) then print(bad.message) end
+-- json.decode: invalid number (leading zero) at line 1, column 10
+
+-- or pass them up with ?
+local function port(text)
+    local cfg = json.decode(text)?
+    return cfg.port
+end
+
+print(json.encode(v, { indent = 2, sort_keys = true }))   -- pretty-printed
+print(json.valid("[1, 2"))                                -- false
 ```
 
-## API
+| Function | Returns |
+|----------|---------|
+| `json.encode(value [, {indent, sort_keys, ascii, max_depth}])` | string, or an error (a cycle, a function at the top level, too deep) |
+| `json.decode(text [, {max_depth}])` | value (`null` → `nil`), or an error with line and column |
+| `json.valid(text)` | bool |
 
-### `json.encode(value) → string`
+Notes:
 
-Converts a Sea value to a JSON string. Returns `nil` if the value cannot be
-encoded (e.g. circular reference deeper than 256 levels).
+- Decoding is strict (no leading zeros, trailing commas, single quotes, raw
+  control characters in strings) and nesting is limited (512 by default), so
+  hostile input gets an error, not a crash.
+- Arrays decode 0-indexed; objects decode to tables.
+- Floats keep their type through a round trip (`3.0` → `"3.0"`), and print in
+  their shortest exact form (`0.1`).
+- Integer, number and bool keys of tables and maps become JSON strings;
+  function-valued fields (methods) are left out of objects.
+- Tables have no key order: use `sort_keys = true` for stable output.
 
-| Sea type | JSON output |
-|----------|-------------|
-| `nil` | `null` |
-| `bool` | `true` / `false` |
-| `int` | integer literal |
-| `float` | floating-point literal (`%.17g`); `NaN`/`Inf` → `null` |
-| `string` | `"..."` with `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, `\uXXXX` escaping |
-| table with integer keys `0..n-1` | JSON array `[...]` |
-| table with string keys | JSON object `{...}` (non-string keys are skipped) |
-| `array` (SeaArray) | JSON array `[...]` |
-| function / channel / other | `null` |
-
-> **Array detection**: a table is encoded as a JSON array when all its keys are
-> non-negative integers forming a consecutive sequence `0..n-1`. This matches
-> the layout of Sea's `{v0, v1, v2}` array literals.
-
-### `json.decode(string) → value`
-
-Parses a JSON string and returns the corresponding Sea value. Returns `nil` on
-any parse error, including trailing garbage after the root value.
-
-| JSON token | Sea value |
-|------------|-----------|
-| `null` | `nil` |
-| `true` / `false` | `bool` |
-| integer number | `int` (48-bit signed) or `float` if out of range |
-| floating-point number | `float` |
-| `"string"` | `string` (full `\uXXXX` and surrogate-pair decoding to UTF-8) |
-| `[...]` | `array` (SeaArray, **0-indexed**) |
-| `{...}` | `table` (TABLE_MAP, string keys) |
-
-> **Array indexing**: decoded JSON arrays are returned as SeaArray, which uses
-> **0-based** indexing — `arr[0]` is the first element.
-
-## Examples
-
-### Encoding
-
-```sea
-local json = require("./libs/json/json")
-
-json.encode(nil)           -- "null"
-json.encode(true)          -- "true"
-json.encode(42)            -- "42"
-json.encode("hi\nthere")   -- "\"hi\\nthere\""
-
--- Array (table with integer keys 0..n-1)
-json.encode({1, 2, 3})                      -- "[1,2,3]"
-json.encode({"a", true, nil})               -- "[\"a\",true,null]"
-
--- Object
-json.encode({ name = "sea", ok = true })    -- '{"name":"sea","ok":true}'
-
--- Nested
-json.encode({ tags = {"fast", "small"}, n = 2 })
--- '{"tags":["fast","small"],"n":2}'
-```
-
-### Decoding
-
-```sea
-local json = require("./libs/json/json")
-
-json.decode("null")          -- nil
-json.decode("42")            -- 42
-json.decode('"hello"')       -- "hello"
-
-local arr = json.decode("[10,20,30]")
-print(arr[0], arr[1], arr[2])   -- 10  20  30
-
-local obj = json.decode('{"name":"alice","age":30}')
-print(obj["name"])   -- alice
-print(obj["age"])    -- 30
-
--- Error handling
-local bad = json.decode("not json")
-print(bad == nil)    -- true
-```
-
-### Round-trip
-
-```sea
-local json = require("./libs/json/json")
-
-local data    = { x = 1, y = "hello", flags = {true, false} }
-local encoded = json.encode(data)
-local decoded = json.decode(encoded)
-
-print(decoded["x"])        -- 1
-print(decoded["y"])        -- hello
-print(decoded["flags"][0]) -- true
-```
-
-## Run examples
-
-```sh
-bin/sea libs/json/examples/encode.sea
-bin/sea libs/json/examples/decode.sea
-```
+Examples: `bin/sea libs/json/examples/encode.sea`, `libs/json/examples/decode.sea`.
+Tests: `tests/unit/36_json.sea`, `tests/unit/111_json.sea`.
