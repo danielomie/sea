@@ -39,13 +39,14 @@ for i = 1, 6 do print(<-results) end
 
 ## Quick start
 
-**Platform: Linux on x86-64 only, for now.** The netpoller and the `net`
-module use `epoll`, `eventfd` and `accept4` (Linux), and the interpreter loop
-pins its hot variables to x86-64 registers (`r13`/`r14`). macOS, the BSDs and
-ARM (aarch64) are not supported yet.
+**Platform: Linux, on x86-64 or aarch64 (ARM64).** The netpoller and the `net`
+module use `epoll`, `eventfd` and `accept4`, so macOS and the BSDs are not
+supported yet. On other CPU architectures the interpreter builds without its
+pinned registers but is untested.
 
-Requirements: GCC (computed goto, register variables), GNU Make, pthreads,
-readline (or build with `make noreadline`). The JIT additionally needs the
+Requirements: GCC (computed goto, register variables), GNU Make, pthreads.
+readline is optional: the REPL uses it for line editing when its headers are
+installed (`make noreadline` leaves it out). The JIT additionally needs the
 libgccjit headers (`libgccjit-13-dev` or similar). Native libraries have their
 own: OpenSSL 3 for `libs/ssl`, zlib for `libs/http`.
 

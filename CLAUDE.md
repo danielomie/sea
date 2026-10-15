@@ -26,6 +26,7 @@ make test-jit                    # Unit tests with every chunk JIT-compiled (bin
 make test-asan                   # Run under AddressSanitizer
 bash tests/run_tests.sh 24       # Run only tests matching pattern "24"
 bin/sea tests/run_tests.sea      # Run test runner directly
+bash tests/arm64/run.sh          # Build + test on aarch64 in Docker (needs qemu binfmt; see the script)
 
 # Run a single example
 bin/sea examples/nbody/nbody.sea
@@ -82,6 +83,15 @@ Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `
 TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.
 
 **Require paths are relative to the requiring file**: a lib's own examples use `"../libname"`; files under `examples/<name>/` reach a library as `"../../libs/json/json"`.
+
+## Portability
+
+Linux only (epoll/eventfd in the netpoller), tested on x86-64 and aarch64.
+Keep arch-specific code behind `#if defined(__x86_64__)` / `__aarch64__` with a
+plain fallback: the pinned dispatch registers (`SEA_PIN_REG_*` in `sea_vm.c`),
+the SIMD map probe (SSE2/AVX2/NEON in `sea_map.c`), the spin-wait hint. `char`
+is unsigned on aarch64: never rely on its sign (cast to `unsigned char` or
+`int8_t`).
 
 ## Adding or Changing an Opcode
 

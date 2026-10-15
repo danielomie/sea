@@ -392,3 +392,18 @@ Com um DNS lento simulado (2 s por consulta), 8 conexões levam 2,5 s em vez de 
 - o cliente pede gzip e descomprime de forma transparente (`opts.decompress`, `resp.uncompressed`);
 - o servidor comprime respostas de texto quando `opts.gzip` está ligado;
 - natives novos `gzip`/`gunzip` em `http_native.so`, com limite de tamanho contra zip bombs.
+
+## Porte para aarch64 **(2026-10)**
+
+O Sea agora compila e passa a suíte em Linux aarch64: testado num container Ubuntu arm64 emulado, com `tests/arm64/run.sh`, nos modos normal, DWE, seac e JIT.
+
+Mudanças:
+- os registradores fixos do loop de despacho são `x19`/`x20` no aarch64 (`r13`/`r14` no x86-64) e nenhum em outras arquiteturas;
+- a sondagem do `sea_map` ganhou uma versão NEON (16 slots por vez; sem ela, o aarch64 cairia no caminho escalar de 1 slot);
+- o spin-lock usa `yield`.
+
+Também testamos a suíte com `char` sem sinal (`-funsigned-char`, como no aarch64) no x86: nada dependia do sinal.
+
+Encontrados no caminho:
+- **O build quebrava em toda máquina com `libreadline-dev`.** O `sea_main.c` usa readline quando acha o header (`__has_include`), mas o Makefile nunca linkava `-lreadline`. Agora o Makefile detecta o header e linka.
+- **`107_net` dependia de tempo.** O servidor de eco fechava conexões ociosas depois de 2 s, e a checagem dos sleepers exigia menos de 1 s. Numa máquina lenta (ou emulada, com JIT síncrono), a leitura com timeout via EOF. Os limites agora são 30 s e 5 s.

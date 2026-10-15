@@ -51,6 +51,8 @@ static inline void sea_upvalue_lock(SeaUpvalue *up) {
         while (__atomic_load_n(&up->lock, __ATOMIC_RELAXED)) {
 #if defined(__x86_64__) || defined(__i386__)
             __builtin_ia32_pause();
+#elif defined(__aarch64__)
+            __asm__ __volatile__("yield");
 #endif
         }
 }

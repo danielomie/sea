@@ -37,6 +37,19 @@ static inline smap_vec_t smap_load(const uint8_t *p)          { return _mm_loadu
 static inline smap_vec_t smap_set1(uint8_t v)                 { return _mm_set1_epi8((char)v); }
 static inline smap_vec_t smap_cmpeq(smap_vec_t a, smap_vec_t b){ return _mm_cmpeq_epi8(a, b); }
 static inline uint32_t   smap_mask(smap_vec_t v)              { return (uint32_t)_mm_movemask_epi8(v); }
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+#  include <arm_neon.h>
+#  define SMAP_GROUP    16u
+typedef uint8x16_t smap_vec_t;
+static inline smap_vec_t smap_load(const uint8_t *p)          { return vld1q_u8(p); }
+static inline smap_vec_t smap_set1(uint8_t v)                 { return vdupq_n_u8(v); }
+static inline smap_vec_t smap_cmpeq(smap_vec_t a, smap_vec_t b){ return vceqq_u8(a, b); }
+/* movemask: one bit per byte (lanes are 0x00 or 0xFF), like _mm_movemask_epi8 */
+static inline uint32_t   smap_mask(smap_vec_t v) {
+    static const uint8_t bit[16] = { 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128 };
+    uint8x16_t m = vandq_u8(v, vld1q_u8(bit));
+    return (uint32_t)vaddv_u8(vget_low_u8(m)) | ((uint32_t)vaddv_u8(vget_high_u8(m)) << 8);
+}
 #else
 #  define SMAP_GROUP    1u
 #endif
@@ -120,7 +133,7 @@ static uint32_t smap_probe(SeaMap *m, SeaValue key, uint64_t hash, bool *found) 
     uint32_t pos    = h1;
     uint32_t first_tomb = UINT32_MAX;
 
-#if defined(__AVX2__) || defined(__SSE2__)
+#if SMAP_GROUP > 1
     smap_vec_t v_needle = smap_set1(needle);
     smap_vec_t v_empty  = smap_set1(SMAP_CTRL_EMPTY);
 

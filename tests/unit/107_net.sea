@@ -12,7 +12,7 @@ for i = 1, 100 do
 end
 local n = 0
 for i = 1, 100 do n = n + <-done end
-print("sleepers:", n, time.since(t0) // time.Millisecond < 1000)
+print("sleepers:", n, time.since(t0) // time.Millisecond < 5000)   -- serially: 10 s
 
 -- 2. an echo server; idle connections (more than worker threads) don't block it
 local lfd = net.listen(0, "127.0.0.1")
@@ -23,7 +23,7 @@ go (function()
         if is_error(fd) then break end
         go (function()
             while true do
-                local data = net.read(fd, 4096, 2000)
+                local data = net.read(fd, 4096, 30000)
                 if is_error(data) or data == "" then break end
                 net.write(fd, data)
             end

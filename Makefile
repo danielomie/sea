@@ -3,6 +3,14 @@ CFLAGS = -std=c11 -O3 -march=native -mtune=native -Wall -Wextra -Wno-unused-para
          -fno-strict-aliasing -D_GNU_SOURCE
 LDFLAGS = -lpthread -lm -ldl -rdynamic
 
+# The REPL uses readline for line editing when its headers are installed
+# (src/sea_main.c checks with __has_include); link it in that case.
+HAVE_READLINE := $(shell printf '\043include <stdio.h>\n\043include <readline/readline.h>\n' | \
+                   $(CC) -E -x c - >/dev/null 2>&1 && echo 1)
+ifeq ($(HAVE_READLINE),1)
+LDFLAGS += -lreadline
+endif
+
 SRC_DIR = src
 OBJ_DIR = obj
 BIN_DIR = bin

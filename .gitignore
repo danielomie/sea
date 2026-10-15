@@ -31,3 +31,4 @@ core.*
 vgcore.*
 gmon.out
 perf.data*
+.claude/scheduled_tasks.lock

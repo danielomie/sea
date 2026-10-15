@@ -1100,10 +1100,23 @@ static int vm_run(SeaVM *vm, int base_frame) {
     return vm_run_ex(vm, base_frame, false, false);
 }
 
+/* The dispatch loop's two hottest variables live in fixed callee-saved
+ * registers, so GCC never spills them around the handlers' calls. */
+#if defined(__x86_64__)
+#  define SEA_PIN_REG_BASE __asm__("r13")
+#  define SEA_PIN_REG_IP   __asm__("r14")
+#elif defined(__aarch64__)
+#  define SEA_PIN_REG_BASE __asm__("x19")
+#  define SEA_PIN_REG_IP   __asm__("x20")
+#else
+#  define SEA_PIN_REG_BASE
+#  define SEA_PIN_REG_IP
+#endif
+
 static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
     SeaCallFrame *frame = &vm->frames[vm->frame_count - 1];
-    register SeaValue *base __asm__("r13") = frame->base;
-    register uint32_t *ip __asm__("r14") = frame->ip;
+    register SeaValue *base SEA_PIN_REG_BASE = frame->base;
+    register uint32_t *ip SEA_PIN_REG_IP = frame->ip;
     SeaChunk *chunk = frame->closure->chunk;
 #ifdef SEA_JIT
     uint32_t jit_ret_instr;   /* synthetic RETURN after an OSR run (jit_osr) */
