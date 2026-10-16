@@ -395,7 +395,7 @@ end
 |----------|-----------|-------------|
 | `os.exit` | `exit([code])` | Terminate the process with exit code (default 0) |
 | `os.getenv` | `getenv(name) → string\|nil` | Read an environment variable |
-| `os.exec` | `exec(cmd) → {code=int, output=string}` | Run a shell command; captures stdout+stderr |
+| `os.exec` | `exec(cmd) → {code=int, output=string}` | Run a shell command; captures stdout+stderr (blocks its thread; module `process` runs commands without a shell, with stdin, env, timeouts and streaming) |
 | `os.readfile` | `readfile(path) → string\|nil` | Read entire file contents as a string (module `fs` has the full set: `fs.read` reports why a read failed) |
 | `os.filesize` | `filesize(path) → int\|nil` | File size in bytes, or `nil` if not found |
 | `os.glob` | `glob(dir, suffix) → array` | Sorted array of full paths in `dir` whose names end with `suffix` |
@@ -895,6 +895,66 @@ print(string.join(re.split("\\s*;\\s*", "a ; b;c"), ","))  -- a,b,c
 
 ---
 
+## Module: `process`
+
+Child processes. Pipes are non-blocking and waited on through the netpoller,
+so in a goroutine a wait parks only that goroutine (`os.exec` is the simple
+blocking form). A command is an **array of arguments**, run directly and
+searched in `PATH` (no shell, no quoting problems), or a **string**, run with
+`/bin/sh -c`. Failing to start (`process.run: rg: No such file or directory`)
+is an error value; a command that runs and fails is a result with `ok = false`.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `process.run` | `run(cmd [, opts]) → result\|error` | Run to completion, collecting output. `result`: `code` (exit code, `nil` when killed by a signal), `signal` (the signal number, or `nil`), `ok` (`code == 0`), `stdout`, `stderr`, `timed_out`, `pid` |
+| `process.spawn` | `spawn(cmd [, opts]) → proc\|error` | Start a process and talk to it through its pipes (methods below) |
+| `process.pid` | `pid() → int` | This process's id |
+| `process.kill` | `kill(pid [, sig]) → true\|error` | Send a signal (default `TERM`) |
+| `process.signals` | table | `HUP INT QUIT KILL USR1 USR2 PIPE ALRM TERM CHLD CONT STOP TSTP` → numbers |
+
+**Options** (both functions):
+
+| Key | Description |
+|-----|-------------|
+| `cwd` | Working directory of the child |
+| `env` | Table of variables to set over the current environment; `false` removes one (`{PATH = "/bin", HOME = false}`) |
+| `clear_env` | Start from an empty environment (then `env`) |
+| `stdin` | `run`: a string to feed the child, or `"null"` (default) / `"inherit"`. `spawn`: `"pipe"` (default), `"null"`, `"inherit"` |
+| `stdout`, `stderr` | `"pipe"` (default), `"null"`, `"inherit"` (the parent's); `stderr` also `"stdout"` (merged into stdout) |
+| `timeout` | `run` only: milliseconds; the child is then killed (`SIGKILL`) and the result has `timed_out = true` |
+
+**A spawned process** (`proc`) has `pid` and the pipe fds `stdin`, `stdout`,
+`stderr` (`-1` when not a pipe), and methods:
+
+| Method | Description |
+|--------|-------------|
+| `proc:write(data [, timeout_ms]) → int\|error` | Write all of `data` to its stdin |
+| `proc:close_stdin()` | Close its stdin (most filters then finish) |
+| `proc:read([max [, timeout_ms]]) → string\|error` | Up to `max` bytes (default 65536) of its stdout as they arrive; `""` at the end |
+| `proc:read_stderr([max [, timeout_ms]])` | The same for stderr |
+| `proc:read_line([timeout_ms]) → string\|nil\|error` | The next line of stdout without `\n` (or `\r\n`); `nil` at the end |
+| `proc:wait([timeout_ms]) → status\|error` | Wait for it to exit: `{code, signal, ok}` (the same table on later calls); closes its pipes. A timeout is the error `"timeout"` and the process keeps running |
+| `proc:kill([sig]) → true\|error` | Send a signal (default `TERM`) |
+
+Call `wait` for every spawned process (until then it stays a zombie).
+
+```sea
+local r = process.run({"git", "log", "--oneline", "-3"}, {cwd = repo, timeout = 5000})?
+if r.ok then print(r.stdout) else print("git failed:", r.code, r.stderr) end
+
+local p = process.spawn({"sort"})?
+p:write("pear\napple\nfig\n")
+p:close_stdin()
+local line = p:read_line()
+while line != nil do
+    print(line)
+    line = p:read_line()
+end
+print(p:wait().code)
+```
+
+---
+
 ## Collection Literals
 
 | Syntax | Type | Description |
@@ -1232,7 +1292,8 @@ local http = require("./libs/http/http")
 ```
 
 Built-in modules (`math`, `string`, `utf8`, `re`, `io`, `os`, `fs`, `path`,
-`sync`, `net`, `time`, `gc`, `sort`, `bigint`, `sea/parser`) are found first. An absolute path
+`process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`, `sea/parser`) are
+found first. An absolute path
 (`require("/opt/sea/libs/yaml/yaml")`) names the file itself, tried as
 `.sea`, `/init.sea`, then `.so`. Otherwise the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)

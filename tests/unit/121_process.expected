@@ -1,0 +1,34 @@
+-- run
+0	true	[hello world
+]	[]	false	nil	true
+3	false	out	err
+a b|42
+fed through stdin
+
+true
+bar 42 / 
+[unset]
+ONLY=me
+a b 	[]
+[]	shown
+error(process.run: no-such-command-xyz: No such file or directory)
+error(process.run: an empty command)
+error(process.run: the command must be a string or an array of arguments)
+error(process.run: stdin, stdout and stderr take "pipe", "inherit" or "null" (stderr also "stdout"))
+-- exit status, signals, timeout
+nil	true	false
+true	true	false
+-- large data both ways
+300000	xxx
+200000
+-- spawn
+true	26	true
+line one	line two	partial	nil
+0	true	true	error(process.kill: No such process)
+error(timeout)	true	true
+to-err	to-out		true
+-1	5	got ping	0
+error(process.spawn: no-such-command-xyz: No such file or directory)
+true	true	2	1
+-- goroutines keep running while children are waited on
+1,2,3	true

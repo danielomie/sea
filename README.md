@@ -34,7 +34,7 @@ for i = 1, 6 do print(<-results) end
   goroutines) plus a cycle collector; see [memory](docs/memory.md).
 - **Fast** — NaN-boxed values, computed-goto dispatch, an optimizing compiler,
   and an optional JIT (libgccjit) that speeds hot numeric code up 2–4×.
-- **Batteries** — `math`, `string`, `utf8`, `re`, `io`, `os`, `fs`, `path`, `sync`, `time`, `net`, `sort`, `bigint`, and
+- **Batteries** — `math`, `string`, `utf8`, `re`, `io`, `os`, `fs`, `path`, `process`, `sync`, `time`, `net`, `sort`, `bigint`, and
   `sea/parser` (Sea's own parser: AST, tokens, checks, a formatter); external
   libraries for JSON, YAML, XML, HTTP, TLS, JWT, CLI flags, a terminal UI,
   DuckDB (embedded analytical SQL) and numeric kernels for training models.
