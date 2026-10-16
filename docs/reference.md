@@ -955,6 +955,53 @@ print(p:wait().code)
 
 ---
 
+## Module: `encoding`
+
+Binary-to-text encodings, in C. Decoders accept what other tools write
+(whitespace is skipped; padding is optional) and return an **error value**
+that says where the input went wrong: `encoding.base64_decode: invalid
+character at byte 9`.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `encoding.base64_encode` | `base64_encode(s [, opts]) → string` | RFC 4648. `opts`: `url` (the `-_` alphabet, unpadded unless `pad = true`), `pad` |
+| `encoding.base64_decode` | `base64_decode(s) → string\|error` | Either alphabet, with or without padding |
+| `encoding.base32_encode` | `base32_encode(s [, pad]) → string` | RFC 4648 (`pad` default `true`) |
+| `encoding.base32_decode` | `base32_decode(s) → string\|error` | Case-insensitive; `-` and whitespace skipped |
+| `encoding.hex_encode` | `hex_encode(s [, upper]) → string` | Two hex digits per byte (lowercase by default) |
+| `encoding.hex_decode` | `hex_decode(s) → string\|error` | Either case; whitespace and `:` between bytes skipped |
+| `encoding.url_encode` | `url_encode(s [, opts]) → string` | Percent-encode every byte but `A-Z a-z 0-9 - . _ ~` (a URL component); `opts.plus` (or `true`): spaces as `+`, as in forms |
+| `encoding.url_decode` | `url_decode(s [, opts]) → string\|error` | `%XX` sequences; with `plus`, `+` is a space |
+| `encoding.html_escape` | `html_escape(s) → string` | `& < > " '` as entities |
+
+---
+
+## Module: `hash`
+
+Digests, MACs and checksums, in C (no OpenSSL; `libs/ssl` has TLS and
+public-key crypto). Digests are lowercase hex strings, or the raw bytes with
+`raw = true` (a bool argument or `{raw = true}`).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `hash.md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512` | `sha256(s [, raw]) → string` | The digest of `s` (MD5 and SHA-1 only for compatibility: they are broken for security) |
+| `hash.hmac` | `hmac(alg, key, data [, raw]) → string` | HMAC (RFC 2104) with `alg` one of the names above (`"sha256"`, `"SHA-256"`) |
+| `hash.new` | `new(alg) → hasher` | Incremental: `h:update(s)` (returns `h`, so calls chain), `h:digest([raw])` (the hasher can go on). Fields `algorithm`, `size` (digest bytes) |
+| `hash.crc32` | `crc32(s [, crc]) → int` | CRC-32 (zlib, PNG, gzip); pass the previous value to continue over pieces |
+| `hash.adler32` | `adler32(s [, adler]) → int` | Adler-32 (zlib) |
+| `hash.fnv1a` | `fnv1a(s) → int` | FNV-1a, 32 bits (fast, not cryptographic) |
+| `hash.equal` | `equal(a, b) → bool` | Compare in time that depends only on the lengths: use it to check MACs and tokens |
+
+```sea
+local sig = hash.hmac("sha256", secret, body)
+if not hash.equal(sig, request.headers["x-signature"]) then return error("bad signature") end
+local h = hash.new("sha256")
+for _, chunk in chunks do h:update(chunk) end
+print(h:digest(), encoding.base64_encode(hash.sha256(data, true), {url = true}))
+```
+
+---
+
 ## Collection Literals
 
 | Syntax | Type | Description |
@@ -1291,9 +1338,9 @@ local json = require("./libs/json/json")   -- relative to the requiring file
 local http = require("./libs/http/http")
 ```
 
-Built-in modules (`math`, `string`, `utf8`, `re`, `io`, `os`, `fs`, `path`,
-`process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`, `sea/parser`) are
-found first. An absolute path
+Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
+`os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
+`sea/parser`) are found first. An absolute path
 (`require("/opt/sea/libs/yaml/yaml")`) names the file itself, tried as
 `.sea`, `/init.sea`, then `.so`. Otherwise the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)

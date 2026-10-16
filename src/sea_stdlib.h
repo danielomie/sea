@@ -28,6 +28,7 @@ void sea_lib_utf8_register(SeaVM *vm);
 void sea_lib_fs_register(SeaVM *vm);
 void sea_lib_re_register(SeaVM *vm);
 void sea_lib_process_register(SeaVM *vm);
+void sea_lib_hash_register(SeaVM *vm);
 
 // Internal helper used by stdlib lib files
 void mod_set(SeaVM *vm, SeaTable *mod, const char *name,
