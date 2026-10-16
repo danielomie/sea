@@ -12,6 +12,7 @@ pure-Sea libraries work out of the box.
 | `json` | `libs/json/json` | native `.so` | `make -C libs/json` |
 | `yaml` | `libs/yaml/yaml` | native `.so` | `make -C libs/yaml` |
 | `csv` | `libs/csv/csv` | native `.so` | `make -C libs/csv` |
+| `compress` | `libs/compress/compress` | native `.so` (zlib) | `make -C libs/compress` (needs `zlib1g-dev`) |
 | `xml` | `libs/xml/xml` | native `.so` | `make -C libs/xml` |
 | `console` | `libs/console/console` | native `.so` | `make -C libs/console` |
 | `http` | `libs/http/http` | Sea + native | `make -C libs/http` |
@@ -294,6 +295,40 @@ local n = csv.each("big.csv", function(r)
     if r.age >= 18 then adults = adults + 1 end
 end, {header = true, numbers = true})?
 ```
+
+---
+
+## `compress`
+
+gzip, zlib and raw DEFLATE, on the system's zlib. Build: `make -C
+libs/compress` (needs zlib's headers: `zlib1g-dev` on Debian/Ubuntu).
+
+```sea
+local compress = require("../libs/compress/compress")   -- relative to the requiring file
+
+local gz = compress.gzip(body)               -- e.g. for Content-Encoding: gzip
+local back = compress.gunzip(gz)?
+local _ = compress.gzip_file("access.log", "access.log.gz", {level = 9})?
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `compress.gzip` | `gzip(data [, opts]) → string` | The gzip file format (RFC 1952) |
+| `compress.gunzip` | `gunzip(data [, opts]) → string\|error` | Decompress gzip data; several members back to back (as `cat a.gz b.gz` makes) are joined |
+| `compress.deflate` | `deflate(data [, opts]) → string` | zlib format (RFC 1950) by default; `format = "raw"` (RFC 1951, as in ZIP and HTTP `deflate`) or `"gzip"` |
+| `compress.inflate` | `inflate(data [, opts]) → string\|error` | Decompress; `format = "auto"` (default: zlib or gzip, by the header), `"zlib"`, `"gzip"` or `"raw"` |
+| `compress.gzip_file` | `gzip_file(src, dst [, opts]) → int\|error` | Compress a file into another in 64 KB steps (memory stays flat); the compressed size |
+| `compress.gunzip_file` | `gunzip_file(src, dst [, opts]) → int\|error` | Decompress a file into another; the decompressed size |
+| `compress.version` | `version() → string` | zlib's version |
+
+**Options:** `level` (0-9, default 6; a bare number works too:
+`compress.gzip(data, 9)`), `format` (see above), `max` (the largest output
+allowed when decompressing, default 1 GiB in memory and no limit for files:
+decompressing more is the error `output larger than the limit (opts.max)`,
+a guard against decompression bombs). Damaged data is an error value with
+zlib's reason (`incorrect header check`, `invalid distance too far back`) or
+`truncated compressed data`. CRC-32 and Adler-32 checksums are in the
+built-in `hash` module.
 
 ---
 

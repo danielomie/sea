@@ -25,6 +25,7 @@ docker run --rm --init --platform linux/arm64 -e TEST_TIMEOUT="${TEST_TIMEOUT:-3
     tar xf /src/src.tar
     uname -m
     make -s -j\$(nproc)
-    for l in libs/*/Makefile; do make -s -C \$(dirname \$l) >/dev/null; done
+    # libs with a fetch.sh download their engine (duckdb, sqlite): not needed by the unit tests
+    for l in libs/*/Makefile; do d=\$(dirname \$l); [ -f \$d/fetch.sh ] && continue; make -s -C \$d >/dev/null; done
     for t in ${targets[*]}; do echo \"== \$t\"; make -s \$t; done
 "

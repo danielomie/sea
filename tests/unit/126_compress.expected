@@ -1,0 +1,26 @@
+-- gzip and gunzip
+24000	true	31	139	true
+true	true
+ab	true
+true
+-- deflate and inflate
+true	true	true	true
+true	true
+-- errors
+error(compress.gunzip: incorrect header check)
+error(compress.gunzip: truncated compressed data)
+error(compress.gunzip: unexpected data after the compressed stream)
+error(compress.gunzip: truncated compressed data)
+error(compress.inflate: incorrect header check)
+error(compress.gunzip: output larger than the limit (opts.max))
+error(compress.gzip: level is 0-9 and format "zlib", "raw" or "gzip")
+error(compress.inflate: format is "zlib", "raw", "gzip" or "auto")
+error(compress.gzip: data (string) expected)
+-- files
+true	true	true
+260000	true
+true
+7	one two
+error(compress.gunzip_file: output larger than the limit (opts.max))
+compress.gzip_file: <tmp>/missing: No such file or directory
+error(compress.gunzip_file: incorrect header check)

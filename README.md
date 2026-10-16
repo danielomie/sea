@@ -74,7 +74,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 |----------|----------|
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
-| [Libraries](docs/libs.md) | `json`, `yaml`, `csv`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `test` |
+| [Libraries](docs/libs.md) | `json`, `yaml`, `csv`, `compress`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `test` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |
