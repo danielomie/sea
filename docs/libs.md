@@ -11,6 +11,7 @@ pure-Sea libraries work out of the box.
 |---------|------|------|-------|
 | `json` | `libs/json/json` | native `.so` | `make -C libs/json` |
 | `yaml` | `libs/yaml/yaml` | native `.so` | `make -C libs/yaml` |
+| `csv` | `libs/csv/csv` | native `.so` | `make -C libs/csv` |
 | `xml` | `libs/xml/xml` | native `.so` | `make -C libs/xml` |
 | `console` | `libs/console/console` | native `.so` | `make -C libs/console` |
 | `http` | `libs/http/http` | Sea + native | `make -C libs/http` |
@@ -231,6 +232,65 @@ for _, e in evs do
     if e.type == "scalar" and e.value == "8080" then e.value = "9090" end
 end
 print(yaml.emit(evs))
+```
+
+---
+
+## `csv`
+
+CSV (RFC 4180) in C: decode a string, encode rows, or stream a file of any
+size row by row. Build: `make -C libs/csv`.
+
+```sea
+local csv = require("../libs/csv/csv")   -- relative to the requiring file
+
+for _, r in csv.decode(fs.read("people.csv")?, {header = true, numbers = true})? do
+    print(r.name, r.age + 1)
+end
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `csv.decode` | `decode(s [, opts]) → array\|error` | Every row: arrays of strings, or tables keyed by the header with `header = true` |
+| `csv.encode` | `encode(rows [, opts]) → string\|error` | Rows as CSV text |
+| `csv.each` | `each(path, fn [, opts]) → int\|error` | Read a file in 64 KB chunks and call `fn(row)` for each row (`false` from `fn` stops); returns the number of rows. Memory stays flat however big the file is |
+
+Fields may be quoted with `"`: a quoted field can hold the separator, line
+breaks and `""` for a quote. `\n`, `\r\n` and `\r` end a record; a final
+line break does not make an empty row; a UTF-8 byte-order mark is skipped.
+Failures are error values with the line: `csv.decode: unterminated quoted
+field at line 12`, `csv.decode: line 7 has 4 fields, the header has 3`.
+
+**`decode` / `each` options:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `sep` | `","` | Field separator (one character: `";"`, `"\t"`, ...) |
+| `quote` | `"\""` | Quote character |
+| `header` | `false` | The first row names the columns: rows become tables `{name = value}`, and a row with a different number of fields is an error |
+| `numbers` | `false` | Unquoted fields in decimal syntax become numbers (`ints` within ±2^47, else floats: `31`, `-2.5`, `1e3`); `"42"` (quoted), `007`, `0x10` and empty fields stay strings |
+| `trim` | `false` | Strip spaces and tabs around fields (outside quotes) |
+| `comment` | — | A character that starts a comment line (skipped whole) |
+| `skip_empty` | `true` | Skip blank lines (`false`: they are rows with one empty field) |
+| `strict` | `false` | Reject text after a closing quote, quotes inside unquoted fields, and (without a header) rows whose field count differs from the first row's. Without it, such text is kept as written (like Python's reader) |
+
+**`encode`**: a row is a list (array, or table with keys `0..n-1`), written in
+order, or a record (table, map, struct), written in the order of
+`opts.columns` (default: every key of every record, sorted) under a header
+line (`header = false` leaves it out). Strings, numbers (shortest form that
+reads back exactly), bools and bigints are written; `nil`, NaN and infinities
+as empty fields; other values are an error. A field is quoted when it holds
+the separator, a quote, a line break, or leading or trailing spaces. Options:
+`sep`, `quote`, `columns`, `header`, `crlf` (end lines with `\r\n`, as RFC 4180
+asks; default `\n`), `quote_all`.
+
+```sea
+local out = csv.encode(people, {columns = {"name", "age", "city"}})
+fs.write("people.csv", out)?
+local adults = 0
+local n = csv.each("big.csv", function(r)
+    if r.age >= 18 then adults = adults + 1 end
+end, {header = true, numbers = true})?
 ```
 
 ---

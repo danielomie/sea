@@ -1,0 +1,74 @@
+-- Test: libs/csv (needs make -C libs/csv)
+
+local csv = require("./libs/csv/csv")
+local json = require("./libs/json/json")
+local function show(v)
+    if is_error(v) then return "error: " .. v.message end
+    return json.encode(v, {sort_keys = true})
+end
+
+print("-- decode")
+print(show(csv.decode("a,b,c\n1,2,3\n")))
+print(show(csv.decode("a,b\r\n\"x,y\",\"he said \"\"hi\"\"\"\r\n\"multi\nline\",z")))
+print(show(csv.decode("a,b\rc,d\r")))
+print(show(csv.decode(",,\n\"\",x,\n")))
+print(show(csv.decode("one\n\n\ntwo\n")), show(csv.decode("one\n\ntwo\n", {skip_empty = false})))
+print(show(csv.decode("")), show(csv.decode("\n\n")))
+print(show(csv.decode(string.char(0xEF, 0xBB, 0xBF) .. "bom,ok\n")))
+print(show(csv.decode("a;b;\"c;d\"", {sep = ";"})), show(csv.decode("a\tb", {sep = "\t"})))
+print(show(csv.decode("'a,b',c", {quote = "'"})))
+print(show(csv.decode("# a comment with \"quote\nx,y\n#another\nz,w", {comment = "#"})))
+print(show(csv.decode("  a , b  ,\" c \" ", {trim = true})))
+print(show(csv.decode("x\"y,\"a\"b", {})))
+
+print("-- header and numbers")
+local rows = csv.decode("name,age,score\nana,31,9.5\nbo,,007\n", {header = true, numbers = true})
+print(show(rows))
+print(rows[0].name, rows[0].age + 1, type(rows[0].score), rows[1].age == "", type(rows[1].score))
+print(show(csv.decode("n\n-12\n+3\n1e3\n0x10\n.5\n\"42\"\n", {header = true, numbers = true})))
+print(show(csv.decode("n\n140737488355328\n", {header = true, numbers = true})))
+
+print("-- errors")
+print(show(csv.decode("a,\"b\nc")))
+print(show(csv.decode("a,b\n1,2,3\n", {header = true})))
+print(show(csv.decode("a,b\n1\n", {strict = true})))
+print(show(csv.decode("\"a\"x", {strict = true})))
+print(show(csv.decode("a\"b", {strict = true})))
+print(show(csv.decode("x", {sep = ";;"})))
+print(show(csv.decode(42)))
+
+print("-- encode")
+print(csv.encode({{"a", "b"}, {1, 2.5}, {true, nil}, {"x,y", "he said \"hi\""}, {"multi\nline", " pad "}}))
+local recs = []
+local r1 = {}
+r1.name = "ana"
+r1.age = 31
+local r2 = {}
+r2.name = "bo, jr"
+r2.city = "Rio"
+recs[] = r1
+recs[] = r2
+print(csv.encode(recs))
+print(csv.encode(recs, {columns = {"name", "age"}, header = false}))
+print(show(csv.encode({{1, 2}}, {crlf = true, quote_all = true})), csv.encode({{"a", "b;c"}}, {sep = ";"}))
+print(show(csv.encode({{print}})))
+print(show(csv.encode("x")))
+print(show(csv.encode({5})))
+print(show(csv.decode(csv.encode({{"a\"b", "c\r\nd", ""}, {"", "", ""}}))))
+
+print("-- each")
+local path = fs.tempfile("csv-")
+fs.write(path, "id,text\n1,\"spans\nlines\"\n2,plain\n3,\"x\"\"y\"\n")
+local seen = []
+local n = csv.each(path, function(row)
+    seen[] = row.id .. ":" .. row.text
+end, {header = true, numbers = true})
+print(n, show(seen))
+local count = 0
+print(csv.each(path, function(row)
+    count = count + 1
+    return count < 2
+end), count)
+print(show(csv.each("/nonexistent/file.csv", function(row) end)))
+print(show(csv.each(path, 5)))
+fs.remove(path)

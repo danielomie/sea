@@ -1,0 +1,52 @@
+-- decode
+[["a","b","c"],["1","2","3"]]
+[["a","b"],["x,y","he said \"hi\""],["multi\nline","z"]]
+[["a","b"],["c","d"]]
+[["","",""],["","x",""]]
+[["one"],["two"]]	[["one"],[""],["two"]]
+[]	[]
+[["bom","ok"]]
+[["a","b","c;d"]]	[["a","b"]]
+[["a,b","c"]]
+[["x","y"],["z","w"]]
+[["a","b"," c "]]
+[["x\"y","ab"]]
+-- header and numbers
+[{"age":31,"name":"ana","score":9.5},{"age":"","name":"bo","score":"007"}]
+ana	32	number	true	string
+[{"n":-12},{"n":3},{"n":1000.0},{"n":"0x10"},{"n":0.5},{"n":"42"}]
+[{"n":140737488355328.0}]
+-- errors
+error: csv.decode: unterminated quoted field at line 2
+error: csv.decode: line 2 has 3 fields, the header has 2
+error: csv.decode: line 2 has 1 fields, the first row has 2
+error: csv.decode: unexpected character after a closing quote at line 1
+error: csv.decode: a quote inside an unquoted field at line 1
+error: csv.decode: sep, quote and comment must be one character
+error: csv.decode: string expected
+-- encode
+a,b
+1,2.5
+true,
+"x,y","he said ""hi"""
+"multi
+line"," pad "
+
+age,city,name
+31,,ana
+,Rio,"bo, jr"
+
+ana,31
+"bo, jr",
+
+"\"1\",\"2\"\r\n"	a;"b;c"
+
+error: csv.encode: cannot write a value of type function in a field
+error: csv.encode: an array of rows expected
+error: csv.encode: row 0 is a int, not a list or a record
+[["a\"b","c\r\nd",""],["","",""]]
+-- each
+3	["1:spans\nlines","2:plain","3:x\"y"]
+2	2
+error: csv.each: /nonexistent/file.csv: No such file or directory
+error: csv.each: function expected
