@@ -18,6 +18,7 @@ pure-Sea libraries work out of the box.
 | `ssl` | `libs/ssl/ssl` | Sea + native | `make -C libs/ssl` |
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
 | `flags` | `libs/flags/flags` | pure Sea | — |
+| `test` | `libs/test/test` | pure Sea | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
@@ -987,6 +988,83 @@ flags.parse()
 print(host.value)     -- "localhost" (or whatever was passed)
 print(flags.narg())   -- number of positional args
 ```
+
+---
+
+## `test`
+
+A test framework in pure Sea: groups, hooks, assertions with readable
+differences, skipping, a pretty or TAP report, and an exit status for CI.
+
+```sea
+local t = require("../libs/test/test")   -- relative to the requiring file
+
+t.describe("parser", function()
+    local p = nil
+    t.before_each(function() p = new_parser() end)
+    t.it("reads numbers", function()
+        t.eq(p:parse("42"), 42)
+    end)
+    t.it("rejects junk", function()
+        t.is_error(p:parse("4x2"), "unexpected")
+    end)
+end)
+
+t.main()   -- run, print the report, exit 1 if anything failed
+```
+
+```
+parser
+  ✓ reads numbers
+  ✗ rejects junk
+
+1) parser > rejects junk
+   expected an error value, got 4
+
+1 passed, 1 failed (0.01 s)
+```
+
+**Defining tests:**
+
+| Function | Description |
+|----------|-------------|
+| `t.describe(name, fn)` | A group (groups nest; full names are `group > sub > test`) |
+| `t.it(name, fn)` | A test |
+| `t.skip(name, fn)`, `t.describe_skip(name, fn)` | Defined but not run (reported as skipped) |
+| `t.only(name, fn)` | When any test uses `only`, only those run |
+| `t.todo(name)` | A placeholder, reported as todo |
+| `t.before_each(fn)`, `t.after_each(fn)` | Around every test of the group and its subgroups (outer `before_each` first, inner `after_each` first) |
+| `t.before_all(fn)`, `t.after_all(fn)` | Once around the group's tests (a failing `before_all` fails them) |
+
+**Assertions** (a failing one stops its test; the others go on). Each takes
+an optional last `msg` that prefixes the failure:
+
+| Assertion | Passes when |
+|-----------|-------------|
+| `t.eq(got, want)` | Deep equality: lists element by element, tables, maps and structs by keys and values, `1 == 1.0`; the failure shows where they differ (`at items[2].name`) |
+| `t.ne(got, other)` | Not deeply equal |
+| `t.ok(v)`, `t.no(v)` | `v` is truthy / `nil` or `false` |
+| `t.is_nil(v)`, `t.not_nil(v)` | |
+| `t.near(got, want [, eps])` | Within `eps` (default 1e-9 relative) |
+| `t.gt`, `t.ge`, `t.lt`, `t.le(got, bound)` | The comparison holds |
+| `t.contains(hay, needle)` | A substring, a list element or a record value (deep equality) |
+| `t.matches(s, pattern)` | `s` matches a regular expression (module `re`) |
+| `t.is_error(v [, text])` | `v` is an error value, its message containing `text` |
+| `t.no_error(v)` | `v` is not an error value (returns `v`) |
+| `t.raises(fn [, text])` | `fn` panics (or hits a runtime error), the message containing `text`; returns the message |
+| `t.fail([msg])` | Never |
+
+A runtime error or a panic inside a test (or a hook) is reported as an
+*error*, with its message (`file.sea:12: attempt to index a nil value`).
+
+**Running:** `t.run([opts]) → result` prints the report and returns
+`{passed, failed, skipped, todo, total, ok, failures}` (`failures`: `{name,
+kind, message}`); `t.main([opts])` runs and exits with status 1 when
+something failed. Options: `filter` (run the tests whose full name contains
+it; default: the environment variable `SEA_TEST`), `format` (`"pretty"`,
+`"tap"`, `"quiet"`), `timing` (show times; default `true`). Also `t.equal(a,
+b)` (the deep equality as a bool), `t.show(v)` (a value as readable text) and
+`t.reset()` (forget the tests defined so far).
 
 ---
 

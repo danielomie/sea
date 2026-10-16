@@ -1,0 +1,96 @@
+-- Test: libs/test, the test framework (run on a suite of its own)
+local t = require("./libs/test/test")
+
+local log = []
+t.describe("math", function()
+    t.before_all(function() log[] = "ba" end)
+    t.before_each(function() log[] = "be" end)
+    t.after_each(function() log[] = "ae" end)
+    t.after_all(function() log[] = "aa" end)
+    t.it("adds", function()
+        t.eq(1 + 1, 2)
+        t.eq(1, 1.0)
+        t.ne(1, 2)
+    end)
+    t.it("deep equality reports the path", function()
+        local xa = []
+        xa[] = 1
+        xa[] = 2
+        local xb = []
+        xb[] = 1
+        xb[] = 3
+        local a = {}
+        a.x = xa
+        a.y = "s"
+        local b = {}
+        b.x = xb
+        b.y = "s"
+        t.eq(a, b)
+    end)
+    t.it("raises", function()
+        local m = t.raises(function()
+            local x = nil
+            local _ = x.y
+        end, "nil value")
+        t.contains(m, "index")
+        t.raises(function() panic("custom panic") end, "custom")
+    end)
+    t.describe("nested", function()
+        t.it("near and comparisons", function()
+            t.near(0.1 + 0.2, 0.3)
+            t.gt(3, 2)
+            t.le(2, 2)
+        end)
+        t.it("error values", function()
+            t.is_error(error("boom"), "bo")
+            t.no_error(42)
+        end)
+        t.it("a panic is an error, not a failure", function()
+            panic("boom")
+        end)
+        t.skip("skipped", function() t.fail("never runs") end)
+        t.todo("someday")
+    end)
+end)
+
+t.describe("strings and lists", function()
+    t.it("matches and contains", function()
+        t.matches("abc123", "^[a-z]+\\d+$")
+        t.contains("hello world", "lo w")
+        local l = []
+        l[] = {}
+        t.contains(l, {})
+    end)
+    t.it("a message names the assertion", function() t.ok(false, "custom") end)
+    t.it("is_nil and not_nil", function()
+        t.is_nil(nil)
+        t.not_nil(0)
+        t.no(false)
+        t.is_nil(5)
+    end)
+end)
+
+t.describe_skip("skipped group", function()
+    t.it("not run", function() t.fail("x") end)
+end)
+
+local r = t.run({timing = false})
+print(r.passed, r.failed, r.skipped, r.todo, r.total, r.ok, string.join(log, ","))
+print(r.failures[0].name, r.failures[1].kind)
+
+print("-- tap and filter")
+t.run({format = "tap", timing = false, filter = "nested"})
+
+print("-- only")
+t.reset()
+t.it("a", function() end)
+t.only("b", function() end)
+t.it("c", function() t.fail() end)
+local q = t.run({timing = false, format = "quiet"})
+print(q.passed, q.failed, q.total)
+
+print("-- helpers")
+local s = {}
+s.b = 2
+s.a = "x\n"
+print(t.show(s), t.show(error("e")), t.equal({}, {}), t.equal(1, "1"))

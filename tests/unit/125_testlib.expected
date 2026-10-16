@@ -1,0 +1,48 @@
+math
+  ✓ adds
+  ✗ deep equality reports the path
+  ✓ raises
+  nested
+    ✓ near and comparisons
+    ✓ error values
+    ✗ a panic is an error, not a failure (error)
+    - skipped (skipped)
+    … someday (todo)
+strings and lists
+  ✓ matches and contains
+  ✗ a message names the assertion
+  ✗ is_nil and not_nil
+skipped group
+  - not run (skipped)
+
+1) math > deep equality reports the path
+   not equal
+       at x[1]
+       expected: {x = [1, 3], y = "s"}
+            got: {x = [1, 2], y = "s"}
+
+2) math > nested > a panic is an error, not a failure (error)
+   boom
+
+3) strings and lists > a message names the assertion
+   custom: expected a truthy value, got false
+
+4) strings and lists > is_nil and not_nil
+   expected nil, got 5
+
+5 passed, 4 failed, 2 skipped, 1 todo
+5	4	2	1	12	false	ba,be,ae,be,ae,be,ae,be,ae,be,ae,be,ae,aa
+math > deep equality reports the path	error
+-- tap and filter
+TAP version 13
+1..5
+ok 1 - math > nested > near and comparisons
+ok 2 - math > nested > error values
+not ok 3 - math > nested > a panic is an error, not a failure
+  # boom
+ok 4 - math > nested > skipped # SKIP
+ok 5 - math > nested > someday # TODO
+-- only
+1	0	1
+-- helpers
+{a = "x\n", b = 2}	error("e")	true	false
