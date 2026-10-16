@@ -1,0 +1,240 @@
+-- block and flow collections
+{jobs: {build: {runs-on: '${{ matrix.os }}', steps: [{uses: actions/checkout@v4}, {name: Build, run: "make\nmake test\n"}, {name: Lint, run: folded line}]}}, name: CI, 'on': {pull_request: null, push: {branches: [main, release/*]}}}
+make
+make test
+|
+folded line|
+true	3
+-- scalars (core schema)
+[null, null, null, '', true, false, 12, -3, 4, 15, 31, 1.5, -0.5, 1000.0, .inf, -.inf, .nan, '1_000', 'yes', 'on', '0b11']
+[140737488355327, 140737488355328.0, 1.2345678901234568e+29]
+[140737488355328, 4722366482869645213695]
+bigint
+-- quoted and block scalars
+[it's, "tab\tnew\nline é A 😀", "folded across\nlines", plain multi line, "keep\n\n", "a b\nc\n more\nd\n"]
+-- schemas
+[true, false, true, false, 511, 5, 1000, 685230, '1.5e3', 685230.15]
+[true, 15]
+[null, true, 12, 1.5, '0x1F', 'yes']
+['null', 'true', '12', '']
+error: yaml.decode: unknown schema (use "core", "json", "failsafe" or "1.1")
+-- keys
+{1: a, '1': d, 2.5: b, true: c}
+{'1': a, 'true': c, '~': b}
+error: yaml.decode: a null mapping key is not supported (keys are strings, numbers or bools; quote it or use string_keys) at line 1, column 1
+error: yaml.decode: a sequence mapping key is not supported (keys are strings, numbers or bools) at line 1, column 1
+error: yaml.decode: duplicate mapping key 'a' at line 2, column 1
+{a: 2}
+-- anchors, aliases and merge keys
+{all: {debug: true, host: localhost, name: x, port: 80}, base: {host: localhost, port: 80}, dev: {host: localhost, port: 8080}, extra: {debug: true}, list: [1, 1, 1]}
+localhost	8080	true
+error: yaml.decode: found undefined alias 'y' at line 2, column 4
+error: yaml.decode: a merge key ('<<') needs a mapping or a sequence of mappings at line 1, column 5
+{a: {'<<': {k: 1}}}
+true
+1	true
+-- tags
+['12', 7, 3.0, true, null, hello, '2001-12-14']
+{a: true, b: true}
+error: yaml.decode: invalid value for the tag !!int: 'abc' at line 1, column 1
+error: yaml.decode: the tag !!map cannot be used on a sequence at line 1, column 1
+[{tag: '!point', value: {x: 1, 'y': 2}}, {tag: '!color', value: red}, plain]
+[3, '!color:red', 'tag:example.com,2000:id:7']
+{tag: 'tag:example.com,2000:thing', value: x}
+error: yaml.decode: found undefined tag handle '!undefined!' at line 1, column 1
+-- documents
+[1, [2], {k: v}]
+error: yaml.decode: the input has more than one document (use yaml.decode_all) at line 2, column 1
+true	0	0
+{k: v}
+-- errors
+yaml.decode: mapping values are not allowed here at line 1, column 5
+yaml.decode: found unexpected end of input inside a flow collection at line 1, column 11
+yaml.decode: mapping values are not allowed here at line 2, column 3
+yaml.decode: found a tab character used to indent a block collection (YAML indents with spaces) at line 1, column 2
+yaml.decode: found unexpected end of input in a quoted scalar at line 1, column 4
+yaml.decode: found unknown escape character in a double-quoted scalar at line 1, column 2
+yaml.decode: found content after a document end marker ('...') at line 2, column 5
+yaml.decode: found unexpected end of input inside a flow collection at line 2, column 4
+yaml.decode: found a reserved indicator ('@' or '`') that cannot start a plain scalar at line 1, column 1
+yaml.decode: did not find expected '-' indicator (while parsing a block sequence) at line 3, column 3
+yaml.decode: did not find expected end of document (more content after the root node) at line 1, column 7
+yaml.decode: found a second anchor on the same node at line 1, column 4
+yaml.decode: the tag !!str cannot be used on a sequence at line 1, column 4
+yaml.decode: did not find expected alias name at line 1, column 1
+error: yaml.decode: nesting too deep at line 1, column 4
+true	false	false	true
+error: yaml.decode: string expected
+error: yaml.decode: found a non-printable character (U+0001) at line 1, column 1
+-- encode
+list:
+  - 1
+  - two
+  - 3.5
+'n': 3
+name: sea
+nested:
+  a:
+    b:
+      c: deep
+none: null
+ok: true
+text: |
+  line one
+  line two
+tricky:
+  - 'true'
+  - '123'
+  - 'null'
+  - ''
+  - ' lead'
+  - 'a: b'
+  - '#x'
+  - '- x'
+  - 'y'
+  - '2001-12-14'
+  - it's
+version: 1.0
+
+---
+list:
+    - 1
+    - two
+    - 3.5
+'n': 3
+name: sea
+nested:
+    a:
+        b:
+            c: deep
+none: null
+ok: true
+text: |
+    line one
+    line two
+tricky:
+    - 'true'
+    - '123'
+    - 'null'
+    - ''
+    - ' lead'
+    - 'a: b'
+    - '#x'
+    - '- x'
+    - 'y'
+    - '2001-12-14'
+    - it's
+version: 1.0
+...
+
+{list: [1, two, 3.5], 'n': 3, name: sea, nested: {a: {b: {c: deep}}}, none: null, ok: true, text: "line one\nline two\n", tricky: ['true', '123', 'null', '', ' lead', 'a: b', '#x', '- x', 'y', '2001-12-14', it's], version: 1.0}
+
+true	true	true	1	deep
+null
+	1
+	-0.0
+	1.0e+300
+	0.1
+
+[.inf, -.inf, .nan, 2.5e-08, 1.0e+20]
+[.inf, -.inf, .nan, 2.5e-08, 1.0e+20]
+123456789012345678901234567890
+
+a: []
+b: {}
+1: x
+2.5: 'y'
+true: z
+x: 1
+yaml.encode: cannot encode a value of type function
+!!binary /wABAg==	true
+|-
+  multi
+  line
+
+|2+
+    indented
+  first line
+
+
+k: |+
+  keep
+
+
+
+"tab\there \a bell"
+-- anchors in encode
+a:
+  k: 1
+b:
+  k: 1
+
+a: &id001
+  k: 1
+b: *id001
+
+yaml.encode: cycle detected (a value contains itself; use anchors = true)
+&id001
+name: loop
+self: *id001
+
+loop	true
+-- encode_all
+a: 1
+---
+- 1
+- 2
+--- s
+--- 3
+
+yaml.encode_all: an array of documents expected
+-- events and emit
+stream_start 1:1
+document_start 1:1 implicit=false version=1.2
+mapping_start 2:5 tag=!doc style=block
+scalar 3:1 style=plain value=name
+scalar 3:7 anchor=n style=double value=sea
+scalar 4:1 style=plain value=alias
+alias 4:8 alias=n
+scalar 5:1 style=plain value=text
+scalar 5:7 style=folded value=folded text\n
+scalar 8:1 style=plain value=list
+sequence_start 8:7 style=flow
+scalar 8:8 style=plain value=a
+scalar 8:11 style=single value=b
+mapping_start 8:16 style=flow
+scalar 8:17 style=plain value=c
+scalar 8:20 style=plain value=d
+mapping_end 8:21
+sequence_end 8:22
+mapping_end 9:1
+document_end 9:1 implicit=false
+stream_end 10:1
+%YAML 1.2
+--- !doc
+name: &n "sea"
+alias: *n
+text: >
+  folded text
+list: [a, 'b', {c: d}]
+...
+
+%YAML 1.2
+--- !doc {name: &n "sea", alias: *n, text: "folded text\n", list: [a, 'b', {c: d}]}
+...
+
+id: 007
+id2: '007'
+tags: [&a1 !t x, *a1]
+
+yaml.emit: an end event that does not match the open collection (event 2)
+yaml.emit: the events end inside a document (event 2)
+yaml.events: found unexpected end of input inside a flow collection at line 1, column 6
+-- round trip through events
+false
+a: &x [1, 'two', "three"]
+b: *x
+c: |
+  text
+[complex]: key
+

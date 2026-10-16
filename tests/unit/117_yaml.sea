@@ -1,0 +1,224 @@
+-- Test: libs/yaml (needs make -C libs/yaml)
+-- Decoding (block and flow styles, scalars, schemas, anchors, merge keys,
+-- tags, options), errors with positions, encoding (styles chosen so values
+-- read back the same, anchors, options), events and emit.
+
+local yaml = require("./libs/yaml/yaml")
+
+local function show(v)
+    if is_error(v) then
+        print("error: " .. v.message)
+    else
+        print(string.trim(yaml.encode(v, {sort_keys = true, flow = true})))
+    end
+end
+
+print("-- block and flow collections")
+local cfg = [[
+# a workflow file
+name: CI
+on:
+  push:
+    branches: [main, 'release/*']
+  pull_request:
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          make
+          make test
+      -   name: Lint
+          run: >-
+            folded
+            line
+]]
+local c = yaml.decode(cfg)
+show(c)
+print(c.jobs.build.steps[1].run .. "|")
+print(c.jobs.build.steps[2].run .. "|")
+print(c.on.pull_request == nil, len(c.jobs.build.steps))
+
+print("-- scalars (core schema)")
+show(yaml.decode("[~, null, Null, '', true, False, 12, -3, +4, 0o17, 0x1F, 1.5, -.5, 1e3, .inf, -.Inf, .nan, 1_000, yes, on, 0b11]"))
+show(yaml.decode("[140737488355327, 140737488355328, 123456789012345678901234567890]"))
+show(yaml.decode("[140737488355328, 0xFFFFFFFFFFFFFFFFFF]", {bigint = true}))
+print(type(yaml.decode("140737488355328", {bigint = true})))
+
+print("-- quoted and block scalars")
+show(yaml.decode([==[
+- 'it''s'
+- "tab\tnew\nline \u00e9 \x41 \U0001F600"
+- "folded
+  across
+
+  lines"
+- plain
+  multi line
+- |+
+  keep
+
+- >
+  a
+  b
+
+  c
+   more
+  d
+]==]))
+
+print("-- schemas")
+show(yaml.decode("[yes, No, on, OFF, 0777, 0b101, 1_000, 190:20:30, 1.5e3, 6.8523015e+5]", {schema = "1.1"}))
+show(yaml.decode("%YAML 1.1\n---\n[yes, 017]"))
+show(yaml.decode("[null, true, 12, 1.5, 0x1F, yes]", {schema = "json"}))
+show(yaml.decode("[null, true, 12, '']", {schema = "failsafe"}))
+show(yaml.decode("x", {schema = "nope"}))
+
+print("-- keys")
+show(yaml.decode("1: a\n2.5: b\ntrue: c\n'1': d"))
+show(yaml.decode("1: a\n~: b\ntrue: c", {string_keys = true}))
+show(yaml.decode("~: b"))
+show(yaml.decode("[a]: b"))
+show(yaml.decode("a: 1\na: 2"))
+show(yaml.decode("a: 1\na: 2", {duplicate_keys = true}))
+
+print("-- anchors, aliases and merge keys")
+local m = yaml.decode([[
+base: &base
+  host: localhost
+  port: 80
+extra: &extra {debug: true}
+dev:
+  <<: *base
+  port: 8080
+all:
+  <<: [*extra, *base]
+  name: x
+list: [&v 1, *v, *v]
+]])
+show(m)
+print(m.dev.host, m.dev.port, m.all.debug)
+show(yaml.decode("a: &x 1\nb: *y"))
+show(yaml.decode("<<: 5"))
+show(yaml.decode("a: {<<: {k: 1}}", {merge = false}))
+local same = yaml.decode("a: &s [1]\nb: *s")
+print(same.a == same.b)
+local r = yaml.decode("&r {self: *r, n: 1}")
+print(r.self.self.n, r.self == r)
+
+print("-- tags")
+show(yaml.decode("[!!str 12, !!int '7', !!float 3, !!bool 'true', !!null '', !!binary aGVsbG8=, !!timestamp 2001-12-14]"))
+show(yaml.decode("!!set {a, b}"))
+show(yaml.decode("!!int abc"))
+show(yaml.decode("!!map [a]"))
+show(yaml.decode("- !point {x: 1, y: 2}\n- !color red\n- plain", {tagged = true}))
+local handlers = {}
+handlers["!point"] = function(v, tag) return v.x + v.y end
+handlers["*"] = function(v, tag) return tag .. ":" .. tostring(v) end
+show(yaml.decode("- !point {x: 1, y: 2}\n- !color red\n- !<tag:example.com,2000:id> 7", {tags = handlers}))
+show(yaml.decode("%TAG !e! tag:example.com,2000:\n---\n!e!thing x", {tagged = true}))
+show(yaml.decode("!undefined!x 1"))
+
+print("-- documents")
+show(yaml.decode_all("--- 1\n--- [2]\n...\n---\nk: v\n"))
+show(yaml.decode("--- a\n--- b"))
+print(yaml.decode("") == nil, len(yaml.decode_all("")), len(yaml.decode_all("# only a comment\n")))
+show(yaml.decode(string.char(0xEF, 0xBB, 0xBF) .. "k: v"))           -- byte-order mark
+
+print("-- errors")
+local bad = {"a: b: c", "key: [1, 2", "- a\n b: c", "\tk: v", "a: 'x", "\"\\q\"", "k: v # c\n... x",
+             "- [a\n- b", "@x", "a:\n  - b\n  c: d", "{a: 1}}", "&a &b x", "x: !!str\n  - a", "* x"}
+for i = 0, len(bad) - 1 do print(yaml.decode(bad[i]).message) end
+show(yaml.decode("[[[[1]]]]", {max_depth = 3}))
+print(yaml.valid("a: [1, 2]"), yaml.valid("a: [1"), yaml.valid("*nope"), yaml.valid("--- 1\n--- 2"))
+show(yaml.decode(42))
+show(yaml.decode("\x01"))
+
+print("-- encode")
+local data = {name = "sea", version = 1.0, n = 3, ok = true, none = nil,
+              list = {1, "two", 3.5}, nested = {a = {b = {c = "deep"}}},
+              text = "line one\nline two\n", tricky = {"true", "123", "null", "", " lead", "a: b", "#x", "- x", "y", "2001-12-14", "it's"}}
+print(yaml.encode(data, {sort_keys = true}))
+print(yaml.encode(data, {sort_keys = true, indent = 4, explicit_start = true, explicit_end = true}))
+print(yaml.encode(data, {sort_keys = true, flow = true}))
+local back = yaml.decode(yaml.encode(data))
+print(back.tricky[0] == "true", back.tricky[3] == "", back.text == data.text, back.version, back.nested.a.b.c)
+print(yaml.encode(nil), yaml.encode(1), yaml.encode(-0.0), yaml.encode(1e300), yaml.encode(0.1))
+local floats = {1 / 0, -1 / 0, 0 / 0, 2.5e-8, 1e20}
+print(string.trim(yaml.encode(floats, {flow = true})))
+show(yaml.decode(yaml.encode(floats)))
+print(yaml.encode(bigint.new("123456789012345678901234567890")))
+local empty = []
+print(string.trim(yaml.encode({a = empty, b = {}}, {sort_keys = true})))
+print(string.trim(yaml.encode({[1] = "x", [2.5] = "y", [true] = "z"}, {sort_keys = true})))
+print(string.trim(yaml.encode({f = print, x = 1})))
+print(yaml.encode(print).message)
+local bin = string.char(255, 0, 1, 2)
+print(string.trim(yaml.encode(bin)), yaml.decode(yaml.encode(bin)) == bin)
+print(yaml.encode("multi\nline"))
+print(yaml.encode("  indented\nfirst line\n\n"))
+print(yaml.encode({k = "keep\n\n\n"}))
+print(string.trim(yaml.encode("tab\there " .. string.char(7) .. " bell")))
+
+print("-- anchors in encode")
+local shared = {k = 1}
+print(yaml.encode({a = shared, b = shared}, {sort_keys = true}))
+print(yaml.encode({a = shared, b = shared}, {sort_keys = true, anchors = true}))
+local cyc = {}
+cyc.name = "loop"
+cyc.self = cyc
+print(yaml.encode(cyc).message)
+local enc = yaml.encode(cyc, {anchors = true, sort_keys = true})
+print(enc)
+local dec = yaml.decode(enc)
+print(dec.self.self.name, dec.self == dec)
+cyc.self = nil
+
+print("-- encode_all")
+print(yaml.encode_all({{a = 1}, {1, 2}, "s", 3}))
+print(yaml.encode_all(5).message)
+
+print("-- events and emit")
+local src = [[
+%YAML 1.2
+--- !doc
+name: &n "sea"
+alias: *n
+text: >
+  folded
+  text
+list: [a, 'b', {c: d}]
+...
+]]
+local evs = yaml.events(src)
+for _, e in evs do
+    local s = e.type .. " " .. tostring(e.line) .. ":" .. tostring(e.column)
+    local fields = {"anchor", "alias", "tag", "style", "value", "implicit", "version"}
+    for i = 0, len(fields) - 1 do
+        local k = fields[i]
+        if e[k] != nil then s = s .. " " .. k .. "=" .. string.replace(tostring(e[k]), "\n", "\\n") end
+    end
+    print(s)
+end
+print(yaml.emit(evs))
+print(yaml.emit(evs, {flow = true}))
+print(yaml.emit({
+    {type = "document_start"},
+    {type = "mapping_start"},
+    {type = "scalar", value = "id"}, {type = "scalar", value = "007", style = "plain"},
+    {type = "scalar", value = "id2"}, {type = "scalar", value = "007"},
+    {type = "scalar", value = "tags"}, {type = "sequence_start", style = "flow"},
+    {type = "scalar", value = "x", tag = "!t", anchor = "a1"}, {type = "alias", alias = "a1"},
+    {type = "sequence_end"},
+    {type = "mapping_end"},
+    {type = "document_end"}}))
+print(yaml.emit({{type = "document_start"}, {type = "mapping_end"}}).message)
+print(yaml.emit({{type = "document_start"}, {type = "scalar", value = "x"}}).message)
+print(yaml.events("a: [1").message)
+
+print("-- round trip through events")
+local doc = "a: &x [1, 'two', \"three\"]\nb: *x\nc: |\n  text\n? [complex]\n: key\n"
+print(yaml.emit(yaml.events(doc)) == doc)
+print(yaml.emit(yaml.events(doc)))

@@ -10,6 +10,7 @@ pure-Sea libraries work out of the box.
 | Library | Path | Kind | Build |
 |---------|------|------|-------|
 | `json` | `libs/json/json` | native `.so` | `make -C libs/json` |
+| `yaml` | `libs/yaml/yaml` | native `.so` | `make -C libs/yaml` |
 | `xml` | `libs/xml/xml` | native `.so` | `make -C libs/xml` |
 | `console` | `libs/console/console` | native `.so` | `make -C libs/console` |
 | `http` | `libs/http/http` | Sea + native | `make -C libs/http` |
@@ -96,6 +97,139 @@ raw control characters or unknown escapes in strings, and data after the value
 are rejected. A UTF-8 byte-order mark at the start is skipped. Object keys are
 shared: one string per distinct key per document, and the program's own
 constant when it has one, so `obj.name` lookups compare pointers.
+
+---
+
+## `yaml`
+
+YAML 1.2 in C: a complete reader (block and flow styles, every scalar style,
+anchors and aliases, tags and `%TAG` directives, multiple documents, merge
+keys), an encoder, and a low-level event API to read or write YAML with its
+styles, tags and anchors kept. Conformance: every case of the official
+[yaml-test-suite](https://github.com/yaml/yaml-test-suite) passes (events and
+errors). Build: `make -C libs/yaml`.
+
+```sea
+local yaml = require("../libs/yaml/yaml")   -- relative to the requiring file
+
+local cfg = yaml.decode(os.readfile("config.yaml"))?
+print(cfg.server.port)
+print(yaml.encode(cfg, {sort_keys = true}))
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `yaml.decode` | `decode(s [, opts]) → value\|error` | Parse a stream holding one document (none: `nil`; more than one: an error) |
+| `yaml.decode_all` | `decode_all(s [, opts]) → array\|error` | Parse every document of a stream |
+| `yaml.valid` | `valid(s) → bool` | Check syntax, anchors and aliases without building values |
+| `yaml.encode` | `encode(v [, opts]) → string\|error` | Serialize a Sea value as one document |
+| `yaml.encode_all` | `encode_all(docs [, opts]) → string\|error` | Serialize an array of values as a stream of documents (`---` between them) |
+| `yaml.events` | `events(s) → array\|error` | The parser's events, as tables |
+| `yaml.emit` | `emit(events [, opts]) → string\|error` | Write a stream from events (the inverse of `events`) |
+
+Failures are **error values** with the position: `yaml.decode: mapping values
+are not allowed here at line 3, column 9`, `yaml.decode: duplicate mapping key
+'port' at line 7, column 3`, `yaml.decode: found undefined alias 'base' at
+line 2, column 8`. Input must be UTF-8 (a byte-order mark is skipped);
+non-printable characters are rejected. A tag handler that panics stops
+the decode, and the panic goes on.
+
+**`decode` / `decode_all` options:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `schema` | `"core"` | How plain scalars resolve: `"core"` (YAML 1.2), `"json"` (only JSON's literals; anything else is a string), `"failsafe"` (every scalar is a string) or `"1.1"` (YAML 1.1 as PyYAML reads it: `yes`/`no`/`on`/`off`, `0777` octal, `0b1010`, `1_000`, `190:20:30`). A document starting with `%YAML 1.1` uses `"1.1"` unless a schema is given |
+| `bigint` | `false` | Integers beyond Sea's int range (±2^47) become exact `bigint`s instead of numbers |
+| `string_keys` | `false` | Mapping keys stay strings as written (`1: a` → key `"1"`, `~: b` → key `"~"`) |
+| `duplicate_keys` | `false` | Allow a key twice in a mapping (the last wins) instead of an error |
+| `merge` | `true` | Merge keys: `<<: *base` or `<<: [*a, *b]` copy the keys the mapping does not set itself (earlier sources win) |
+| `tags` | — | Handlers for custom tags: a table `{["!point"] = function(value, tag) ... end}`; `["*"]` catches any other. The handler's result replaces the value (an error value it returns stays in the data) |
+| `tagged` | `false` | Without a handler, a value with a custom tag becomes `{tag = "!point", value = ...}` (by default the tag is dropped) |
+| `max_depth` | `512` | Deepest nesting allowed (at most 10000) |
+
+**Type mapping — decode** (core schema):
+
+| YAML | Sea value |
+|------|-----------|
+| `null`, `Null`, `NULL`, `~`, empty | `nil` |
+| `true`/`True`/`TRUE`, `false`/… | `bool` |
+| `12`, `-3`, `0o17`, `0x1F` within ±2^47 | `int` (larger: `number`, or `bigint` with `bigint = true`) |
+| `1.5`, `1e3`, `.inf`, `-.inf`, `.nan` | `number` |
+| any other plain scalar, quoted or block scalar | `string` |
+| sequence | `array` (**0-indexed**) |
+| mapping | table; keys are strings, ints, numbers or bools as resolved. A `null` or collection key is an error (use `string_keys` for the first; `yaml.events` reads anything) |
+| `&a` / `*a` | the same Sea object: `a: &x [1]` and `b: *x` share one array. A recursive structure (`&r [*r]`) is a cycle the cycle collector frees |
+
+Standard tags: `!!str`, `!!int`, `!!float`, `!!bool`, `!!null` convert the
+scalar (an invalid value is an error: `!!int abc`); `!!binary` decodes base64
+into a string of bytes; `!!timestamp` stays a string; `!!set` (`? a`) gives
+a table with `true` values; `!!seq`, `!!map`, `!!omap`, `!!pairs` keep the
+collection as is. The non-specific `!` makes a string. Every other tag goes to
+`tags`/`tagged` (or is dropped). Integer keys and string keys are distinct:
+`1: a` and `"1": b` are two keys.
+
+**`encode` / `encode_all` options:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `indent` | `2` | Spaces per level (1 to 9). Sequences inside mappings are indented |
+| `sort_keys` | `false` | Sort mapping keys (byte order of their text). Tables, maps and structs have no key order of their own, so use this for stable output |
+| `flow` | `false` | Write everything in flow style on one line (`{a: [1, 2]}`) |
+| `anchors` | `false` | A table or array reached more than once is written once with `&id001` and then as `*id001`; this also encodes cycles (otherwise an error) |
+| `explicit_start` | `false` | Start each document with `---` |
+| `explicit_end` | `false` | End each document with `...` |
+| `max_depth` | `512` | Deepest nesting allowed |
+
+**Type mapping — encode:**
+
+| Sea value | YAML |
+|-----------|------|
+| `nil` | `null` |
+| `bool` | `true` / `false` |
+| `int`, `bigint` | integer (every digit) |
+| `number` | shortest form that reads back exactly; integral values keep `.0` (`3.0`), exponents get a dot (`1.0e+20`, as YAML 1.1 needs); `.inf`, `-.inf`, `.nan` |
+| `string` | plain when that reads back as the same string under the core schema and YAML 1.1 (`'true'`, `'123'`, `'yes'`, `'2001-12-14'`, `''` are quoted); multi-line text as a literal block (`|`, with `-`/`+` chomping and an indentation indicator when needed); otherwise single- or double-quoted with escapes. Bytes that are not UTF-8 become `!!binary` (base64) |
+| `array`, `int_array`, `float_array`, table with keys `0..n-1` | sequence (empty: `[]`) |
+| other table, map `[=]`, struct | mapping (empty: `{}`); string, int, number, bool and bigint keys; other keys are skipped |
+| function, channel, error, goroutine | left out of mappings, `null` in sequences, an error at the top level |
+
+Output is never wrapped. Decoding what `encode` writes gives the same value
+back, and other YAML readers (PyYAML, libyaml) read it the same way.
+
+**Events.** `yaml.events(s)` returns one table per event, in order:
+`stream_start`, `document_start`, `mapping_start` … `mapping_end`,
+`sequence_start` … `sequence_end`, `scalar`, `alias`, `document_end`,
+`stream_end`. Each has `type`, `line` and `column` (1-based, where the node
+starts), and as they apply:
+
+| Field | Events | Meaning |
+|-------|--------|---------|
+| `value` | scalar | The text after escapes, folding and chomping |
+| `style` | scalar | `"plain"`, `"single"`, `"double"`, `"literal"`, `"folded"` |
+| `style` | mapping/sequence start | `"block"` or `"flow"` |
+| `anchor` | scalar, mapping/sequence start | `&name` |
+| `alias` | alias | `*name` |
+| `tag` | scalar, mapping/sequence start | The resolved tag: `tag:yaml.org,2002:str` for `!!str`, `!local`, `!` |
+| `implicit` | document start/end | `false` when written with `---` / `...` |
+| `version`, `tags` | document start | `%YAML` version (`"1.2"`) and `%TAG` directives (`{["!e!"] = "tag:example.com,2000:"}`) |
+
+`yaml.emit(events [, opts])` writes events back (the `stream_*` events are
+optional; `implicit`, `version` and `tags` are honoured). Styles are kept
+where they are valid for the value and the place (a plain scalar that would
+not parse is quoted, a block scalar inside a flow collection becomes double
+quoted); a scalar without a `style` is quoted when its text would read as
+something other than a string. Options: `indent`, `flow`. Comments are not
+events, so `events` → `emit` drops them; everything else (key order, styles,
+tags, anchors) survives.
+
+```sea
+-- rewrite a file keeping its order and styles, changing one value
+local evs = yaml.events(src)?
+for _, e in evs do
+    if e.type == "scalar" and e.value == "8080" then e.value = "9090" end
+end
+print(yaml.emit(evs))
+```
 
 ---
 
