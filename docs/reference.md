@@ -1115,8 +1115,10 @@ local json = require("./libs/json/json")   -- relative to the requiring file
 local http = require("./libs/http/http")
 ```
 
-Built-in modules (`math`, `string`, `io`, `os`, `sync`, `net`, `time`, `gc`,
-`sort`, `bigint`, `sea/parser`) are found first. Then the search order is:
+Built-in modules (`math`, `string`, `utf8`, `io`, `os`, `sync`, `net`, `time`,
+`gc`, `sort`, `bigint`, `sea/parser`) are found first. An absolute path
+(`require("/opt/sea/libs/yaml/yaml")`) names the file itself, tried as
+`.sea`, `/init.sea`, then `.so`. Otherwise the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)
 2. Current working directory + path
 3. Each directory in `SEA_PATH` (colon-separated environment variable)

@@ -24,3 +24,11 @@ print(c2.get())            -- 3  (same module instance)
 -- Built-in module require still works
 local math_mod = require("math")
 print(math_mod.abs(-99))   -- 99
+
+-- An absolute path names the module file itself (no search)
+local dir = string.trim(os.exec("mktemp -d").output)
+local f = io.open(dir .. "/absmod.sea", "w")
+io.write_string(f, "return {name = \"absolute\"}\n")
+io.close(f)
+print(require(dir .. "/absmod").name)        -- absolute
+local _ = os.exec("rm -rf " .. dir)

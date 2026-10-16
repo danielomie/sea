@@ -195,12 +195,15 @@ static SeaValue fn_recover(SeaVM *vm, int argc, SeaValue *args) {
 #define REQUIRE_SOURCE  1   /* .sea source file */
 #define REQUIRE_NATIVE  2   /* .so / .dylib native library */
 
-/* Try dir/name.sea then dir/name/init.sea; write found path into out. */
+/* Try dir/name.sea then dir/name/init.sea; write found path into out.
+ * dir NULL: name is a path of its own (an absolute one). */
 static int require_try_dir(const char *dir, const char *name,
                             char *out, size_t outsz) {
-    snprintf(out, outsz, "%s/%s.sea", dir, name);
+    const char *sep = dir ? "/" : "";
+    if (!dir) dir = "";
+    snprintf(out, outsz, "%s%s%s.sea", dir, sep, name);
     if (access(out, R_OK) == 0) return REQUIRE_SOURCE;
-    snprintf(out, outsz, "%s/%s/init.sea", dir, name);
+    snprintf(out, outsz, "%s%s%s/init.sea", dir, sep, name);
     if (access(out, R_OK) == 0) return REQUIRE_SOURCE;
     return REQUIRE_NONE;
 }
@@ -208,11 +211,13 @@ static int require_try_dir(const char *dir, const char *name,
 /* Try dir/name.so (or .dylib on macOS). */
 static int require_try_native(const char *dir, const char *name,
                                char *out, size_t outsz) {
+    const char *sep = dir ? "/" : "";
+    if (!dir) dir = "";
 #if defined(__APPLE__)
-    snprintf(out, outsz, "%s/%s.dylib", dir, name);
+    snprintf(out, outsz, "%s%s%s.dylib", dir, sep, name);
     if (access(out, R_OK) == 0) return REQUIRE_NATIVE;
 #endif
-    snprintf(out, outsz, "%s/%s.so", dir, name);
+    snprintf(out, outsz, "%s%s%s.so", dir, sep, name);
     if (access(out, R_OK) == 0) return REQUIRE_NATIVE;
     return REQUIRE_NONE;
 }
@@ -242,7 +247,11 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     if (!found) found = require_try_native((dir_), name, path, sizeof(path)); \
 } while (0)
 
-    if (!found && vm->source_name) {
+    /* An absolute path names the file itself: no search */
+    bool absolute = name[0] == '/';
+    if (absolute) TRY_DIR(NULL);
+
+    if (!found && !absolute && vm->source_name) {
         char dir[PATH_MAX];
         strncpy(dir, vm->source_name, sizeof(dir) - 1);
         dir[sizeof(dir) - 1] = '\0';
@@ -251,9 +260,9 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
         TRY_DIR(dir);
     }
 
-    if (!found) TRY_DIR(".");
+    if (!found && !absolute) TRY_DIR(".");
 
-    if (!found) {
+    if (!found && !absolute) {
         const char *sea_path = getenv("SEA_PATH");
         if (sea_path) {
             char buf[4096];
