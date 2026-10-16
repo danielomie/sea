@@ -8,3 +8,8 @@
 3
 0
 10	3
+a:2	2	b
+a:0	0	nil
+a:2	2	table
+x	y	z
+true	p

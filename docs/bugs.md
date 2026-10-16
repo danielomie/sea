@@ -325,6 +325,35 @@ Corrigidos no caminho:
 
 **Teste:** `tests/unit/105_ownership.sea`.
 
+## Bug 17: uma função com varargs que chamava outra perdia os varargs **(FIXED 2026-10)**
+
+```sea
+local function inner(a, ...)
+    local t = {...}
+    print(a)
+end
+local function outer(x, ...)
+    inner(x, ...)
+end
+outer(1, 2, 3)
+outer(1)   -- "attempt to call a object value": `print` tinha sido liberado
+```
+
+**Causa:** os varargs de um frame ficavam logo acima dos seus registradores
+(`base[max_stack..]`). Só que, quando a função chama outra, o frame do callee
+começa em `R[a+1]` e cresce para cima, passando exatamente por essa área: os
+registradores do callee sobrescreviam os varargs do chamador. No exemplo, o
+`print` carregado por `inner` caiu no slot de `varargs[0]` de `outer`, e o
+`RETURN` de `outer` "liberou o vararg", tirando uma referência do closure do
+`print` a cada chamada até ele ser liberado. Com valores comuns, um `{...}`
+feito depois de uma chamada lia lixo. O ASAN acusa como heap-use-after-free.
+
+**Correção:** os varargs passam a ter um bloco próprio no heap
+(`varargs_new`), liberado em `release_varargs`. Nenhum frame alcança esse
+bloco. **Teste de regressão:** fim de `tests/unit/11_varargs.sea`.
+
+Encontrado ao escrever o wrapper da lib duckdb, que repassa `...`.
+
 ## Coletor de ciclos e correções encontradas no caminho **(2026-10)**
 
 Ciclos de referência (`a.peer = b; b.peer = a`, uma closure guardada na tabela que ela captura, anéis, listas duplamente ligadas) não eram liberados pelo refcount. Agora há um coletor de ciclos (`src/sea_gc.c`, [memory.md](memory.md#cycles)), com `gc.collect()` e `gc.stats()`. Os probes de ciclos caíram de 480 e 3.736 bytes por iteração para 0.

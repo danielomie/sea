@@ -1,0 +1,98 @@
+v
+create	0
+insert	3
+multi	2
+1	ana	30	9.5
+2	bia	25	nil
+3	caio	41	7.25
+row	{age=41, name="caio"}
+no row	nil	nil
+value	30	32
+empty	0
+positional	ana
+table	bia
+$1	b-a
+named	caio
+types	{b=true, f=2.5, i=7, n=nil, s="x"}
+list param	2	blue
+struct param	{a=1, b="two"}
+map param	map("k":5)
+duckdb.value: expected 2 parameters, got 1
+duckdb.value: unknown parameter $y
+duckdb.value: parameter 1: cannot pass a function to DuckDB
+insert params	1
+arr	[1.5, 2.5]
+b	true
+bc	"0057-03-15 00:00:00 (BC)"
+big	9.007199254741e+15
+bigdec	123456789012.34
+bits	"101101"
+bl	1	170
+d	3.14159
+dec	12.345
+dinf	"infinity"
+dt	"2024-02-29"
+edge	140737488355327
+fl	1.5
+hi	1.7014118346047e+38
+hs	-5
+i	2147483647
+iv	{days=3, micros=14400000000, months=14}
+l	[1, 2, nil]
+ll	[[1], [2, 3]]
+mp	map("x":1, "y":2)
+nul	nil
+s	"olá"
+si	32767
+st	{a=1, b=[true]}
+ti	127
+tinf	"infinity"
+tm	"13:45:07.25"
+tms	"2024-01-02 03:04:05.5"
+tns	"2024-01-02 03:04:05.123456789"
+ts	"2024-01-02 03:04:05.123456"
+ts0	"2024-01-02 03:04:05"
+tss	"2024-01-02 03:04:05"
+u	"550e8400-e29b-41d4-a716-446655440000"
+ub	1.844674407371e+19
+ut	255
+enum	happy	["ok", "sad"]
+union	2
+tz	2024-01-02 03:04:05+00
+duckdb.value: column "CAST(1 AS "VARIANT")" has type VARIANT, which Sea cannot hold yet; cast it in SQL (for example CAST(1 AS "VARIANT")::VARCHAR)
+columns	["id", "name", "age", "score"]	["INTEGER", "VARCHAR", "INTEGER", "DOUBLE"]	4
+int col	int_array	1	4
+float col	array	[9.5, nil, 7.25, 8]
+text col	array	bia
+float_array	float_array	4
+each	4	ana,bia,caio,duda
+each stop	1	1
+params	["1"]
+stmt	[{name="bia"}, {name="ana"}, {name="caio"}]	[{name="caio"}]
+stmt value	caio
+named params	["a", "b"]	3
+duckdb.query: expected 1 parameter, got 0
+duckdb.prepare: Parser Error: syntax error at or near "SELEC"
+duckdb.query: the connection or statement is closed
+append	1
+append named	1
+append_rows	1000
+duckdb.append: the table has 4 columns, the row 2 values
+duckdb.append: the table has no column "nope"
+close	true
+count	1002	{kind="misc", tags=nil}
+tags	["red", "blue"]
+duckdb.appender: Table ".main.missing" could not be found
+commit	moved	30
+rollback	duckdb.exec: Catalog Error: Table with name nope does not exist!	100
+panic	boom	2
+goroutines	199999000000
+same connection	200000
+callback query	ana:1 bia:1
+reopen	1
+duckdb.exec: Invalid Input Error: Cannot execute statement of type "INSERT" on database "sea_duckdb_test" which is attached in read-only mode!
+duckdb.open: IO Error: Could not read from file "/tmp": Is a directory
+duckdb.open: unknown option or invalid value: threads = lots
+duckdb.query: the connection or statement is closed
+duckdb.query: the connection or statement is closed
+close twice	false

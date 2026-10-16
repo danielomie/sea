@@ -633,6 +633,13 @@ SEA_INLINE void *sea_arena_alloc(SeaVM *vm, size_t size) {
 
 /* ---- M:N goroutine helpers (Fase 4) --------------------------------------- */
 
+/* Varargs get a block of their own (see release_varargs). */
+static inline SeaValue *varargs_new(const SeaValue *src, int n) {
+    SeaValue *v = SEA_ALLOC_N(SeaValue, (size_t)n);
+    memcpy(v, src, (size_t)n * sizeof(SeaValue));
+    return v;
+}
+
 /*
  * Push the initial call frame for a goroutine without running it.
  * Called once per goroutine the first time a worker picks it up.
@@ -677,10 +684,8 @@ bool sea_vm_goroutine_init(SeaVM *vm, SeaValue fn, SeaValue *args, int argc) {
         frame->base[i] = SEA_NIL_VAL;
     if (argc > chunk->arity) {
         if (chunk->is_vararg) {
-            frame->varargs = &frame->base[chunk->max_stack];
             frame->vararg_count = argc - chunk->arity;
-            for (int i = chunk->arity; i < argc; i++)
-                frame->varargs[i - chunk->arity] = args[i];
+            frame->varargs = varargs_new(&args[chunk->arity], frame->vararg_count);
         } else {
             for (int i = chunk->arity; i < argc; i++) vm_release_val(args[i]);
         }
@@ -925,10 +930,14 @@ void deliver_results(SeaValue *dst, SeaValue *src, int nret, int expected) {
     for (int j = n; j < expected; j++) dst[j] = SEA_NIL_VAL;
 }
 
-/* A returning frame owns the varargs it was passed (moved past its registers
- * by the call). */
+/* A returning frame owns the varargs it was passed. They live in a block of
+ * their own, not past the frame's registers: a call the function makes puts
+ * its callee's frame right above R[a], over that area, and the callee's
+ * registers overwrote them (Bug 17 in docs/bugs.md). */
 static inline void release_varargs(SeaCallFrame *f) {
     for (int j = 0; j < f->vararg_count; j++) vm_release_val(f->varargs[j]);
+    SEA_FREE_N(f->varargs, SeaValue, f->vararg_count);
+    f->varargs = NULL;
     f->vararg_count = 0;
 }
 
@@ -940,10 +949,6 @@ static SeaValue *vm_free_base(SeaVM *vm) {
     if (vm->frame_count == 0) return vm->regs;
     SeaCallFrame *f = &vm->frames[vm->frame_count - 1];
     int top = f->closure && f->closure->chunk ? f->closure->chunk->max_stack : SEA_MAX_REGISTERS;
-    if (f->varargs) {
-        SeaValue *ve = f->varargs + f->vararg_count;
-        if (ve > f->base + top) return ve;
-    }
     return f->base + top;
 }
 
@@ -2292,15 +2297,10 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
                 new_frame->vararg_count = 0;
                 new_frame->varargs = NULL;
                 if (callee_chunk->is_vararg && n_args > callee_chunk->arity) {
+                    /* the extra args at base[arity..] move to their own block */
                     int nva = n_args - callee_chunk->arity;
-                    int va_base = callee_chunk->max_stack;
-                    /* Extra args are at new_frame->base[arity..arity+nva-1];
-                     * move them to va_base (may overlap). */
-                    memmove(&new_frame->base[va_base],
-                            &base[a + 1 + callee_chunk->arity],
-                            (size_t)nva * sizeof(SeaValue));
+                    new_frame->varargs = varargs_new(&new_frame->base[callee_chunk->arity], nva);
                     new_frame->vararg_count = nva;
-                    new_frame->varargs = &new_frame->base[va_base];
                 }
 
                 frame = new_frame;

@@ -36,8 +36,8 @@ for i = 1, 6 do print(<-results) end
   and an optional JIT (libgccjit) that speeds hot numeric code up 2–4×.
 - **Batteries** — `math`, `string`, `io`, `os`, `sync`, `time`, `net`, `sort`, and
   `sea/parser` (Sea's own parser: AST, tokens, checks, a formatter); external
-  libraries for JSON, XML, HTTP, TLS, JWT, CLI flags, a terminal UI and
-  numeric kernels for training models.
+  libraries for JSON, XML, HTTP, TLS, JWT, CLI flags, a terminal UI,
+  DuckDB (embedded analytical SQL) and numeric kernels for training models.
 
 ## Quick start
 
@@ -50,7 +50,9 @@ Requirements: GCC (computed goto, register variables), GNU Make, pthreads.
 readline is optional: the REPL uses it for line editing when its headers are
 installed (`make noreadline` leaves it out). The JIT additionally needs the
 libgccjit headers (`libgccjit-13-dev` or similar). Native libraries have their
-own: OpenSSL 3 for `libs/ssl`, zlib for `libs/http`.
+own: OpenSSL 3 for `libs/ssl`, zlib for `libs/http`, and DuckDB for
+`libs/duckdb` (its build downloads the official `libduckdb` release, checksum
+pinned).
 
 ```sh
 make                              # build bin/sea
@@ -72,7 +74,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 |----------|----------|
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
-| [Libraries](docs/libs.md) | `json`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor` |
+| [Libraries](docs/libs.md) | `json`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |

@@ -1,0 +1,231 @@
+-- Test: libs/duckdb (run with make -C libs/duckdb test)
+
+local duckdb = require("duckdb")
+
+local function err(v)
+    if is_error(v) then
+        local m = v.message
+        local nl = string.find(m, "\n", 1)
+        if nl ~= nil then m = string.sub(m, 1, nl - 1) end
+        return m
+    end
+    return "no error: " .. tostring(v)
+end
+
+local function show(v)
+    if type(v) == "table" or type(v) == "struct" then
+        local keys = []
+        for k, _ in v do keys[] = tostring(k) end
+        sort.sort(keys)
+        local parts = []
+        for _, k in keys do parts[] = k .. "=" .. show(v[k]) end
+        return "{" .. string.join(parts, ", ") .. "}"
+    end
+    if type(v) == "array" then
+        local parts = []
+        for _, x in v do parts[] = show(x) end
+        return "[" .. string.join(parts, ", ") .. "]"
+    end
+    if type(v) == "map" then
+        local keys = []
+        for k, _ in v do keys[] = k end
+        sort.sort(keys)
+        local parts = []
+        for _, k in keys do parts[] = show(k) .. ":" .. show(v[k]) end
+        return "map(" .. string.join(parts, ", ") .. ")"
+    end
+    if type(v) == "string" then return '"' .. v .. '"' end
+    return tostring(v)
+end
+
+print(string.sub(duckdb.version(), 1, 1))
+local db = duckdb.open()
+
+-- ---- exec, query, row, value --------------------------------------------------
+print("create", db:exec("CREATE TABLE people (id INTEGER PRIMARY KEY, name VARCHAR, age INTEGER, score DOUBLE)"))
+print("insert", db:exec("INSERT INTO people VALUES (1, 'ana', 30, 9.5), (2, 'bia', 25, NULL), (3, 'caio', 41, 7.25)"))
+print("multi", db:exec("CREATE TABLE a (x INTEGER); INSERT INTO a VALUES (1), (2); UPDATE a SET x = x * 10"))
+for _, r in db:query("SELECT * FROM people ORDER BY id") do print(r.id, r.name, r.age, r.score) end
+print("row", show(db:row("SELECT name, age FROM people WHERE id = 3")))
+print("no row", db:row("SELECT * FROM people WHERE id = 99"), db:value("SELECT 1 WHERE false"))
+print("value", db:value("SELECT sum(x) FROM a"), db:value("SELECT avg(age) FROM people"))
+print("empty", len(db:query("SELECT * FROM people WHERE false")))
+
+-- ---- parameters -------------------------------------------------------------------
+print("positional", db:value("SELECT name FROM people WHERE id = ? AND age > ?", 1, 18))
+print("table", db:value("SELECT name FROM people WHERE id = ? AND age > ?", {2, 18}))
+print("$1", db:value("SELECT $2 || '-' || $1", "a", "b"))
+print("named", db:value("SELECT name FROM people WHERE age = $age", {age = 41}))
+print("types", show(db:row("SELECT ? AS i, ? AS f, ? AS s, ? AS b, ? AS n", 7, 2.5, "x", true, nil)))
+local tags = []
+tags[] = "red"
+tags[] = "blue"
+print("list param", db:value("SELECT list_count(?)", {tags}), db:value("SELECT ?[2]", {tags}))
+print("struct param", show(db:value("SELECT ?", {{a = 1, b = "two"}})))
+local m = [=]
+m["k"] = 5
+print("map param", show(db:value("SELECT ?", {m})))
+print(err(db:value("SELECT ? + ?", 1)))
+print(err(db:value("SELECT $x", {y = 1})))
+print(err(db:value("SELECT ?", function() end)))
+print("insert params", db:exec("INSERT INTO people VALUES (?, ?, ?, ?)", 4, "duda", 19, 8.0))
+
+-- ---- types ---------------------------------------------------------------------------
+local t = db:row([[SELECT
+    true AS b, 127::TINYINT AS ti, 32767::SMALLINT AS si, 2147483647 AS i,
+    9007199254740993::BIGINT AS big, 140737488355327::BIGINT AS edge, 255::UTINYINT AS ut,
+    18446744073709551615::UBIGINT AS ub, 170141183460469231731687303715884105727::HUGEINT AS hi,
+    -5::HUGEINT AS hs, 1.5::FLOAT AS fl, 3.14159::DOUBLE AS d, 12.345::DECIMAL(10,3) AS dec,
+    123456789012.34::DECIMAL(38,2) AS bigdec, 'olá' AS s, '\xAA'::BLOB AS bl,
+    DATE '2024-02-29' AS dt, DATE '0044-03-15' - INTERVAL 100 YEAR AS bc,
+    TIME '13:45:07.250' AS tm, TIMESTAMP '2024-01-02 03:04:05.123456' AS ts,
+    TIMESTAMP '2024-01-02 03:04:05' AS ts0, '2024-01-02 03:04:05.5'::TIMESTAMP_MS AS tms,
+    '2024-01-02 03:04:05'::TIMESTAMP_S AS tss, '2024-01-02 03:04:05.123456789'::TIMESTAMP_NS AS tns,
+    'infinity'::TIMESTAMP AS tinf, 'infinity'::DATE AS dinf,
+    INTERVAL '1 year 2 months 3 days 4 hours' AS iv,
+    '550e8400-e29b-41d4-a716-446655440000'::UUID AS u, '101101'::BIT AS bits,
+    [1, 2, NULL] AS l, [[1], [2, 3] ] AS ll, {'a': 1, 'b': [true]} AS st,
+    MAP {'x': 1, 'y': 2} AS mp, [1.5, 2.5]::DOUBLE[2] AS arr,
+    NULL AS nul]])
+local keys = []
+for k, _ in t do keys[] = k end
+sort.sort(keys)
+for _, k in keys do
+    if k == "bl" then print(k, len(t[k]), string.byte(t[k], 1)) else print(k, show(t[k])) end
+end
+db:exec("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
+print("enum", db:value("SELECT 'happy'::mood"), show(db:value("SELECT ['ok', 'sad']::mood[]")))
+print("union", db:value("SELECT union_value(num := 2)::UNION(num INTEGER, str VARCHAR)"))
+print("tz", db:value("SELECT TIMESTAMPTZ '2024-01-02 03:04:05+00'"))
+print(err(db:value("SELECT 1::VARIANT")))
+
+-- ---- columns ---------------------------------------------------------------------------
+local cols = db:columns("SELECT id, name, age, score FROM people ORDER BY id")
+print("columns", show(cols.names), show(cols.types), cols.count)
+print("int col", type(cols.data.id), cols.data.id[0], cols.data.id[3])
+print("float col", type(cols.data.score), show(cols.data.score))
+print("text col", type(cols.data.name), cols.data.name[1])
+local fc = db:columns("SELECT i::DOUBLE AS x FROM range(5) t(i)")
+print("float_array", type(fc.data.x), fc.data.x[4])
+
+-- ---- each ------------------------------------------------------------------------------
+local seen = []
+print("each", db:each("SELECT name FROM people ORDER BY id", function(r) seen[] = r.name end), string.join(seen, ","))
+local first = nil
+print("each stop", db:each("SELECT id FROM people ORDER BY id", function(r)
+    first = r.id
+    return false
+end), first)
+
+-- ---- prepared statements ---------------------------------------------------------------
+local st = db:prepare("SELECT name FROM people WHERE age > ? ORDER BY age")
+print("params", show(st.params))
+print("stmt", show(st:query(20)), show(st:query(40)))
+print("stmt value", st:value(30))
+local named = db:prepare("SELECT $a + $b AS s")
+print("named params", show(named.params), named:value({a = 1, b = 2}))
+print(err(st:query()))
+print(err(db:prepare("SELEC 1")))
+st:close()
+print(err(st:query(1)))
+
+-- ---- appender ---------------------------------------------------------------------------
+db:exec("CREATE TABLE events (id INTEGER, kind VARCHAR DEFAULT 'misc', ts TIMESTAMP, tags VARCHAR[])")
+local app = db:appender("events")
+print("append", app:append({1, "click", "2024-01-01 10:00:00", tags}))
+print("append named", app:append({id = 2, ts = "2024-01-01 11:00:00"}))
+local rows = []
+for i = 3, 1002 do rows[] = {i, "bulk", nil, nil} end
+print("append_rows", app:append_rows(rows))
+print(err(app:append({1, 2})))
+print(err(app:append({nope = 1})))
+print("close", app:close())
+print("count", db:value("SELECT count(*) FROM events"), show(db:row("SELECT kind, tags FROM events WHERE id = 2")))
+print("tags", show(db:value("SELECT tags FROM events WHERE id = 1")))
+print(err(db:appender("missing")))
+
+-- ---- transactions -----------------------------------------------------------------------
+db:exec("CREATE TABLE acct (id INTEGER, bal INTEGER)")
+db:exec("INSERT INTO acct VALUES (1, 100), (2, 0)")
+local moved = db:transaction(function(tx)
+    tx:exec("UPDATE acct SET bal = bal - 30 WHERE id = 1")
+    tx:exec("UPDATE acct SET bal = bal + 30 WHERE id = 2")
+    return "moved"
+end)
+print("commit", moved, db:value("SELECT bal FROM acct WHERE id = 2"))
+local failed = db:transaction(function(tx)
+    tx:exec("UPDATE acct SET bal = 0")
+    return tx:exec("INSERT INTO nope VALUES (1)")
+end)
+print("rollback", err(failed), db:value("SELECT sum(bal) FROM acct"))
+local function try(f)
+    local msg = nil
+    local function run()
+        defer function()
+            local e = recover()
+            if e ~= nil then msg = tostring(e) end
+        end
+        f()
+    end
+    run()
+    return msg
+end
+print("panic", try(function()
+    db:transaction(function(tx)
+        tx:exec("DELETE FROM acct")
+        panic("boom")
+    end)
+end), db:value("SELECT count(*) FROM acct"))
+
+-- ---- goroutines: queries park only their goroutine -----------------------------------------
+db:exec("CREATE TABLE nums AS SELECT range AS n FROM range(200000)")
+local results = chan(4)
+for g = 1, 4 do
+    go function()
+        local c = db:connect()
+        local v = c:value("SELECT sum(n * ?) FROM nums", g)
+        c:close()
+        results <- v
+    end ()
+end
+local total = 0
+for g = 1, 4 do total = total + <-results end
+print("goroutines", total)
+local shared = chan(3)
+for g = 1, 3 do
+    go function()
+        shared <- db:value("SELECT count(*) FROM nums WHERE n % 3 = ?", g - 1)
+    end ()
+end
+local sum3 = 0
+for g = 1, 3 do sum3 = sum3 + <-shared end
+print("same connection", sum3)
+local inner = chan(1)
+go function()
+    local names = []
+    db:each("SELECT name FROM people ORDER BY id LIMIT 2", function(r)
+        names[] = r.name .. ":" .. db:value("SELECT count(*) FROM people WHERE name = ?", r.name)
+    end)
+    inner <- string.join(names, " ")
+end ()
+print("callback query", <-inner)
+
+-- ---- files, read-only, closing ---------------------------------------------------------------
+local path = "/tmp/sea_duckdb_test.duckdb"
+os.exec("rm -f " .. path .. " " .. path .. ".wal")
+local f = duckdb.open(path)
+f:exec("CREATE TABLE kv (k VARCHAR, v INTEGER)")
+f:exec("INSERT INTO kv VALUES ('a', 1)")
+f:close()
+local ro = duckdb.open(path, {read_only = true})
+print("reopen", ro:value("SELECT v FROM kv WHERE k = 'a'"))
+print(err(ro:exec("INSERT INTO kv VALUES ('b', 2)")))
+ro:close()
+os.exec("rm -f " .. path .. " " .. path .. ".wal")
+print(err(duckdb.open("/tmp")))
+print(err(duckdb.open(nil, {threads = "lots"})))
+local c2 = db:connect()
+db:close()
+print(err(db:query("SELECT 1")))
+print(err(c2:query("SELECT 1")))
+print("close twice", db:close())

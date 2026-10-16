@@ -17,6 +17,7 @@ pure-Sea libraries work out of the box.
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
 | `flags` | `libs/flags/flags` | pure Sea | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
+| `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
 
@@ -841,6 +842,132 @@ tensor.matvec(x, 0, w, 2, 3, out, 0)      -- out = 9, 12, 15
 
 Calls from several goroutines on different arrays run in parallel. Test:
 `tests/unit/113_tensor.sea`.
+
+---
+
+## `duckdb`
+
+[DuckDB](https://duckdb.org), the embedded analytical SQL database: CSV,
+Parquet and JSON files, window functions, `ATTACH`, all from SQL. Build:
+`make -C libs/duckdb`. The first build runs `fetch.sh`, which downloads the
+official `libduckdb` release (1.5.6, SHA-256 checked) into
+`libs/duckdb/vendor/`. To use an installed copy instead:
+`make -C libs/duckdb DUCKDB_INC=/usr/local/include DUCKDB_LIB=/usr/local/lib`.
+Tests: `make -C libs/duckdb test`.
+
+```sea
+local duckdb = require("../libs/duckdb/duckdb")   -- relative to the requiring file
+
+local db = duckdb.open("sales.duckdb")?           -- nil or ":memory:": in memory
+local _ = db:exec("CREATE TABLE IF NOT EXISTS sales (day DATE, item VARCHAR, qty INTEGER, price DECIMAL(10,2))")?
+local added = db:exec("INSERT INTO sales VALUES (?, ?, ?, ?)", "2026-10-01", "tea", 3, 4.5)?
+for _, r in db:query("SELECT item, sum(qty * price) AS total FROM sales GROUP BY item ORDER BY total DESC")? do
+    print(r.item, r.total)
+end
+print(db:value("SELECT count(*) FROM read_csv('orders.csv')"))
+db:close()
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `duckdb.open` | `open([path [, opts]]) → db\|error` | Open (or create) a database file; no path or `":memory:"` is in memory |
+| `duckdb.version` | `version() → string` | The DuckDB library version (`"v1.5.6"`) |
+| `db:exec` | `exec(sql, params...) → int\|error` | Run SQL; returns the number of rows changed. Without parameters it may hold several statements separated by `;` |
+| `db:query` | `query(sql, params...) → array\|error` | All rows, each a table keyed by column name |
+| `db:row` | `row(sql, params...) → table\|nil\|error` | The first row |
+| `db:value` | `value(sql, params...) → value\|nil\|error` | The first column of the first row |
+| `db:columns` | `columns(sql, params...) → table\|error` | Column-wise: `{names, types, count, data = {column = values}}` (see below) |
+| `db:each` | `each(sql, fn, params...) → int\|error` | Call `fn(row)` per row (`false` stops); returns the rows seen |
+| `db:prepare` | `prepare(sql) → stmt\|error` | A prepared statement |
+| `db:appender` | `appender(table [, schema]) → app\|error` | Fast bulk insert into a table |
+| `db:transaction` | `transaction(fn) → value\|error` | `BEGIN`, `fn(db)`, then `COMMIT`; `ROLLBACK` if `fn` returns an error value or panics (the panic goes on) |
+| `db:connect` | `connect() → conn\|error` | Another connection to the same database, with the same methods |
+| `db:interrupt` | `interrupt()` | Stop the query running on this connection (from another goroutine) |
+| `db:close` | `close() → bool` | Close; on the database it closes every connection, statement and appender. Closing twice is fine |
+
+**Options for `open`** (table, map or struct): `read_only = true`, `threads`,
+`memory_limit` (`"2GB"`) and any other [DuckDB setting](https://duckdb.org/docs/configuration/overview)
+by name, with the value as a string, number or bool. An unknown setting or a
+bad value is an error.
+
+**Parameters** come after the SQL (`?` or `$1`, `$2`...), or as one positional
+table `{a, b}`, or as a table of named values `{name = v}` for `$name`:
+
+```sea
+db:value("SELECT name FROM people WHERE id = ? AND age > ?", 7, 18)
+db:query("SELECT * FROM people WHERE id = ? AND age > ?", {7, 18})
+db:row("SELECT * FROM people WHERE age > $min AND city = $city", {min = 18, city = "Recife"})
+```
+
+`nil` is NULL, bools, ints, numbers and strings map to the obvious types
+(DuckDB casts them to the parameter's type, so a string works for a `DATE`).
+Arrays, `int_array`, `float_array` and positional tables become LISTs,
+tables with string keys STRUCTs and maps `[=]` MAPs. To pass one list as the
+only parameter, wrap it: `db:value("SELECT list_sum(?)", {values})`.
+
+**Result values:**
+
+| DuckDB | Sea |
+|--------|-----|
+| `NULL` | `nil` (row tables keep the key) |
+| `BOOLEAN` | bool |
+| integers up to `BIGINT`/`UBIGINT`, `HUGEINT` | int; past ±2^47 (Sea's int range) a number, exact up to 2^53 |
+| `FLOAT`, `DOUBLE`, `DECIMAL` | number |
+| `VARCHAR`, `BLOB`, `ENUM`, `UUID`, `BIT` | string (a BLOB holds its bytes) |
+| `DATE`, `TIME`, `TIMESTAMP` (all precisions) | ISO string: `"2024-02-29"`, `"13:45:07.25"`, `"2024-01-02 03:04:05.123456"`; `TIMESTAMPTZ` in UTC with `+00`; `infinity`; BC dates end in ` (BC)` |
+| `INTERVAL` | `{months, days, micros}` |
+| `LIST`, `ARRAY` | array |
+| `STRUCT` | table |
+| `MAP` | map `[=]` |
+| `UNION` | the value of its member |
+
+Dates and times come as strings because they are exact and go back into SQL
+as parameters unchanged; `time.unix` builds a Time from `epoch(ts)` when you
+need one. A column of a type with no Sea counterpart (`VARIANT`, `GEOMETRY`,
+`BIGNUM`) is an error that suggests a cast (`col::VARCHAR`).
+
+**`columns`** returns the result column by column: integer columns without
+NULLs as `int_array`, floating and decimal ones as `float_array` (ready for
+`libs/tensor`), the rest as arrays; `types` holds the SQL type of each column
+(`"DECIMAL(10,2)"`, `"VARCHAR[]"`, `"STRUCT(a INTEGER)"`).
+
+```sea
+local c = db:columns("SELECT x, y FROM points")?
+print(c.count, c.types[0], type(c.data.x))      -- 1000  DOUBLE  float_array
+```
+
+**Prepared statements** keep the parsed plan: `stmt:query(params...)`,
+`stmt:exec`, `stmt:row`, `stmt:value`, `stmt:columns`, `stmt:each(fn, params...)`
+and `stmt:close()`. `stmt.params` lists the parameter names (`"1"`, `"2"` for
+positional ones). A wrong number of parameters is an error.
+
+**Appenders** insert rows faster than `INSERT`: `app:append(row)` takes a
+sequence in column order (`{1, "ana", "2026-10-01"}`) or a table by column
+name (absent columns get their `DEFAULT`); `app:append_rows(rows)` takes many;
+`app:flush()` writes what is buffered; `app:close()` flushes and frees.
+Values are cast to the column types (strings to dates, ints to decimals...).
+After an error, close the appender.
+
+**Goroutines.** One connection runs one query at a time (others on it wait
+their turn). In a goroutine a query runs on a worker thread (up to 8) and only
+that goroutine waits, so the scheduler keeps running the others; on the main
+thread the query runs in place. For queries in parallel, give each goroutine
+its own `db:connect()`:
+
+```sea
+local results = chan(4)
+for i = 1, 4 do
+    go function()
+        local c = db:connect()
+        results <- c:value("SELECT count(*) FROM read_parquet(?)", "part" .. i .. ".parquet")
+        c:close()
+    end ()
+end
+```
+
+All failures are error values whose message is DuckDB's
+(`duckdb.query: Catalog Error: Table with name nope does not exist!`),
+including a closed handle (`the connection or statement is closed`).
 
 ---
 

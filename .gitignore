@@ -32,3 +32,5 @@ vgcore.*
 gmon.out
 perf.data*
 .claude/scheduled_tasks.lock
+libs/duckdb/vendor/
+libs/duckdb/test.out
