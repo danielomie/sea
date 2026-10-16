@@ -396,7 +396,7 @@ end
 | `os.exit` | `exit([code])` | Terminate the process with exit code (default 0) |
 | `os.getenv` | `getenv(name) → string\|nil` | Read an environment variable |
 | `os.exec` | `exec(cmd) → {code=int, output=string}` | Run a shell command; captures stdout+stderr |
-| `os.readfile` | `readfile(path) → string\|nil` | Read entire file contents as a string |
+| `os.readfile` | `readfile(path) → string\|nil` | Read entire file contents as a string (module `fs` has the full set: `fs.read` reports why a read failed) |
 | `os.filesize` | `filesize(path) → int\|nil` | File size in bytes, or `nil` if not found |
 | `os.glob` | `glob(dir, suffix) → array` | Sorted array of full paths in `dir` whose names end with `suffix` |
 
@@ -779,6 +779,68 @@ Native libraries use the same code through `src/sea_utf8.h` (`sea_utf8_decode`,
 
 ---
 
+## Module: `fs`
+
+The file system. Failures are **error values** naming the call, the path and
+the system's reason (`fs.read: data.txt: No such file or directory`), so
+`fs.read(p)?` passes them up; `exists`, `isfile` and `isdir` answer with a
+bool. Calls block their scheduler thread, like other file I/O. Modes are
+ints (`0x1A4` is 0644; Sea has no octal literals).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `fs.read` | `read(p) → string\|error` | The whole file (any bytes) |
+| `fs.write` | `write(p, data [, opts]) → true\|error` | Create or replace the file. `opts`: `append` (bool), `mode` (int, default 0666 less the umask, for a new file), `atomic` (bool: write a temporary file in the same directory, `fsync`, then rename it over `p`, so readers see the old or the new content, never part) |
+| `fs.append` | `append(p, data) → true\|error` | Add to the end (creating the file) |
+| `fs.exists` | `exists(p) → bool` | Something is there (a dangling link counts) |
+| `fs.isfile`, `fs.isdir` | `isfile(p) → bool` | A regular file / a directory (links followed) |
+| `fs.stat`, `fs.lstat` | `stat(p) → table\|error` | `type` (`"file"`, `"dir"`, `"link"`, `"fifo"`, `"socket"`, `"char"`, `"block"`), `size`, `mode` (permission bits), `mtime`/`atime`/`ctime` (seconds as numbers), `uid`, `gid`, `ino`, `nlink`. `lstat` does not follow a link |
+| `fs.list` | `list(p) → array\|error` | Names in a directory, sorted (no `.`/`..`) |
+| `fs.walk` | `walk(p [, opts]) → array\|error` | Every path under `p` (joined to it), depth first, sorted in each directory. `opts`: `files` (only non-directories), `max_depth` (1 = like `list`), `follow_links` (descend into linked directories; loops are skipped) |
+| `fs.mkdir` | `mkdir(p [, opts]) → true\|error` | `opts`: `parents` (create missing parents; an existing directory is fine), `mode` (default 0777 less the umask) |
+| `fs.remove` | `remove(p [, opts]) → true\|error` | A file, link or empty directory. `opts`: `recursive` (a whole tree; links are removed, not followed), `force` (a missing path is fine) |
+| `fs.rename` | `rename(from, to) → true\|error` | Move or rename (same file system) |
+| `fs.copy` | `copy(from, to [, opts]) → true\|error` | Copy a file, keeping its mode. `opts`: `recursive` (a directory tree; links copied as links), `overwrite` (default `true`) |
+| `fs.symlink` | `symlink(target, link) → true\|error` | Create `link` pointing at `target` |
+| `fs.readlink` | `readlink(p) → string\|error` | Where a link points |
+| `fs.realpath` | `realpath(p) → string\|error` | Absolute path with links and `..` resolved (the path must exist) |
+| `fs.chmod` | `chmod(p, mode) → true\|error` | Set the permission bits |
+| `fs.touch` | `touch(p) → true\|error` | Create an empty file, or set an existing one's times to now |
+| `fs.tempdir`, `fs.tempfile` | `tempdir([prefix]) → string\|error` | Create a new directory / empty file under `$TMPDIR` (or `/tmp`) with a unique name; removing it is up to you |
+| `fs.cwd`, `fs.chdir` | `cwd() → string`, `chdir(p) → true\|error` | The working directory (process-wide: every goroutine sees the change) |
+| `fs.glob` | `glob(pattern) → array\|error` | Paths matching a shell pattern (`*`, `?`, `[...]`, `{a,b}`, `~`), sorted; none: `[]` |
+
+```sea
+local dir = fs.tempdir("build-")?
+local _ = fs.mkdir(path.join(dir, "out/logs"), {parents = true})?
+local _ = fs.write(path.join(dir, "out/config.json"), json.encode(cfg), {atomic = true})?
+for _, f in fs.walk(dir, {files = true})? do print(path.relative(dir, f), fs.stat(f).size) end
+local _ = fs.remove(dir, {recursive = true})?
+```
+
+---
+
+## Module: `path`
+
+Paths as strings, with the rules of Go's `path/filepath` on Unix. Nothing here
+touches the file system except `path.abs`, which reads the working directory.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `path.join` | `join(a, b, ...) → string` | Parts joined with `/` and normalized; an absolute part starts over (`join("a", "/b")` is `"/b"`); empty parts are skipped; no parts give `""` |
+| `path.normalize` | `normalize(p) → string` | One `/` between elements, no `.`, `..` removes the element before it (dropped at the root, kept at the start of a relative path); `""` becomes `"."`: `"a//b/./c/.."` → `"a/b"` |
+| `path.dirname` | `dirname(p) → string` | Everything before the last element, normalized (`"a/b"` → `"a"`, `"a"` → `"."`, `"/a"` → `"/"`) |
+| `path.basename` | `basename(p [, suffix]) → string` | The last element (`"a/b/"` → `"b"`, `""` → `"."`, `"/"` → `"/"`); a matching `suffix` is removed |
+| `path.ext` | `ext(p) → string` | The extension with its dot (`"a/b.tar.gz"` → `".gz"`); `""` when there is none. Leading dots do not start one (`".bashrc"` has none) |
+| `path.stem` | `stem(p) → string` | The last element without its extension |
+| `path.parts` | `parts(p) → array` | The elements of the normalized path, `"/"` first when absolute |
+| `path.isabs` | `isabs(p) → bool` | Starts with `/` |
+| `path.abs` | `abs(p) → string` | Absolute and normalized (joined to the working directory; links are not resolved, see `fs.realpath`) |
+| `path.relative` | `relative(base, target) → string\|error` | A path that joined to `base` gives `target` (`relative("/a/b/c", "/a/x")` is `"../../x"`); both absolute or both relative, else an error |
+| `path.sep` | `"/"` | The separator |
+
+---
+
 ## Collection Literals
 
 | Syntax | Type | Description |
@@ -1115,8 +1177,8 @@ local json = require("./libs/json/json")   -- relative to the requiring file
 local http = require("./libs/http/http")
 ```
 
-Built-in modules (`math`, `string`, `utf8`, `io`, `os`, `sync`, `net`, `time`,
-`gc`, `sort`, `bigint`, `sea/parser`) are found first. An absolute path
+Built-in modules (`math`, `string`, `utf8`, `io`, `os`, `fs`, `path`, `sync`,
+`net`, `time`, `gc`, `sort`, `bigint`, `sea/parser`) are found first. An absolute path
 (`require("/opt/sea/libs/yaml/yaml")`) names the file itself, tried as
 `.sea`, `/init.sea`, then `.so`. Otherwise the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)
