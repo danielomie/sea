@@ -4,6 +4,7 @@
 #include "sea_array.h"
 #include "sea_table.h"
 #include "sea_memory.h"
+#include "sea_bigint.h"
 #include <ctype.h>
 #include <stdarg.h>
 #include <string.h>
@@ -139,6 +140,48 @@ static SeaValue str_char(SeaVM *vm, int argc, SeaValue *args) {
 /* Growable output of string.format */
 typedef struct { char *p; size_t len, cap; } FmtBuf;
 
+static void fmt_put(FmtBuf *b, const char *s, size_t n);
+
+/* %d %i %u %x %X of a bigint: C's flags, width and precision applied to its
+ * digits (a negative hex value is written with a minus sign). */
+static void fmt_bigint(FmtBuf *out, const char *spec, char conv, SeaBigInt *b) {
+    bool left = false, plus = false, space = false, zero = false;
+    int width = 0, prec = -1;
+    const char *p = spec + 1;
+    for (; *p && strchr("-+ 0#", *p); p++) {
+        if (*p == '-') left = true;
+        else if (*p == '+') plus = true;
+        else if (*p == ' ') space = true;
+        else if (*p == '0') zero = true;
+    }
+    for (; isdigit((unsigned char)*p); p++) width = width * 10 + (*p - '0');
+    if (*p == '.') {
+        prec = 0;
+        for (p++; isdigit((unsigned char)*p); p++) prec = prec * 10 + (*p - '0');
+    }
+    bool hex = conv == 'x' || conv == 'X';
+    SeaString *s = sea_bigint_to_string(b, hex ? 16 : 10);
+    const char *dig = s->data;
+    size_t nd = s->len;
+    bool neg = dig[0] == '-';
+    if (neg) { dig++; nd--; }
+    if (prec == 0 && nd == 1 && dig[0] == '0') nd = 0;      /* like C: %.0d of 0 */
+    char sign = neg ? '-' : (!hex && plus) ? '+' : (!hex && space) ? ' ' : 0;
+    size_t zeros = prec > 0 && (size_t)prec > nd ? (size_t)prec - nd : 0;
+    size_t body = (sign ? 1 : 0) + zeros + nd;
+    if (prec < 0 && zero && !left && (size_t)width > body) { zeros += (size_t)width - body; body = (size_t)width; }
+    size_t pad = (size_t)width > body ? (size_t)width - body : 0;
+    for (size_t i = 0; !left && i < pad; i++) fmt_put(out, " ", 1);
+    if (sign) fmt_put(out, &sign, 1);
+    for (size_t i = 0; i < zeros; i++) fmt_put(out, "0", 1);
+    for (size_t i = 0; i < nd; i++) {
+        char c = conv == 'X' ? (char)toupper((unsigned char)dig[i]) : dig[i];
+        fmt_put(out, &c, 1);
+    }
+    for (size_t i = 0; left && i < pad; i++) fmt_put(out, " ", 1);
+    sea_obj_release(&s->obj);
+}
+
 static void fmt_put(FmtBuf *b, const char *s, size_t n) {
     if (b->len + n + 1 > b->cap) {
         size_t cap = b->cap ? b->cap : 256;
@@ -210,6 +253,10 @@ SeaValue sea_str_format(SeaVM *vm, int argc, SeaValue *args) {
 
         switch (conv) {
             case 'd': case 'i': case 'u': case 'x': case 'X': {
+                if (sea_is_bigint(arg)) {
+                    fmt_bigint(&out, spec, conv, SEA_AS_BIGINT(arg));
+                    break;
+                }
                 int64_t v = sea_is_int(arg) ? sea_as_int(arg) : (int64_t)sea_as_number(arg);
                 snprintf(full, sizeof full, "%sll%c", spec, conv);
                 if (conv == 'd' || conv == 'i') fmt_printf(&out, full, (long long)v);

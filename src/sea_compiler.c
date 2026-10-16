@@ -1459,8 +1459,14 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
                         case BINOP_ADD:  result = lv + rv; break;
                         case BINOP_SUB:  result = lv - rv; break;
                         case BINOP_MUL:  result = lv * rv; break;
-                        case BINOP_IDIV: if (!rv) { folded=false; break; } result = lv / rv; break;
-                        case BINOP_MOD:  if (!rv) { folded=false; break; } result = lv % rv; break;
+                        case BINOP_IDIV: if (!rv) { folded=false; break; }      /* floored, as at run time */
+                                         result = lv / rv;
+                                         if (lv % rv != 0 && (lv ^ rv) < 0) result--;
+                                         break;
+                        case BINOP_MOD:  if (!rv) { folded=false; break; }
+                                         result = lv % rv;
+                                         if (result != 0 && (result ^ rv) < 0) result += rv;
+                                         break;
                         case BINOP_BAND: result = lv & rv; break;
                         case BINOP_BOR:  result = lv | rv; break;
                         case BINOP_BXOR: result = lv ^ rv; break;

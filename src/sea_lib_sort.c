@@ -20,6 +20,7 @@
  * array is a runtime error (never a duplicated or lost element).
  */
 #include "sea_stdlib.h"
+#include "sea_bigint.h"
 #include "sea_string.h"
 #include "sea_rope.h"
 #include "sea_table.h"
@@ -41,7 +42,7 @@ static SeaObject *g_asc, *g_desc;
 enum { K_OTHER, K_NUMBER, K_STRING };
 
 static int kind(SeaValue v) {
-    if (sea_is_int(v) || sea_is_number(v)) return K_NUMBER;
+    if (sea_is_int(v) || sea_is_number(v) || sea_is_bigint(v)) return K_NUMBER;
     if (sea_is_string(v) || sea_is_rope(v)) return K_STRING;
     return K_OTHER;
 }
@@ -57,6 +58,13 @@ static int natural(SeaValue a, SeaValue b) {
     if (sea_is_int(a) && sea_is_int(b)) {
         int64_t x = sea_as_int(a), y = sea_as_int(b);
         return x < y ? -1 : x > y;
+    }
+    if (sea_is_bigint(a) || sea_is_bigint(b)) {
+        int c;
+        if (sea_bigint_compare(a, b, &c) == 1) return c;
+        /* a NaN: after every number */
+        bool na = sea_is_number(a) && isnan(sea_as_number(a)), nb = sea_is_number(b) && isnan(sea_as_number(b));
+        return (int)na - (int)nb;
     }
     if (kind(a) == K_NUMBER) {
         double x = sea_is_int(a) ? (double)sea_as_int(a) : sea_as_number(a);

@@ -1,4 +1,5 @@
 #include "sea_table.h"
+#include "sea_bigint.h"
 #include <sched.h>
 #include <stdlib.h>
 #include "sea_rope.h"
@@ -47,6 +48,8 @@ static bool key_equal(SeaValue a, SeaValue b) {
     // String comparison
     if (sea_is_string(a) && sea_is_string(b))
         return sea_string_equal(SEA_AS_STRING(a), SEA_AS_STRING(b));
+    if (sea_is_bigint(a) && sea_is_bigint(b))     /* bigint keys by value (bigint(5) and 5 differ) */
+        return sea_bigint_cmp(SEA_AS_BIGINT(a), SEA_AS_BIGINT(b)) == 0;
     return a == b;
 }
 
@@ -75,6 +78,7 @@ static uint32_t hash_value(SeaValue v) {
             sea_string_ensure_hash(s);   // compute lazily if needed
         return sea_string_pure_hash(s);
     }
+    if (sea_is_bigint(v)) return sea_bigint_hash(SEA_AS_BIGINT(v));
     // For objects and booleans, use the raw bits
     return (uint32_t)(v ^ (v >> 32));
 }

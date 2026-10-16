@@ -8,7 +8,7 @@
  *       opts: indent (spaces, or a string such as "\t"), sort_keys (bool),
  *             ascii (bool: escape non-ASCII as \uXXXX), max_depth (512)
  *   json.decode(string [, opts]) → value | error
- *       opts: max_depth (512)
+ *       opts: max_depth (512), bigint (bool: integers past ±2^47 as exact bigints)
  *   json.valid(string) → bool
  *
  * Failures are error values (is_error(e), e.message), e.g.
@@ -254,7 +254,7 @@ static void enc_string(Enc *e, const char *data, size_t len) {
 /* Values JSON can represent; anything else (functions, channels, errors,
  * goroutines) is left out of objects and written as null in arrays. */
 static bool encodable(SeaValue v) {
-    if (sea_is_nil(v) || sea_is_bool(v) || sea_is_int(v) || sea_is_number(v)) return true;
+    if (sea_is_nil(v) || sea_is_bool(v) || sea_is_int(v) || sea_is_number(v) || sea_is_bigint(v)) return true;
     return sea_is_string(v) || sea_is_rope(v) || sea_is_array(v) || sea_is_table(v) ||
            sea_is_map(v) || sea_is_struct(v) || sea_is_int_array(v) || sea_is_float_array(v);
 }
@@ -335,6 +335,9 @@ static void members_add(Members *ms, SeaValue k, SeaValue v) {
         owned = true;
     } else if (sea_is_bool(k)) {
         ks = sea_string_from_cstr(sea_as_bool(k) ? "true" : "false");
+        owned = true;
+    } else if (sea_is_bigint(k)) {
+        ks = sea_bigint_to_string(SEA_AS_BIGINT(k), 10);
         owned = true;
     } else {
         return;                                 /* object keys: no JSON form */
@@ -423,6 +426,12 @@ static int enc_value(Enc *e, SeaValue v) {
     if (sea_is_int(v)) {
         char t[24];
         buf_push(b, t, (size_t)fmt_int(t, sea_as_int(v)));
+        return 1;
+    }
+    if (sea_is_bigint(v)) {                     /* every digit, exactly */
+        SeaString *s = sea_bigint_to_string(SEA_AS_BIGINT(v), 10);
+        buf_push(b, s->data, s->len);
+        sea_obj_release(&s->obj);
         return 1;
     }
     if (sea_is_number(v)) {
@@ -515,6 +524,7 @@ typedef struct {
     size_t      len, pos;
     int         depth, max_depth;
     bool        build;            /* false: json.valid, no values are made */
+    bool        bigints;          /* integers past Sea's int range → bigint */
     const char *err;
     size_t      err_pos;
     SeaString **keys;             /* KEYCACHE_SIZE slots, allocated on first key */
@@ -702,6 +712,11 @@ static SeaValue jp_number(JP *p) {
         if (!neg && acc < (UINT64_C(1) << 47)) return sea_int_val((int64_t)acc);
         if (neg && acc <= (UINT64_C(1) << 47)) return sea_int_val(-(int64_t)acc);
     }
+    if (!is_float && p->bigints) {
+        SeaBigInt *b = sea_bigint_parse(s + start, p->pos - start, 10);
+        if (!b) return jp_fail(p, "out of memory", start);
+        return sea_obj_val(&b->obj);
+    }
     size_t n = p->pos - start;
     char small[64];
     char *tmp = n < sizeof small ? small : malloc(n + 1);
@@ -851,6 +866,7 @@ static SeaValue fn_decode(SeaVM *vm, int argc, SeaValue *args) {
     p.len = s->len;
     p.build = true;
     p.max_depth = opt_int(argc > 1 ? args[1] : SEA_NIL_VAL, "max_depth", JSON_MAX_DEPTH);
+    p.bigints = opt_bool(argc > 1 ? args[1] : SEA_NIL_VAL, "bigint");
     if (p.max_depth < 1) p.max_depth = JSON_MAX_DEPTH;
     if (p.max_depth > 10000) p.max_depth = 10000;     /* bounded by the C stack */
     char err[160];

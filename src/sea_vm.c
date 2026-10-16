@@ -1,4 +1,5 @@
 #include "sea_vm.h"
+#include "sea_bigint.h"
 #include "sea_chunk.h"
 #include "sea_string.h"
 #include "sea_rope.h"
@@ -354,6 +355,14 @@ static inline __attribute__((always_inline)) void vm_retain_val(SeaValue v) {
 
 // ---- Value operations ----
 
+/* The operand named in an arithmetic error; a bigint gets a pointer to the
+ * functions that do its arithmetic (the operators take int and number). */
+static const char *arith_what(SeaValue v) {
+    if (sea_is_bigint(v))
+        return "bigint (operators take int and number; use bigint.add, sub, mul, div, mod, pow)";
+    return sea_type_name(v);
+}
+
 static SeaValue val_add(SeaVM *vm, SeaValue a, SeaValue b) {
     if (sea_is_int(a) && sea_is_int(b)) {
         return sea_int_val(sea_as_int(a) + sea_as_int(b));
@@ -361,10 +370,10 @@ static SeaValue val_add(SeaVM *vm, SeaValue a, SeaValue b) {
     double na = sea_is_number(a) ? sea_as_number(a) : (sea_is_int(a) ? (double)sea_as_int(a) : 0);
     double nb = sea_is_number(b) ? sea_as_number(b) : (sea_is_int(b) ? (double)sea_as_int(b) : 0);
     if (!sea_is_number(a) && !sea_is_int(a)) {
-        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(a));
+        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(a));
     }
     if (!sea_is_number(b) && !sea_is_int(b)) {
-        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(b));
+        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(b));
     }
     return sea_number_val(na + nb);
 }
@@ -376,9 +385,9 @@ static SeaValue val_sub(SeaVM *vm, SeaValue a, SeaValue b) {
     double na = sea_is_number(a) ? sea_as_number(a) : (sea_is_int(a) ? (double)sea_as_int(a) : 0);
     double nb = sea_is_number(b) ? sea_as_number(b) : (sea_is_int(b) ? (double)sea_as_int(b) : 0);
     if (!sea_is_number(a) && !sea_is_int(a))
-        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(a));
+        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(a));
     if (!sea_is_number(b) && !sea_is_int(b))
-        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(b));
+        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(b));
     return sea_number_val(na - nb);
 }
 
@@ -389,16 +398,24 @@ static SeaValue val_mul(SeaVM *vm, SeaValue a, SeaValue b) {
     double na = sea_is_number(a) ? sea_as_number(a) : (sea_is_int(a) ? (double)sea_as_int(a) : 0);
     double nb = sea_is_number(b) ? sea_as_number(b) : (sea_is_int(b) ? (double)sea_as_int(b) : 0);
     if (!sea_is_number(a) && !sea_is_int(a))
-        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(a));
+        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(a));
     if (!sea_is_number(b) && !sea_is_int(b))
-        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(b));
+        sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(b));
     return sea_number_val(na * nb);
+}
+
+/* Integer // and % round toward minus infinity, like their float versions:
+ * a == (a // b) * b + a % b, and a % b has the sign of b. */
+static inline int64_t floor_div(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    if ((a % b != 0) && ((a ^ b) < 0)) q--;
+    return q;
 }
 
 static double to_number(SeaVM *vm, SeaValue v) {
     if (sea_is_number(v)) return sea_as_number(v);
     if (sea_is_int(v)) return (double)sea_as_int(v);
-    sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", sea_type_name(v));
+    sea_vm_error_noreturn(vm, "attempt to perform arithmetic on %s", arith_what(v));
 }
 
 static int64_t to_int(SeaVM *vm, SeaValue v) {
@@ -461,6 +478,8 @@ SeaString* sea_vm_tostring(SeaVM *vm, SeaValue v) {
             }
             case OBJ_CHANNEL:
                 return sea_string_from_cstr("channel");
+            case OBJ_BIGINT:
+                return sea_bigint_to_string((SeaBigInt*)obj, 10);
             default: {
                 char buf[64];
                 snprintf(buf, sizeof(buf), "object(0x%p)", (void*)obj);
@@ -958,6 +977,26 @@ static inline void defer_entry_release(SeaDeferEntry *de) {
     for (int j = 0; j < de->argc; j++) vm_release_val(de->args[j]);
     de->fn = SEA_NIL_VAL;
     de->argc = 0;
+}
+
+/* Slow path of < <= > >= (op 0..3) when an operand is not an int, number or
+ * string: a bigint compares with numbers by value; anything else is an
+ * error. A NaN makes every comparison false. */
+static __attribute__((noinline)) bool big_compare(SeaVM *vm, uint32_t *ip, SeaCallFrame *frame,
+                                                  SeaValue a, SeaValue b, int op) {
+    int c;
+    int k = sea_bigint_compare(a, b, &c);
+    if (k < 0 || (!sea_is_bigint(a) && !sea_is_bigint(b))) {
+        frame->ip = ip;
+        sea_vm_error_noreturn(vm, "attempt to compare %s with %s", sea_type_name(a), sea_type_name(b));
+    }
+    if (k == 0) return false;
+    switch (op) {
+        case 0:  return c < 0;
+        case 1:  return c <= 0;
+        case 2:  return c > 0;
+        default: return c >= 0;
+    }
 }
 
 // ---- Iterator state for for-in ----
@@ -1484,7 +1523,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         if (sea_is_int(REG(b)) && sea_is_int(REG(c))) {
             int64_t nb = sea_as_int(REG(c));
             if (nb == 0) sea_vm_error_noreturn(vm, "division by zero");
-            REG(a) = sea_int_val(sea_as_int(REG(b)) / nb);
+            REG(a) = sea_int_val(floor_div(sea_as_int(REG(b)), nb));
         } else {
             double nb = to_number(vm, REG(c));
             REG(a) = sea_number_val(floor(to_number(vm, REG(b)) / nb));
@@ -1611,7 +1650,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         if (SEA_LIKELY(sea_is_int(vb) && sea_is_int(vc))) {
             int64_t nc = sea_as_int(vc);
             if (SEA_UNLIKELY(nc == 0)) { SAVE_IP(); sea_vm_error_noreturn(vm, "division by zero"); }
-            REG(a) = sea_int_val(sea_as_int(vb) / nc);
+            REG(a) = sea_int_val(floor_div(sea_as_int(vb), nc));
         } else {
             SAVE_IP();
             double nb = to_number(vm, vb);
@@ -1734,7 +1773,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
             res = to_number(vm, lv) < to_number(vm, rv);
         else if (str_of(lv) && str_of(rv))
             res = strcmp(str_of(lv)->data, str_of(rv)->data) < 0;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with %s", sea_type_name(lv), sea_type_name(rv)); }
+        else res = big_compare(vm, ip, frame, lv, rv, 0);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1749,7 +1788,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
             res = to_number(vm, lv) <= to_number(vm, rv);
         else if (str_of(lv) && str_of(rv))
             res = strcmp(str_of(lv)->data, str_of(rv)->data) <= 0;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with %s", sea_type_name(lv), sea_type_name(rv)); }
+        else res = big_compare(vm, ip, frame, lv, rv, 1);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1764,7 +1803,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
             res = to_number(vm, lv) > to_number(vm, rv);
         else if (str_of(lv) && str_of(rv))
             res = strcmp(str_of(lv)->data, str_of(rv)->data) > 0;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with %s", sea_type_name(lv), sea_type_name(rv)); }
+        else res = big_compare(vm, ip, frame, lv, rv, 2);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1779,7 +1818,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
             res = to_number(vm, lv) >= to_number(vm, rv);
         else if (str_of(lv) && str_of(rv))
             res = strcmp(str_of(lv)->data, str_of(rv)->data) >= 0;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with %s", sea_type_name(lv), sea_type_name(rv)); }
+        else res = big_compare(vm, ip, frame, lv, rv, 3);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1791,7 +1830,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         bool res;
         if (SEA_LIKELY(sea_is_int(vb))) res = sea_as_int(vb) < imm;
         else if (sea_is_number(vb)) res = sea_as_number(vb) < (double)imm;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with integer", sea_type_name(vb)); }
+        else res = big_compare(vm, ip, frame, vb, sea_int_val(imm), 0);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1803,7 +1842,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         bool res;
         if (SEA_LIKELY(sea_is_int(vb))) res = sea_as_int(vb) <= imm;
         else if (sea_is_number(vb)) res = sea_as_number(vb) <= (double)imm;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with integer", sea_type_name(vb)); }
+        else res = big_compare(vm, ip, frame, vb, sea_int_val(imm), 1);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1815,7 +1854,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         bool res;
         if (SEA_LIKELY(sea_is_int(vb))) res = sea_as_int(vb) > imm;
         else if (sea_is_number(vb)) res = sea_as_number(vb) > (double)imm;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with integer", sea_type_name(vb)); }
+        else res = big_compare(vm, ip, frame, vb, sea_int_val(imm), 2);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }
@@ -1827,7 +1866,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         bool res;
         if (SEA_LIKELY(sea_is_int(vb))) res = sea_as_int(vb) >= imm;
         else if (sea_is_number(vb)) res = sea_as_number(vb) >= (double)imm;
-        else { SAVE_IP(); sea_vm_error_noreturn(vm, "attempt to compare %s with integer", sea_type_name(vb)); }
+        else res = big_compare(vm, ip, frame, vb, sea_int_val(imm), 3);
         REG(a) = sea_bool_val(res);
         DISPATCH();
     }

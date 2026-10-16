@@ -8,7 +8,7 @@ local function show(label, f)
     print(label, r)
 end
 
--- modulo: floored, sign follows the divisor (int and float)
+-- modulo and integer division: floored (sign of % follows the divisor), int and float
 local ia = {7, -7, 7, -7, 0, 5}
 local ib = {3, 3, -3, -3, 4, 5}
 for i = 0, len(ia) - 1 do

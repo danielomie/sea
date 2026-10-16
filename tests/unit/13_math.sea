@@ -33,3 +33,10 @@ print(math.floor(math.log(math.exp(5)) + 0.5))  -- 5
 local zero = 0
 local nan = zero / zero
 print(type(nan), isnan(nan), nan ~= nil, type(math.huge - math.huge))
+
+-- // and % round toward minus infinity, whether the compiler folds the
+-- constants or not (folding used C's truncating / and %)
+local na, nb = -7, 2
+local function divmod(x, y) return x // y, x % y end
+local dq, dr = divmod(-7, 2)
+print(-7 // 2, -7 % 2, na // nb, na % nb, dq, dr, 7 // -2, 7 % -2)

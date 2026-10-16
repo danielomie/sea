@@ -97,7 +97,47 @@ db:exec("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
 print("enum", db:value("SELECT 'happy'::mood"), show(db:value("SELECT ['ok', 'sad']::mood[]")))
 print("union", db:value("SELECT union_value(num := 2)::UNION(num INTEGER, str VARCHAR)"))
 print("tz", db:value("SELECT TIMESTAMPTZ '2024-01-02 03:04:05+00'"))
-print(err(db:value("SELECT 1::VARIANT")))
+
+-- ---- exact integers, BIGNUM, GEOMETRY, VARIANT -------------------------------------
+local wide = db:row([[SELECT 9007199254740993::BIGINT AS big, 140737488355328::BIGINT AS num, 18446744073709551615::UBIGINT AS ub,
+  170141183460469231731687303715884105727::HUGEINT AS hi, -170141183460469231731687303715884105727::HUGEINT AS lo,
+  340282366920938463463374607431768211455::UHUGEINT AS uh,
+  -123456789012345678901234567890123::BIGNUM AS bn, 0::BIGNUM AS bz]])
+local ks = []
+for k, _ in wide do ks[] = k end
+sort.sort(ks)
+for _, k in ks do print(k, type(wide[k]), wide[k]) end
+print(db:value("SELECT ?::HUGEINT + 1", bigint.new("100000000000000000000")))
+print(db:value("SELECT ? * 2", bigint.new("123456789012345678901234567890123456789012")))
+print(db:value("SELECT typeof(?)", bigint.new("123456789012345678901234567890123456789012")), db:value("SELECT typeof(?)", bigint.new("100000000000000000000")), db:value("SELECT typeof(?)", bigint.new(5)))
+print(db:value("SELECT 'POINT(1 2)'::GEOMETRY").type, string.join(db:value("SELECT 'POINT(1 2)'::GEOMETRY").coordinates, ","))
+local g = db:value("SELECT 'POLYGON((0 0, 1 0, 1 1, 0 0))'::GEOMETRY")
+print(g.type, len(g.coordinates), len(g.coordinates[0]), g.coordinates[0][2][0])
+local gc = db:value("SELECT 'GEOMETRYCOLLECTION(POINT (1 2), MULTILINESTRING((0 0, 1 1), (2 2, 3 3)), POINT EMPTY)'::GEOMETRY")
+print(gc.type, gc.geometries[0].type, string.join(gc.geometries[0].coordinates, ","), gc.geometries[1].type, gc.geometries[1].coordinates[1][1][0], len(gc.geometries[2].coordinates))
+local v = db:value("SELECT {'a': 1, 'b': [true, NULL, false], 'c': {'d': 2.5::DOUBLE}}::VARIANT")
+print(type(v), v.a, len(v.b), v.b[0], v.b[1], v.b[2], v.c.d)
+print(db:value("SELECT 42::VARIANT"), db:value("SELECT NULL::VARIANT"), db:value("SELECT DATE '2024-02-29'::VARIANT"), db:value("SELECT 12.345::DECIMAL(10,3)::VARIANT"))
+print(string.join(db:value("SELECT 'POINT Z (1 2 3)'::GEOMETRY").coordinates, ","), db:value("SELECT 'POINT(1 2)'::GEOMETRY::VARCHAR"))
+local all = db:value([[SELECT {'i8': 1::TINYINT, 'u64': 18446744073709551615::UBIGINT, 'h': -170141183460469231731687303715884105727::HUGEINT,
+  'f': 1.5::FLOAT, 'dec': -1.5::DECIMAL(5,1), 'bigdec': 12.345::DECIMAL(30,3), 's': 'olá', 'bl': '\xAA'::BLOB,
+  'u': '550e8400-e29b-41d4-a716-446655440000'::UUID, 't': TIME '13:45:07.25', 'tn': TIME_NS '13:45:07.123456789',
+  'ts': TIMESTAMP '2024-01-02 03:04:05.5', 'tss': TIMESTAMP_S '2024-01-02 03:04:05', 'tms': TIMESTAMP_MS '2024-01-02 03:04:05.5',
+  'tns': TIMESTAMP_NS '2024-01-02 03:04:05.123456789', 'tz': TIMESTAMPTZ '2024-01-02 03:04:05+00', 'ttz': TIMETZ '13:45:07+02',
+  'iv': INTERVAL '1 year 3 days', 'bn': 123456789012345678901234567890::BIGNUM, 'bit': '101'::BIT, 'g': 'POINT(3 4)'::GEOMETRY,
+  'e': 'happy'::ENUM('sad','happy'), 'arr': [1,2]::INTEGER[2], 'm': MAP {'k': 1}}::VARIANT]])
+local aks = []
+for k, _ in all do ks[] = k end
+sort.sort(aks)
+for _, k in aks do
+    local x = all[k]
+    if type(x) == "table" and x.type then x = x.type .. ":" .. string.join(x.coordinates, ",")
+    elseif type(x) == "table" then x = "months=" .. tostring(x.months) .. " days=" .. tostring(x.days)
+    elseif type(x) == "array" then x = "array(" .. len(x) .. ")"
+    elseif k == "bl" then x = string.byte(x, 1) end
+    print(k, type(all[k]), x)
+end
+
 
 -- ---- columns ---------------------------------------------------------------------------
 local cols = db:columns("SELECT id, name, age, score FROM people ORDER BY id")

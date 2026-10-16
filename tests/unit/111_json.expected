@@ -78,3 +78,5 @@ json.encode: cannot encode a value of type function
 -- round trip
 {"id":7,"name":"sea","nested":{"x":[1,2,{"y":"z"}]},"none":null,"ok":true,"score":98.25,"tags":["a","b"]}
 true
+bigint decode	number	bigint	1234567890123456789012	int	-99999999999999999999	1.5
+bigint encode	{"f":1.5,"id":1234567890123456789012,"neg":-99999999999999999999,"small":5}

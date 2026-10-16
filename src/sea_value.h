@@ -135,6 +135,9 @@ SEA_INLINE bool sea_is_truthy(SeaValue v) {
 }
 
 // Value equality
+/* sea_bigint.c: == when a bigint is involved (by value against int/number) */
+bool sea_bigint_equal(SeaValue a, SeaValue b);
+
 SEA_INLINE bool sea_val_equal(SeaValue a, SeaValue b) {
     if (sea_is_number(a) && sea_is_number(b)) {
         return sea_as_number(a) == sea_as_number(b);
@@ -146,6 +149,7 @@ SEA_INLINE bool sea_val_equal(SeaValue a, SeaValue b) {
     if (sea_is_number(a) && sea_is_int(b)) {
         return sea_as_number(a) == (double)sea_as_int(b);
     }
+    if (a != b && (sea_is_obj(a) || sea_is_obj(b))) return sea_bigint_equal(a, b);
     return a == b;
 }
 

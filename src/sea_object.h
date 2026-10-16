@@ -41,6 +41,7 @@ typedef enum {
     OBJ_STRUCT    = 13,  /* fixed-layout struct from {k=v,...} literals */
     OBJ_INT_ARRAY = 14,  /* typed int64_t array, no per-element RC       */
     OBJ_FLOAT_ARRAY= 15, /* typed double array, no per-element RC        */
+    OBJ_BIGINT    = 16,  /* arbitrary-precision integer (sea_bigint.h)    */
 } SeaObjType;
 
 struct SeaObject {

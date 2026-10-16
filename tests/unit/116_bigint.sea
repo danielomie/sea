@@ -1,0 +1,67 @@
+-- Test: bigint (arbitrary-precision integers)
+-- Construction, the bigint module's arithmetic (floored div/mod), comparisons
+-- and == with int/number, tostring/format/concat, table and map keys, sort,
+-- and the errors (operators do not take bigints).
+
+local a = bigint.new("123456789012345678901234567890")
+local b = bigint.new(987654321)
+print(type(a), a, b)
+print(bigint.add(a, b), bigint.sub(b, a), bigint.mul(a, a))
+print(bigint.div(a, b), bigint.mod(a, b), bigint.div(bigint.neg(a), b), bigint.mod(bigint.neg(a), b))
+print(bigint.div(-7, 2), bigint.mod(-7, 2), bigint.div(7, -2), bigint.mod(7, -2))
+print(bigint.pow(2, 200))
+print(bigint.pow(-1, bigint.new("1000000000000000000001")), bigint.pow(0, 0))
+print(a > b, a < b, a == bigint.new("123456789012345678901234567890"), b == 987654321, b == 987654321.0, b < 987654321.5, b > 1e300)
+print(bigint.new(5) <= 5, 5 >= bigint.new(5), bigint.new(5) < 0 / 0, bigint.new(-3) < -2)
+print(bigint.tostring(a, 16), bigint.new("ff", 16), bigint.new("0x_ff"), bigint.new("0b1010"), bigint.new("-1_000_000"))
+print(bigint.toint(b), bigint.toint(a), bigint.tonumber(a), tonumber(a))
+print(string.format("[%d] [%25d] [%-12d] [%+d] [%x] [%X] [%010d]", a, a, b, b, a, b, bigint.new(-42)))
+print("concat " .. a)
+print(bigint.new("abc").message, bigint.new(2.5).message)
+local t = {}
+t[bigint.new("99999999999999999999")] = "big"
+print(t[bigint.new("99999999999999999999")], t[99])
+local m = [=]
+m[bigint.new(7)] = "seven"
+print(m[bigint.new(7)])
+local xs = []
+xs[] = bigint.new("100000000000000000000")
+xs[] = 3
+xs[] = 2.5
+xs[] = bigint.new(-5)
+sort.sort(xs)
+print(xs[0], xs[1], xs[2], xs[3])
+print(bigint.cmp(a, b), bigint.cmp(1, 1), bigint.abs(-9))
+local function try(f)
+    local msg = nil
+    local function run()
+        defer function()
+            local e = recover()
+            if is_error(e) then msg = e.message elseif e ~= nil then msg = tostring(e) end
+        end
+        f()
+    end
+    run()
+    if msg == nil then return "no error" end
+    local i = string.find(msg, ": ", 1)      -- drop "file:line: "
+    if i ~= nil then return string.sub(msg, i + 2) end
+    return msg
+end
+print(try(function() return a + 1 end))
+print(try(function() return bigint.div(a, 0) end))
+print(try(function() return bigint.add(a, 1.5) end))
+print(try(function() return a < "x" end))
+print(try(function() return bigint.pow(3, 100000000000) end))
+print(tonumber("140737488355328"), tonumber("9999999999999999999"), tonumber("12"))
+
+-- comparisons inside a loop (the JIT bails to the interpreter on bigints)
+local big = bigint.new("1000000000000000000000")
+local count = 0
+for i = 1, 300 do
+    if big > i and i < big and not (big == i) then count = count + 1 end
+end
+print("loop", count)
+-- factorial of 30 and a round trip through strings
+local f = bigint.new(1)
+for i = 2, 30 do f = bigint.mul(f, i) end
+print("30!", f, bigint.new(bigint.tostring(f, 36), 36) == f)

@@ -1164,7 +1164,7 @@ static void emit_instr(JitCtx *J, int idx) {
     }
 
     /* ---- modulo (floored) and integer division ----
-     * int,int: MOD floors, // truncates (C division) — exactly as the
+     * int,int: both floor (toward minus infinity), exactly as the
      * interpreter; a zero divisor bails so the interpreter raises "division by
      * zero". Otherwise both coerce to double: MOD = fmod adjusted to the sign
      * of the divisor, // = floor(b / c). Non-numeric operands bail. */
@@ -1180,9 +1180,22 @@ static void emit_instr(JitCtx *J, int idx) {
         gcc_jit_rvalue *nc = as_int(J, reg(J, c));
         gcc_jit_block *nz = fast_or_bail(J, ib, cmp(J, GCC_JIT_COMPARISON_NE, nc, ci64(J, 0)), idx);
         if (!is_mod) {
-            store(J, nz, a, int_val(J, bin(J, GCC_JIT_BINARY_OP_DIVIDE, J->i64,
-                                           as_int(J, reg(J, b)), nc)));
-            go(J, nz, next);
+            /* q = b / c; if (b % c != 0 && (b ^ c) < 0) q -= 1 */
+            gcc_jit_rvalue *nb = as_int(J, reg(J, b));
+            char qn[24]; snprintf(qn, sizeof(qn), "idiv%d", idx);
+            gcc_jit_lvalue *q = gcc_jit_function_new_local(J->fn, NULL, J->i64, qn);
+            gcc_jit_block_add_assignment(nz, NULL, q, bin(J, GCC_JIT_BINARY_OP_DIVIDE, J->i64, nb, nc));
+            gcc_jit_rvalue *need = bin(J, GCC_JIT_BINARY_OP_LOGICAL_AND, J->t_bool,
+                cmp(J, GCC_JIT_COMPARISON_NE, bin(J, GCC_JIT_BINARY_OP_MODULO, J->i64, nb, nc), ci64(J, 0)),
+                cmp(J, GCC_JIT_COMPARISON_LT,
+                    bin(J, GCC_JIT_BINARY_OP_BITWISE_XOR, J->i64, nb, nc), ci64(J, 0)));
+            gcc_jit_block *adj = newblk(J), *done = newblk(J);
+            gcc_jit_block_end_with_conditional(nz, NULL, need, adj, done);
+            gcc_jit_block_add_assignment(adj, NULL, q,
+                bin(J, GCC_JIT_BINARY_OP_MINUS, J->i64, gcc_jit_lvalue_as_rvalue(q), ci64(J, 1)));
+            gcc_jit_block_end_with_jump(adj, NULL, done);
+            store(J, done, a, int_val(J, gcc_jit_lvalue_as_rvalue(q)));
+            go(J, done, next);
         } else {
             /* r = b % c; if (r != 0 && (r ^ c) < 0) r += c */
             gcc_jit_rvalue *r0 = bin(J, GCC_JIT_BINARY_OP_MODULO, J->i64, as_int(J, reg(J, b)), nc);

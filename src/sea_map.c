@@ -2,6 +2,7 @@
 #include "sea_rope.h"
 #include "sea_string.h"
 #include "sea_object.h"
+#include "sea_bigint.h"
 
 /*
  * Swiss table with SIMD-accelerated probing.
@@ -80,6 +81,8 @@ static bool key_equal(SeaValue a, SeaValue b) {
         return sea_as_number(a) == (double)sea_as_int(b);
     if (sea_is_string(a) && sea_is_string(b))
         return sea_string_equal(SEA_AS_STRING(a), SEA_AS_STRING(b));
+    if (sea_is_bigint(a) && sea_is_bigint(b))     /* bigint keys by value (bigint(5) and 5 differ) */
+        return sea_bigint_cmp(SEA_AS_BIGINT(a), SEA_AS_BIGINT(b)) == 0;
     return a == b;
 }
 
@@ -95,6 +98,8 @@ static uint64_t hash64(SeaValue v) {
         SeaString *s = SEA_AS_STRING(v);
         sea_string_ensure_hash(s);
         h = (uint64_t)sea_string_pure_hash(s);
+    } else if (sea_is_bigint(v)) {
+        h = sea_bigint_hash(SEA_AS_BIGINT(v));
     } else {
         h = v;
     }

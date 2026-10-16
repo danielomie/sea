@@ -15,10 +15,12 @@
  * (sea_netpoll.h: an eventfd wakes it); on the main thread it runs in place.
  * The result is turned into Sea values on the calling thread.
  *
- * Values: integers → int (number past ±2^47), floats and decimals → number,
+ * Values: integers are exact: int within Sea's ±2^47, number up to ±2^53,
+ * bigint beyond (BIGNUM is always a bigint); floats and decimals → number,
  * VARCHAR/BLOB → string, dates and times → ISO strings, INTERVAL → table,
  * UUID → string, ENUM → string, LIST/ARRAY → array, STRUCT → table,
- * MAP → map, UNION → the member's value, NULL → nil.
+ * MAP → map, UNION → the member's value, GEOMETRY → a GeoJSON-shaped table,
+ * VARIANT → whatever value it holds, NULL → nil.
  */
 
 #include "sea.h"
@@ -66,6 +68,53 @@ static char *dupstr(const char *s) {
 static SeaValue int_or_number(int64_t v) {
     if (v >= SEA_INT_MIN && v <= SEA_INT_MAX) return sea_int_val(v);
     return sea_number_val((double)v);
+}
+
+/* Integers keep every digit: an int within Sea's range, a number while a
+ * double holds the value exactly (|v| <= 2^53), a bigint beyond. */
+static SeaValue exact_i64(int64_t v) {
+    if (v >= SEA_INT_MIN && v <= SEA_INT_MAX) return sea_int_val(v);
+    if (v >= -(INT64_C(1) << 53) && v <= (INT64_C(1) << 53)) return sea_number_val((double)v);
+    return sea_obj_val(&sea_bigint_from_i64(v)->obj);
+}
+
+static SeaValue exact_u64(uint64_t v) {
+    if (v <= (uint64_t)INT64_MAX) return exact_i64((int64_t)v);
+    return sea_obj_val(&sea_bigint_from_u64(v)->obj);
+}
+
+static SeaValue exact_u128(uint64_t upper, uint64_t lower, bool neg) {
+    uint8_t be[16];
+    for (int i = 0; i < 8; i++) {
+        be[7 - i] = (uint8_t)(upper >> (8 * i));
+        be[15 - i] = (uint8_t)(lower >> (8 * i));
+    }
+    return sea_obj_val(&sea_bigint_from_bytes(be, 16, neg)->obj);
+}
+
+static SeaValue exact_i128(int64_t upper, uint64_t lower) {
+    if ((upper == 0 && lower <= (uint64_t)INT64_MAX) || (upper == -1 && lower > (uint64_t)INT64_MAX))
+        return exact_i64((int64_t)lower);
+    unsigned __int128 x = ((unsigned __int128)(uint64_t)upper << 64) | lower;
+    bool neg = upper < 0;
+    if (neg) x = (unsigned __int128)0 - x;
+    return exact_u128((uint64_t)(x >> 64), (uint64_t)x, neg);
+}
+
+/* A BIGNUM's storage: 3 header bytes (top bit set = positive, then the
+ * byte count) and the magnitude big-endian; a negative one has every byte
+ * inverted. */
+static SeaValue bignum_val(const uint8_t *d, size_t n) {
+    if (n < 3) return SEA_NIL_VAL;
+    bool neg = !(d[0] & 0x80);
+    uint8_t *t = malloc(n);
+    if (!t) return SEA_NIL_VAL;
+    for (size_t i = 0; i < n; i++) t[i] = neg ? (uint8_t)~d[i] : d[i];
+    size_t size = ((size_t)(t[0] & 0x7F) << 16) | ((size_t)t[1] << 8) | t[2];
+    if (size > n - 3) size = n - 3;
+    SeaValue r = sea_obj_val(&sea_bigint_from_bytes(t + 3, size, neg)->obj);
+    free(t);
+    return r;
 }
 
 /* Borrowed field of a table, map or struct (nil when absent). */
@@ -411,6 +460,28 @@ static duckdb_value to_dvalue(SeaVM *vm, SeaValue v, VErr *e, int depth) {
     if (sea_is_bool(v)) return duckdb_create_bool(sea_as_bool(v));
     if (sea_is_int(v)) return duckdb_create_int64(sea_as_int(v));
     if (sea_is_number(v)) return duckdb_create_double(sea_as_number(v));
+    if (sea_is_bigint(v)) {                  /* BIGINT, HUGEINT or BIGNUM: the narrowest */
+        SeaBigInt *b = SEA_AS_BIGINT(v);
+        int64_t i64;
+        if (sea_bigint_to_i64(b, &i64)) return duckdb_create_int64(i64);
+        size_t len = sea_bigint_byte_len(b);
+        uint8_t *be = malloc(len ? len : 1);
+        if (!be) { snprintf(e->msg, sizeof e->msg, "out of memory"); return NULL; }
+        sea_bigint_to_bytes(b, be, len);
+        duckdb_value r;
+        if (len < 16 || (len == 16 && be[0] < 0x80)) {
+            unsigned __int128 x = 0;
+            for (size_t i = 0; i < len; i++) x = (x << 8) | be[i];
+            if (b->neg) x = (unsigned __int128)0 - x;
+            duckdb_hugeint h = { (uint64_t)x, (int64_t)(uint64_t)(x >> 64) };
+            r = duckdb_create_hugeint(h);
+        } else {
+            duckdb_bignum bn = { be, len, b->neg != 0 };
+            r = duckdb_create_bignum(bn);
+        }
+        free(be);
+        return r;
+    }
     if (sea_is_string(v) || sea_is_rope(v)) {
         SeaString *s = sea_value_get_flat_string(v);
         duckdb_value r = duckdb_create_varchar_length(s->data, s->len);
@@ -713,9 +784,6 @@ static const char *ti_build(TI *t, duckdb_logical_type lt) {
             t->width = duckdb_decimal_width(lt);
             t->scale = duckdb_decimal_scale(lt);
             break;
-        case DUCKDB_TYPE_BIGNUM:
-        case DUCKDB_TYPE_GEOMETRY:
-        case DUCKDB_TYPE_VARIANT:
         case DUCKDB_TYPE_ANY:
         case DUCKDB_TYPE_INVALID:
             return type_name(t->id);
@@ -846,13 +914,6 @@ static SeaValue fmt_uuid(duckdb_hugeint h) {
     return str_val(buf, 36);
 }
 
-static SeaValue huge_val(duckdb_hugeint h) {
-    if ((h.upper == 0 && h.lower <= (uint64_t)SEA_INT_MAX) ||
-        (h.upper == -1 && (int64_t)h.lower >= SEA_INT_MIN && (int64_t)h.lower < 0))
-        return sea_int_val((int64_t)h.lower);
-    return sea_number_val((double)h.upper * 18446744073709551616.0 + (double)h.lower);
-}
-
 static const double POW10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12,
                                 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22, 1e23,
                                 1e24, 1e25, 1e26, 1e27, 1e28, 1e29, 1e30, 1e31, 1e32, 1e33, 1e34,
@@ -864,9 +925,8 @@ static SeaValue str_t_val(duckdb_string_t *s) {
     return str_val(d, n);
 }
 
-static SeaValue bit_val(duckdb_string_t *s) {
-    uint32_t n = s->value.inlined.length;
-    const unsigned char *d = (const unsigned char *)(n <= 12 ? s->value.inlined.inlined : s->value.pointer.ptr);
+/* A BIT value: a padding count byte, then the bits (the first `pad` unused). */
+static SeaValue bit_bytes(const unsigned char *d, size_t n) {
     if (n < 1) return str_val("", 0);
     unsigned pad = d[0];
     size_t bits = (size_t)(n - 1) * 8 - pad;
@@ -881,7 +941,333 @@ static SeaValue bit_val(duckdb_string_t *s) {
     return r;
 }
 
+static const unsigned char *str_t_data(duckdb_string_t *s, uint32_t *n) {
+    *n = s->value.inlined.length;
+    return (const unsigned char *)(*n <= 12 ? s->value.inlined.inlined : s->value.pointer.ptr);
+}
+
+static SeaValue bit_val(duckdb_string_t *s) {
+    uint32_t n;
+    const unsigned char *d = str_t_data(s, &n);
+    return bit_bytes(d, n);
+}
+
 typedef struct { duckdb_vector v; void *data; uint64_t *valid; } Vec;
+
+/* ---- shared scalar formatting (columns and VARIANT values) ---------------- */
+
+static SeaValue date_val(int32_t days) {
+    if (days == INT32_MAX) return str_val("infinity", 8);
+    if (days == -INT32_MAX) return str_val("-infinity", 9);
+    char buf[40];
+    int n = fmt_date(buf, days);
+    return str_val(buf, (size_t)n);
+}
+
+static SeaValue clock_val(int64_t units, int64_t per_sec, int digits) {
+    char buf[40];
+    int n = fmt_clock(buf, units, per_sec, digits);
+    return str_val(buf, (size_t)n);
+}
+
+static SeaValue timetz_val(uint64_t bits) {
+    duckdb_time_tz tz = { bits };
+    duckdb_time_tz_struct s = duckdb_from_time_tz(tz);
+    int64_t micros = ((int64_t)s.time.hour * 3600 + s.time.min * 60 + s.time.sec) * 1000000 + s.time.micros;
+    char buf[48];
+    int n = fmt_clock(buf, micros, 1000000, 6);
+    int off = s.offset, a = off < 0 ? -off : off;
+    n += sprintf(buf + n, "%c%02d", off < 0 ? '-' : '+', a / 3600);
+    if (a % 3600) n += sprintf(buf + n, ":%02d", a / 60 % 60);
+    if (a % 60) n += sprintf(buf + n, ":%02d", a % 60);
+    return str_val(buf, (size_t)n);
+}
+
+static SeaValue interval_val(int32_t months, int32_t days, int64_t micros) {
+    SeaTable *tb = sea_table_new(TABLE_MAP);
+    sea_table_set_str(tb, "months", sea_int_val(months));
+    sea_table_set_str(tb, "days", sea_int_val(days));
+    sea_table_set_str(tb, "micros", int_or_number(micros));
+    return sea_obj_val(&tb->obj);
+}
+
+static SeaValue decimal_val(double raw, unsigned scale) {
+    return sea_number_val(raw / POW10[scale <= 38 ? scale : 38]);
+}
+
+/* ---- GEOMETRY: WKB → {type, coordinates} (or {type, geometries}) ---------- */
+
+typedef struct { const uint8_t *p; size_t n, pos; bool ok; } Wkb;
+
+static uint32_t wkb_u32(Wkb *w, bool le) {
+    if (w->pos + 4 > w->n) { w->ok = false; return 0; }
+    const uint8_t *b = w->p + w->pos;
+    w->pos += 4;
+    return le ? (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24
+              : (uint32_t)b[3] | (uint32_t)b[2] << 8 | (uint32_t)b[1] << 16 | (uint32_t)b[0] << 24;
+}
+
+static double wkb_f64(Wkb *w, bool le) {
+    if (w->pos + 8 > w->n) { w->ok = false; return 0; }
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++) b[i] = w->p[w->pos + (le ? (size_t)i : (size_t)(7 - i))];
+    w->pos += 8;
+    double d;
+    memcpy(&d, b, 8);
+    return d;
+}
+
+/* Byte order and type of a geometry header: the base type (1..7) and the
+ * number of ordinates (2, 3 with Z or M, 4 with both). */
+static uint32_t wkb_header(Wkb *w, bool *le, int *nc) {
+    if (w->pos >= w->n) { w->ok = false; return 0; }
+    *le = w->p[w->pos++] == 1;
+    uint32_t t = wkb_u32(w, *le);
+    bool z = (t & 0x80000000u) != 0, m = (t & 0x40000000u) != 0;      /* EWKB flags */
+    if (t & 0x20000000u) wkb_u32(w, *le);                              /* EWKB SRID */
+    t &= 0x0FFFFFFFu;
+    if (t >= 3000) { z = m = true; t -= 3000; }                        /* ISO */
+    else if (t >= 2000) { m = true; t -= 2000; }
+    else if (t >= 1000) { z = true; t -= 1000; }
+    *nc = 2 + z + m;
+    return t;
+}
+
+static SeaValue wkb_position(Wkb *w, bool le, int nc, bool point) {
+    double c[4];
+    bool all_nan = true;
+    for (int i = 0; i < nc; i++) {
+        c[i] = wkb_f64(w, le);
+        if (!isnan(c[i])) all_nan = false;
+    }
+    SeaArray *a = sea_array_new((uint32_t)nc);
+    if (!(point && all_nan))                  /* POINT EMPTY: no ordinates */
+        for (int i = 0; i < nc; i++) sea_array_push(a, sea_number_val(c[i]));
+    return sea_obj_val(&a->obj);
+}
+
+static SeaValue wkb_coords(Wkb *w, uint32_t type, bool le, int nc) {
+    if (type == 1) return wkb_position(w, le, nc, true);
+    uint32_t count = wkb_u32(w, le);
+    if (!w->ok || count > w->n) { w->ok = false; return SEA_NIL_VAL; }
+    SeaArray *a = sea_array_new(count);
+    for (uint32_t i = 0; i < count && w->ok; i++) {
+        if (type == 2) {
+            sea_array_push_move(a, wkb_position(w, le, nc, false));
+        } else if (type == 3) {
+            sea_array_push_move(a, wkb_coords(w, 2, le, nc));          /* a ring: like a line */
+        } else {                                                        /* 4, 5, 6: sub-geometries */
+            bool sle;
+            int snc;
+            uint32_t st = wkb_header(w, &sle, &snc);
+            if (st != type - 3) { w->ok = false; break; }
+            sea_array_push_move(a, wkb_coords(w, st, sle, snc));
+        }
+    }
+    return sea_obj_val(&a->obj);
+}
+
+static SeaValue wkb_geom(Wkb *w, int depth) {
+    static const char *names[] = { "", "Point", "LineString", "Polygon", "MultiPoint",
+                                   "MultiLineString", "MultiPolygon", "GeometryCollection" };
+    bool le;
+    int nc;
+    uint32_t t = wkb_header(w, &le, &nc);
+    if (!w->ok || t < 1 || t > 7 || depth > 32) { w->ok = false; return SEA_NIL_VAL; }
+    SeaTable *g = sea_table_new(TABLE_MAP);
+    SeaValue name = str_val(names[t], strlen(names[t]));
+    sea_table_set_str(g, "type", name);
+    val_release(name);
+    SeaValue body;
+    if (t == 7) {
+        uint32_t count = wkb_u32(w, le);
+        if (count > w->n) w->ok = false;
+        SeaArray *a = sea_array_new(w->ok ? count : 0);
+        for (uint32_t i = 0; i < count && w->ok; i++) sea_array_push_move(a, wkb_geom(w, depth + 1));
+        body = sea_obj_val(&a->obj);
+        sea_table_set_str(g, "geometries", body);
+    } else {
+        body = wkb_coords(w, t, le, nc);
+        sea_table_set_str(g, "coordinates", body);
+    }
+    val_release(body);
+    return sea_obj_val(&g->obj);
+}
+
+/* A GEOMETRY value; malformed WKB comes back as its bytes. */
+static SeaValue geometry_val(const uint8_t *d, size_t n) {
+    Wkb w = { d, n, 0, true };
+    SeaValue g = wkb_geom(&w, 0);
+    if (w.ok) return g;
+    val_release(g);
+    return str_val((const char *)d, n);
+}
+
+/* ---- VARIANT ------------------------------------------------------------------
+ * Stored as STRUCT(keys VARCHAR[], children STRUCT(keys_index, values_index)[],
+ * values STRUCT(type_id UTINYINT, byte_offset UINTEGER)[], data BLOB): values[0]
+ * is the root; scalars live in data at byte_offset (lengths as ULEB128);
+ * objects and arrays hold a count and the first of their entries in children.
+ * (DuckDB 1.5's layout, which the C API does not describe: libs/duckdb/test.sea
+ * checks every type.) */
+
+typedef struct {
+    duckdb_string_t *keys;
+    idx_t            koff, kn;
+    uint32_t        *ckey, *cval;
+    uint64_t        *ckey_valid;
+    idx_t            coff, cn;
+    uint8_t         *vtype;
+    uint32_t        *vbyte;
+    idx_t            voff, vn;
+    const uint8_t   *data;
+    size_t           dn;
+} Var;
+
+static bool var_uleb(const Var *v, size_t *pos, uint64_t *out) {
+    uint64_t r = 0;
+    for (int shift = 0; shift < 64; shift += 7) {
+        if (*pos >= v->dn) return false;
+        uint8_t b = v->data[(*pos)++];
+        r |= (uint64_t)(b & 0x7F) << shift;
+        if (!(b & 0x80)) { *out = r; return true; }
+    }
+    return false;
+}
+
+static SeaValue var_value(const Var *v, uint64_t idx, int depth);
+
+static SeaValue var_entries(const Var *v, size_t pos, bool object, int depth) {
+    uint64_t count, start;
+    if (!var_uleb(v, &pos, &count) || !var_uleb(v, &pos, &start) || start + count > v->cn)
+        return SEA_NIL_VAL;
+    if (!object) {
+        SeaArray *a = sea_array_new((uint32_t)count);
+        for (uint64_t i = 0; i < count; i++)
+            sea_array_push_move(a, var_value(v, v->cval[v->coff + start + i], depth + 1));
+        return sea_obj_val(&a->obj);
+    }
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    for (uint64_t i = 0; i < count; i++) {
+        idx_t c = v->coff + start + i;
+        if (v->ckey_valid && !duckdb_validity_row_is_valid(v->ckey_valid, c)) continue;
+        if (v->ckey[c] >= v->kn) continue;
+        uint32_t kl;
+        const unsigned char *kd = str_t_data(&v->keys[v->koff + v->ckey[c]], &kl);
+        SeaValue k = str_val((const char *)kd, kl), x = var_value(v, v->cval[c], depth + 1);
+        sea_table_set(t, k, x);
+        val_release(k);
+        val_release(x);
+    }
+    return sea_obj_val(&t->obj);
+}
+
+static SeaValue var_value(const Var *v, uint64_t idx, int depth) {
+    if (idx >= v->vn || depth > 100) return SEA_NIL_VAL;
+    uint8_t type = v->vtype[v->voff + idx];
+    size_t pos = v->vbyte[v->voff + idx];
+    const uint8_t *d = v->data;
+    static const uint8_t width[] = { 0, 0, 0, 1, 2, 4, 8, 16, 1, 2, 4, 8, 16, 4, 8 };   /* fixed sizes */
+    if (type < sizeof width && pos + width[type] > v->dn) return SEA_NIL_VAL;
+    #define RD(T) ({ T _x; memcpy(&_x, d + pos, sizeof _x); _x; })
+    switch (type) {
+        case 0:  return SEA_NIL_VAL;
+        case 1:  return SEA_TRUE_VAL;
+        case 2:  return SEA_FALSE_VAL;
+        case 3:  return sea_int_val(RD(int8_t));
+        case 4:  return sea_int_val(RD(int16_t));
+        case 5:  return sea_int_val(RD(int32_t));
+        case 6:  return exact_i64(RD(int64_t));
+        case 7:  { uint64_t lo = RD(uint64_t); pos += 8; return exact_i128(RD(int64_t), lo); }
+        case 8:  return sea_int_val(RD(uint8_t));
+        case 9:  return sea_int_val(RD(uint16_t));
+        case 10: return sea_int_val(RD(uint32_t));
+        case 11: return exact_u64(RD(uint64_t));
+        case 12: { uint64_t lo = RD(uint64_t); pos += 8; uint64_t hi = RD(uint64_t);
+                   return hi ? exact_u128(hi, lo, false) : exact_u64(lo); }
+        case 13: return sea_number_val(RD(float));
+        case 14: return sea_number_val(RD(double));
+        case 15: {                                                      /* DECIMAL */
+            uint64_t w, sc;
+            if (!var_uleb(v, &pos, &w) || !var_uleb(v, &pos, &sc)) return SEA_NIL_VAL;
+            size_t size = w <= 4 ? 2 : w <= 9 ? 4 : w <= 18 ? 8 : 16;
+            if (pos + size > v->dn) return SEA_NIL_VAL;
+            double raw;
+            if (size == 2) raw = RD(int16_t);
+            else if (size == 4) raw = RD(int32_t);
+            else if (size == 8) raw = (double)RD(int64_t);
+            else { uint64_t lo = RD(uint64_t); pos += 8; raw = (double)RD(int64_t) * 18446744073709551616.0 + (double)lo; }
+            return decimal_val(raw, (unsigned)sc);
+        }
+        case 16: case 17: case 31: case 32: case 33: {                  /* length-prefixed */
+            uint64_t n;
+            if (!var_uleb(v, &pos, &n) || pos + n > v->dn) return SEA_NIL_VAL;
+            if (type == 31) return bignum_val(d + pos, n);
+            if (type == 32) return bit_bytes(d + pos, n);
+            if (type == 33) return geometry_val(d + pos, n);
+            return str_val((const char *)d + pos, n);
+        }
+        case 18: {                                                      /* UUID: hugeint */
+            if (pos + 16 > v->dn) return SEA_NIL_VAL;
+            duckdb_hugeint h;
+            memcpy(&h.lower, d + pos, 8);
+            memcpy(&h.upper, d + pos + 8, 8);
+            return fmt_uuid(h);
+        }
+        case 19: if (pos + 4 > v->dn) return SEA_NIL_VAL; return date_val(RD(int32_t));
+        case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 27: {
+            if (pos + 8 > v->dn) return SEA_NIL_VAL;
+            int64_t x = RD(int64_t);
+            switch (type) {
+                case 20: return clock_val(x, 1000000, 6);
+                case 21: return clock_val(x, 1000000000, 9);
+                case 22: return fmt_timestamp(x, 1, 0, false);
+                case 23: return fmt_timestamp(x, 1000, 3, false);
+                case 24: return fmt_timestamp(x, 1000000, 6, false);
+                case 25: return fmt_timestamp(x, 1000000000, 9, false);
+                case 26: return timetz_val((uint64_t)x);
+                default: return fmt_timestamp(x, 1000000, 6, true);
+            }
+        }
+        case 28: {
+            if (pos + 16 > v->dn) return SEA_NIL_VAL;
+            int32_t mo = RD(int32_t); pos += 4;
+            int32_t dy = RD(int32_t); pos += 4;
+            return interval_val(mo, dy, RD(int64_t));
+        }
+        case 29: return var_entries(v, pos, true, depth);
+        case 30: return var_entries(v, pos, false, depth);
+        default: return SEA_NIL_VAL;
+    }
+    #undef RD
+}
+
+static SeaValue variant_val(const Vec *col, idx_t row) {
+    duckdb_vector keys = duckdb_struct_vector_get_child(col->v, 0), children = duckdb_struct_vector_get_child(col->v, 1),
+                  values = duckdb_struct_vector_get_child(col->v, 2), data = duckdb_struct_vector_get_child(col->v, 3);
+    duckdb_list_entry ke = ((duckdb_list_entry *)duckdb_vector_get_data(keys))[row];
+    duckdb_list_entry ce = ((duckdb_list_entry *)duckdb_vector_get_data(children))[row];
+    duckdb_list_entry ve = ((duckdb_list_entry *)duckdb_vector_get_data(values))[row];
+    duckdb_vector cs = duckdb_list_vector_get_child(children), vs = duckdb_list_vector_get_child(values);
+    duckdb_vector ckv = duckdb_struct_vector_get_child(cs, 0);
+    Var v;
+    v.keys = duckdb_vector_get_data(duckdb_list_vector_get_child(keys));
+    v.koff = ke.offset;
+    v.kn = ke.length;
+    v.ckey = duckdb_vector_get_data(ckv);
+    v.ckey_valid = duckdb_vector_get_validity(ckv);
+    v.cval = duckdb_vector_get_data(duckdb_struct_vector_get_child(cs, 1));
+    v.coff = ce.offset;
+    v.cn = ce.length;
+    v.vtype = duckdb_vector_get_data(duckdb_struct_vector_get_child(vs, 0));
+    v.vbyte = duckdb_vector_get_data(duckdb_struct_vector_get_child(vs, 1));
+    v.voff = ve.offset;
+    v.vn = ve.length;
+    uint32_t dn;
+    v.data = str_t_data(&((duckdb_string_t *)duckdb_vector_get_data(data))[row], &dn);
+    v.dn = dn;
+    return var_value(&v, 0, 0);
+}
 
 static Vec vec(duckdb_vector v) {
     Vec r = { v, duckdb_vector_get_data(v), duckdb_vector_get_validity(v) };
@@ -905,20 +1291,30 @@ static SeaValue read_val(const TI *t, const Vec *v, idx_t row, int depth) {
         case DUCKDB_TYPE_TINYINT:   return sea_int_val(((int8_t *)d)[row]);
         case DUCKDB_TYPE_SMALLINT:  return sea_int_val(((int16_t *)d)[row]);
         case DUCKDB_TYPE_INTEGER:   return sea_int_val(((int32_t *)d)[row]);
-        case DUCKDB_TYPE_BIGINT:    return int_or_number(((int64_t *)d)[row]);
+        case DUCKDB_TYPE_BIGINT:    return exact_i64(((int64_t *)d)[row]);
         case DUCKDB_TYPE_UTINYINT:  return sea_int_val(((uint8_t *)d)[row]);
         case DUCKDB_TYPE_USMALLINT: return sea_int_val(((uint16_t *)d)[row]);
         case DUCKDB_TYPE_UINTEGER:  return sea_int_val(((uint32_t *)d)[row]);
-        case DUCKDB_TYPE_UBIGINT: {
-            uint64_t x = ((uint64_t *)d)[row];
-            return x <= (uint64_t)SEA_INT_MAX ? sea_int_val((int64_t)x) : sea_number_val((double)x);
+        case DUCKDB_TYPE_UBIGINT:   return exact_u64(((uint64_t *)d)[row]);
+        case DUCKDB_TYPE_HUGEINT: {
+            duckdb_hugeint h = ((duckdb_hugeint *)d)[row];
+            return exact_i128(h.upper, h.lower);
         }
-        case DUCKDB_TYPE_HUGEINT:   return huge_val(((duckdb_hugeint *)d)[row]);
         case DUCKDB_TYPE_UHUGEINT: {
             duckdb_uhugeint h = ((duckdb_uhugeint *)d)[row];
-            if (!h.upper && h.lower <= (uint64_t)SEA_INT_MAX) return sea_int_val((int64_t)h.lower);
-            return sea_number_val((double)h.upper * 18446744073709551616.0 + (double)h.lower);
+            return h.upper ? exact_u128(h.upper, h.lower, false) : exact_u64(h.lower);
         }
+        case DUCKDB_TYPE_BIGNUM: {
+            uint32_t n;
+            const unsigned char *b = str_t_data(&((duckdb_string_t *)d)[row], &n);
+            return bignum_val(b, n);
+        }
+        case DUCKDB_TYPE_GEOMETRY: {
+            uint32_t n;
+            const unsigned char *b = str_t_data(&((duckdb_string_t *)d)[row], &n);
+            return geometry_val(b, n);
+        }
+        case DUCKDB_TYPE_VARIANT:   return variant_val(v, row);
         case DUCKDB_TYPE_FLOAT:     return sea_number_val(((float *)d)[row]);
         case DUCKDB_TYPE_DOUBLE:    return sea_number_val(((double *)d)[row]);
         case DUCKDB_TYPE_DECIMAL: {
@@ -1153,7 +1549,12 @@ static SeaValue convert(SeaVM *vm, const char *fn, duckdb_result *res, int mode,
                     idx_t n = duckdb_data_chunk_get_size(chunks[k]);
                     for (idx_t i = 0; i < n; i++) {
                         SeaValue x = read_val(t, &v, i, 0);
-                        sea_int_array_push(a, sea_is_int(x) ? sea_as_int(x) : (int64_t)sea_as_number(x));
+                        int64_t iv = 0;
+                        if (sea_is_int(x)) iv = sea_as_int(x);
+                        else if (sea_is_number(x)) iv = (int64_t)sea_as_number(x);
+                        else if (sea_is_bigint(x)) sea_bigint_to_i64(SEA_AS_BIGINT(x), &iv);   /* BIGINT fits */
+                        val_release(x);
+                        sea_int_array_push(a, iv);
                     }
                 }
                 col = sea_obj_val(&a->obj);

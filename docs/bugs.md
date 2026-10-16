@@ -354,6 +354,41 @@ bloco. **Teste de regressão:** fim de `tests/unit/11_varargs.sea`.
 
 Encontrado ao escrever o wrapper da lib duckdb, que repassa `...`.
 
+## Bug 18: `//` e `%` de inteiros arredondavam diferente conforme o caminho **(FIXED 2026-10)**
+
+```sea
+local a, b = -7, 2
+print(a // b, -7.0 // 2, a % b)   -- era -3  -4  -1; agora -4  -4  1
+```
+
+A referência diz que `//` é divisão com piso, e é assim com floats. Mas:
+- `//` entre ints usava a divisão do C, que trunca (`-7 // 2` dava `-3`), no
+  interpretador (`IDIV`, `IDIV_INT`), no JIT e no constant folding;
+- `%` entre ints usava piso em tempo de execução (`-7 % 2` dava `1`), mas o
+  constant folding usava o `%` do C: com operandos constantes dava `-1`. O
+  resultado mudava conforme o compilador conseguia ou não dobrar a expressão.
+
+Assim `a == (a // b) * b + a % b` falhava para negativos. **Correção:** piso em
+todos os caminhos (`floor_div` no interpretador, o mesmo ajuste no JIT e no
+folding). **Teste:** fim de `tests/unit/13_math.sea`; o `96_jit_arith.expected`
+tinha gravado o `//` truncado.
+
+## Tipo `bigint` **(2026-10)**
+
+Inteiros de precisão arbitrária: um tipo explícito (`bigint.new`, o módulo
+`bigint`). Os operadores aritméticos não o aceitam, porque o compilador conta
+com `+ - * /` produzindo escalares (sem refcount); comparações, `==`,
+`tostring`, `..`, `string.format`, `sort` e chaves de tabela aceitam. A
+`libs/duckdb` passou a devolver inteiros exatos (BIGINT/HUGEINT grandes e
+BIGNUM viram bigint), além de GEOMETRY (tabela no estilo GeoJSON) e VARIANT;
+a `libs/json` lê inteiros grandes como bigint com `bigint = true`.
+
+Encontrado no caminho:
+- **`tonumber` truncava inteiros grandes.** `tonumber("140737488355328")`
+  dava `-140737488355328`: `strtoll` aceita 64 bits, e o valor ia para um int
+  de 48 bits sem checagem; `"9999999999999999999"` dava `-1`. Agora, fora da
+  faixa do int, vira number.
+
 ## Coletor de ciclos e correções encontradas no caminho **(2026-10)**
 
 Ciclos de referência (`a.peer = b; b.peer = a`, uma closure guardada na tabela que ela captura, anéis, listas duplamente ligadas) não eram liberados pelo refcount. Agora há um coletor de ciclos (`src/sea_gc.c`, [memory.md](memory.md#cycles)), com `gc.collect()` e `gc.stats()`. Os probes de ciclos caíram de 480 e 3.736 bytes por iteração para 0.

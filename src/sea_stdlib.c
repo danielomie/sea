@@ -1,3 +1,5 @@
+#include <errno.h>
+#include "sea_bigint.h"
 #include "sea_stdlib.h"
 #include "sea_string.h"
 #include "sea_rope.h"
@@ -91,14 +93,17 @@ static SeaValue fn_tonumber(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1) return SEA_NIL_VAL;
     SeaValue v = args[0];
     if (sea_is_number(v) || sea_is_int(v)) return v;
+    if (sea_is_bigint(v)) return sea_number_val(sea_bigint_to_double(SEA_AS_BIGINT(v)));
     if (sea_is_string(v)) {
         char *end;
         const char *str = SEA_AS_STRING(v)->data;
-        // Try integer first
+        // Try integer first (within Sea's 48-bit ints; larger ones become numbers)
+        errno = 0;
         long long iv = strtoll(str, &end, 0);
-        if (*end == '\0') return sea_int_val((int64_t)iv);
+        if (*end == '\0' && end != str && errno == 0 && iv >= -(1LL << 47) && iv < (1LL << 47))
+            return sea_int_val((int64_t)iv);
         double n = strtod(str, &end);
-        if (*end == '\0') return sea_number_val(n);
+        if (*end == '\0' && end != str) return sea_number_val(n);
     }
     return SEA_NIL_VAL;
 }
@@ -428,4 +433,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_net_register(vm);
     sea_lib_parser_register(vm);
     sea_lib_sort_register(vm);
+    sea_lib_bigint_register(vm);
 }

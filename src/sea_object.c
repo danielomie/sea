@@ -11,6 +11,7 @@
 #include "sea_struct.h"
 #include "sea_typed_array.h"
 #include "sea_gc.h"
+#include "sea_bigint.h"
 
 // These are defined in their respective files; we need them for freeing
 extern void sea_array_destroy(SeaArray *a);
@@ -219,6 +220,9 @@ void sea_obj_free(SeaObject *obj) {
             sea_float_array_free((SeaFloatArray*)obj);
             return;
         }
+        case OBJ_BIGINT:
+            sea_free(obj, sea_bigint_size((SeaBigInt*)obj));
+            break;
         default:
             sea_free(obj, sizeof(SeaObject));
             break;
@@ -248,6 +252,7 @@ const char* sea_type_name(SeaValue v) {
         case OBJ_STRUCT:      return "struct";
         case OBJ_INT_ARRAY:   return "int_array";
         case OBJ_FLOAT_ARRAY: return "float_array";
+        case OBJ_BIGINT:      return "bigint";
         default:              return "object";
     }
 }

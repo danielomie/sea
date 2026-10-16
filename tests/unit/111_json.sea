@@ -77,3 +77,10 @@ local src = '{"id":7,"name":"sea","score":98.25,"ok":true,"tags":["a","b"],"none
 local once = json.encode(json.decode(src), { sort_keys = true })
 print(once)
 print(json.encode(json.decode(once), { sort_keys = true }) == once)
+
+-- bigint: exact integers past Sea's int range (decode on request, encode always)
+local bsrc = '{"id": 1234567890123456789012, "small": 5, "neg": -99999999999999999999, "f": 1.5}'
+local lossy = json.decode(bsrc)
+local exact = json.decode(bsrc, {bigint = true})
+print("bigint decode", type(lossy.id), type(exact.id), exact.id, type(exact.small), exact.neg, exact.f)
+print("bigint encode", json.encode(exact, {sort_keys = true}))

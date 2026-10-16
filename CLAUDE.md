@@ -153,5 +153,7 @@ at that point. Natives should still report failures as error values.
 - **Loop variables are fresh per iteration** (numeric `for` and `for-in`, as in Lua 5.4 / Go 1.22): closures and goroutines created in a loop body capture that iteration's value — no `local j = i` copy needed (changed 2026-10).
 - **String indexing is 1-based** in `string.sub`, `string.find`, `string.byte` (matching Lua convention), but array/table indexing is 0-based.
 - **Cycles** are freed by the cycle collector (automatically, or `gc.collect()`), except cycles of objects shared between goroutines, which still leak; break those by setting a field to nil (see `docs/memory.md`).
+- **`int` is 48-bit** (±140 737 488 355 327). Wider integers are `bigint`s, an explicit type: `bigint.new("…")` and `bigint.add/sub/mul/div/mod/pow` (the operators `+ - *` do not take bigints; comparisons, `==`, `tostring`, `..` and `sort` do).
+- **`//` and `%` floor** (toward minus infinity) for ints and floats: `-7 // 2` is `-4`, `-7 % 2` is `1`.
 - **`isnan` / `isinf`** are registered as bare globals (in addition to `math.isnan` / `math.isinf`).
 - **Runtime errors are panics**: `recover()` in a deferred call catches them (Go semantics: the recovering function returns nil). The message starts with `file:line:`. Unrecovered, they print a traceback of `file:line: in main chunk` / `file:line: in function 'name'` lines (each function knows its source file: `SeaChunk.source`).

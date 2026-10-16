@@ -57,7 +57,9 @@ line 3, column 8`, `json.encode: cycle detected (a value contains itself)`.
 | `max_depth` | `512` | Deepest nesting allowed |
 
 **`decode` options:** `max_depth` (default 512, at most 10000). Deeper input is
-an error ("nesting too deep"), never a stack overflow.
+an error ("nesting too deep"), never a stack overflow. `bigint = true` turns
+integers beyond Sea's int range into exact `bigint`s (IDs of 64 bits and more)
+instead of numbers, which lose digits past 2^53.
 
 **Type mapping — encode:**
 
@@ -66,6 +68,7 @@ an error ("nesting too deep"), never a stack overflow.
 | `nil` | `null` |
 | `bool` | `true` / `false` |
 | `int` | integer |
+| `bigint` | integer, every digit |
 | `number` | shortest form that reads back exactly (`0.1`, `2.5e-08`); integral values keep a `.0` (`3.0`) so they decode as floats again; `NaN`/`Inf` → `null` |
 | `string` | `"..."` with `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f` and `\u00XX` for other control characters; invalid UTF-8 bytes become U+FFFD |
 | `array`, `int_array`, `float_array` | array |
@@ -83,7 +86,7 @@ nested in itself) is fine.
 | `null` | `nil` |
 | `true` / `false` | `bool` |
 | integer within ±2^47 | `int` |
-| other numbers (fraction, exponent, larger integers) | `number` |
+| other numbers (fraction, exponent, larger integers) | `number` (larger integers: `bigint` with `bigint = true`) |
 | string | `string` (escapes and surrogate pairs decoded to UTF-8; a lone surrogate becomes U+FFFD) |
 | array | `array` (**0-indexed**) |
 | object | table (string keys; for a repeated key the last value wins) |
@@ -900,7 +903,8 @@ db:row("SELECT * FROM people WHERE age > $min AND city = $city", {min = 18, city
 ```
 
 `nil` is NULL, bools, ints, numbers and strings map to the obvious types
-(DuckDB casts them to the parameter's type, so a string works for a `DATE`).
+(DuckDB casts them to the parameter's type, so a string works for a `DATE`);
+a `bigint` goes as `BIGINT`, `HUGEINT` or `BIGNUM`, the narrowest that holds it.
 Arrays, `int_array`, `float_array` and positional tables become LISTs,
 tables with string keys STRUCTs and maps `[=]` MAPs. To pass one list as the
 only parameter, wrap it: `db:value("SELECT list_sum(?)", {values})`.
@@ -911,7 +915,8 @@ only parameter, wrap it: `db:value("SELECT list_sum(?)", {values})`.
 |--------|-----|
 | `NULL` | `nil` (row tables keep the key) |
 | `BOOLEAN` | bool |
-| integers up to `BIGINT`/`UBIGINT`, `HUGEINT` | int; past ±2^47 (Sea's int range) a number, exact up to 2^53 |
+| integers (`TINYINT` … `UBIGINT`, `HUGEINT`, `UHUGEINT`) | exact: an int within Sea's ±2^47, a number up to ±2^53, a `bigint` beyond |
+| `BIGNUM` | `bigint` |
 | `FLOAT`, `DOUBLE`, `DECIMAL` | number |
 | `VARCHAR`, `BLOB`, `ENUM`, `UUID`, `BIT` | string (a BLOB holds its bytes) |
 | `DATE`, `TIME`, `TIMESTAMP` (all precisions) | ISO string: `"2024-02-29"`, `"13:45:07.25"`, `"2024-01-02 03:04:05.123456"`; `TIMESTAMPTZ` in UTC with `+00`; `infinity`; BC dates end in ` (BC)` |
@@ -920,11 +925,14 @@ only parameter, wrap it: `db:value("SELECT list_sum(?)", {values})`.
 | `STRUCT` | table |
 | `MAP` | map `[=]` |
 | `UNION` | the value of its member |
+| `GEOMETRY` | a GeoJSON-shaped table: `{type = "Point", coordinates = [1, 2]}`, `LineString`, `Polygon`, the `Multi` kinds (Z and M ordinates included), `{type = "GeometryCollection", geometries = [...]}`; cast to `VARCHAR` for WKT or `BLOB` for WKB |
+| `VARIANT` | the value it holds, converted as above (objects → tables, arrays → arrays; a MAP inside one arrives as an array of `{key, value}`) |
 
 Dates and times come as strings because they are exact and go back into SQL
 as parameters unchanged; `time.unix` builds a Time from `epoch(ts)` when you
-need one. A column of a type with no Sea counterpart (`VARIANT`, `GEOMETRY`,
-`BIGNUM`) is an error that suggests a cast (`col::VARCHAR`).
+need one. VARIANT values are read from DuckDB's internal layout, which the C
+API does not describe; the library's test covers every type, so a DuckDB
+version that changed it would fail there.
 
 **`columns`** returns the result column by column: integer columns without
 NULLs as `int_array`, floating and decimal ones as `float_array` (ready for

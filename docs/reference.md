@@ -155,9 +155,12 @@ An initial newline immediately after the opening bracket is ignored. The number 
 | `-` | Subtraction / unary negation |
 | `*` | Multiplication |
 | `/` | Float division |
-| `//` | Integer (floor) division |
-| `%` | Modulo |
+| `//` | Floor division: rounds toward minus infinity (`-7 // 2` is `-4`), for ints and floats |
+| `%` | Modulo, with the sign of the divisor (`-7 % 2` is `1`): `a == (a // b) * b + a % b` |
 | `^` | Exponentiation |
+
+The arithmetic operators take `int` and `number`. A `bigint` needs the
+`bigint` module's functions (`bigint.add(a, b)`); see [Module: `bigint`](#module-bigint).
 
 ### Bitwise
 
@@ -179,6 +182,9 @@ An initial newline immediately after the opening bracket is ignored. The number 
 | `<=` | Less than or equal |
 | `>` | Greater than |
 | `>=` | Greater than or equal |
+
+Comparisons and `==` also take a `bigint`, against another bigint, an int or
+a number (by value: `bigint.new(5) == 5`).
 
 ### String
 
@@ -217,9 +223,9 @@ An initial newline immediately after the opening bracket is ignored. The number 
 |----------|-----------|-------------|
 | `print` | `print(...)` | Print values separated by tabs, followed by newline |
 | `printf` | `printf(fmt, ...)` | Format and print to stdout using `string.format` specifiers (`%d`, `%s`, `%f`, `%x`, etc.); no implicit newline |
-| `type` | `type(v) → string` | Return the type name of `v`: `"nil"`, `"bool"`, `"int"`, `"number"`, `"string"`, `"array"`, `"table"`, `"map"`, `"struct"`, `"function"`, `"channel"`, `"int_array"`, `"float_array"` |
+| `type` | `type(v) → string` | Return the type name of `v`: `"nil"`, `"bool"`, `"int"`, `"number"`, `"string"`, `"array"`, `"table"`, `"map"`, `"struct"`, `"function"`, `"channel"`, `"int_array"`, `"float_array"`, `"bigint"` |
 | `tostring` | `tostring(v) → string` | Convert any value to its string representation |
-| `tonumber` | `tonumber(v) → int\|number\|nil` | Parse a string to a number; returns `nil` on failure |
+| `tonumber` | `tonumber(v) → int\|number\|nil` | Parse a string to a number (an int when it fits Sea's 48-bit range, else a number); a bigint becomes a number; `nil` on failure |
 | `len` | `len(v) → int` | Length of string, array, table, map, struct, int_array, or float_array |
 | `error` | `error(msg) → error` | Create an error value |
 | `is_error` | `is_error(v) → bool` | Check whether a value is an error |
@@ -307,7 +313,7 @@ An initial newline immediately after the opening bracket is ignored. The number 
 | `string.rep` | `rep(s, n [, sep]) → string` | Repeat `s` `n` times, optionally joined by `sep` |
 | `string.byte` | `byte(s [, i]) → int` | Byte value at position `i` (1-based, default 1) |
 | `string.char` | `char(...) → string` | Build a string from byte values |
-| `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%`, with flags, width and precision (`%-8s`, `%05.1f`). No length limit; a plain `%s` copies any bytes. An unknown conversion is written as is |
+| `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%`, with flags, width and precision (`%-8s`, `%05.1f`). No length limit; a plain `%s` copies any bytes. `%d`/`%x` print a bigint with all its digits. An unknown conversion is written as is |
 | `string.find` | `find(s, pattern [, init]) → int\|nil` | Return 1-based start position of first occurrence of `pattern`, or `nil` |
 | `string.split` | `split(s, sep) → array` | Split `s` by separator string; returns an array of strings |
 | `string.contains` | `contains(s, sub) → bool` | True if `sub` is present in `s` |
@@ -648,7 +654,7 @@ stack overflow; these limits apply to every program, not just this library.
 
 Sorting and binary search. Works on arrays, `int_array` and `float_array`.
 Without a comparator the order is the natural one: numbers by value (ints and
-floats together, NaN last) and strings by bytes. Every sort is **stable**:
+floats and bigints together, NaN last) and strings by bytes. Every sort is **stable**:
 equal elements keep their order.
 
 | Function | Signature | Description |
@@ -678,6 +684,45 @@ values the natural order cannot compare (a number with a string, tables
 without a comparator), a comparator that is not a function. A comparator
 written in Sea works on a copy, so a panic inside it leaves the array as it
 was, and a comparator that changes the array is an error.
+
+---
+
+## Module: `bigint`
+
+Integers of any size. Sea's `int` holds 48 bits (±140 737 488 355 327) and a
+`number` is exact only up to 2^53; a `bigint` keeps every digit. It is an
+explicit type: values come from `bigint.new`, from this module's functions,
+and from libraries that read wide integers (`libs/duckdb`, `json.decode` with
+`bigint = true`).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `bigint.new` | `new(v [, base]) → bigint\|error` | From an int, an integral number, a bigint or a string: decimal, or `0x`/`0o`/`0b` prefixed, or in `base` 2–36; a sign and `_` between digits are allowed. A string that is not an integer, or a fractional number, is an error value |
+| `bigint.add`, `sub`, `mul` | `add(a, b) → bigint` | Sum, difference, product |
+| `bigint.div`, `mod` | `div(a, b) → bigint` | Floor division and modulo, like `//` and `%` on ints (`div(-7, 2)` is `-4`, `mod(-7, 2)` is `1`); a zero divisor is a runtime error |
+| `bigint.pow` | `pow(a, e) → bigint` | `a` to the power `e` (`e >= 0`). Results over 128 Mbit are an error |
+| `bigint.neg`, `abs` | `neg(a) → bigint` | Negation, absolute value |
+| `bigint.cmp` | `cmp(a, b) → int\|nil` | -1, 0 or 1 (`nil` against NaN) |
+| `bigint.tostring` | `tostring(a [, base]) → string` | Digits in base 2–36 (default 10) |
+| `bigint.toint` | `toint(a) → int\|nil` | The int, or `nil` when it does not fit Sea's 48-bit range |
+| `bigint.tonumber` | `tonumber(a) → number` | The nearest number |
+
+Operands may be bigints, ints or integral numbers; results are always
+bigints. The arithmetic operators do **not** take bigints (`a + 1` is a
+runtime error that names these functions): the compiler counts on `+ - * /`
+producing plain numbers. What does take them: `==` and `~=`, `< <= > >=`
+(against bigints, ints and numbers, by value), `tostring`, `..`, `print`,
+`string.format("%d")`, `tonumber`, the natural order of `sort`, and table and
+map keys (by value; `bigint.new(5)` and `5` are different keys).
+
+```sea
+local f = bigint.new(1)
+for i = 2, 30 do f = bigint.mul(f, i) end
+print(f)                                   -- 265252859812191058636308480000000
+print(f > 1e30, bigint.mod(f, 7) == 0)     -- true  true
+local id = bigint.new("9223372036854775807")
+print(bigint.tostring(id, 16), bigint.toint(id))   -- 7fffffffffffffff  nil
+```
 
 ---
 
@@ -1017,7 +1062,7 @@ local http = require("./libs/http/http")
 ```
 
 Built-in modules (`math`, `string`, `io`, `os`, `sync`, `net`, `time`, `gc`,
-`sort`, `sea/parser`) are found first. Then the search order is:
+`sort`, `bigint`, `sea/parser`) are found first. Then the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)
 2. Current working directory + path
 3. Each directory in `SEA_PATH` (colon-separated environment variable)
