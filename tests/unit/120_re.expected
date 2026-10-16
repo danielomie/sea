@@ -1,0 +1,65 @@
+-- test and match
+true	false	true	true
+ana@example.com	7	21	ana@example.com	ana	example.com	example.com
+7	21	11	21	3
+nil	nil	b
+22	333	nil
+-- syntax
+a	aaa	aa	aa
+abcd	x{,2}	a{1
+true	false	one,two,three
+two	one,two
+3	false	true	false
+true	word	ab
+A☺😀	-1.5	]a]
+STRAßE	ABc	nil
+Aa	nil	a	aaa
+true	çã	true	abc
+3	5
+-- all and findall
+1,22,333	1,22
+|aaa|	0
+a1	1	a	1
+b	4	b	nil
+c3	6	c	3
+-- gsub
+world hello bar foo
+a<1>b<2>c<3>
+a#b2c#
+gato and cão and cow
+f00 boo	abc	-a-b-c-
+10/2026 [2026-10] $ 2026x e 01/1999 [1999-01] $ 1999x
+[a|][|b]	a2b44
+re.gsub: no group 9 in the pattern
+re.gsub: unknown group name 'nope' in the replacement
+re.gsub: replacement must be a string, function or table, got int
+-- split
+a|b|c|d	a|b|c
+a|b,c	0	a|b|c
+1	|a|	|
+-- compile
+(?P<a>\d+)-(\d+)		2	1	true	20
+1-2;3-4	2	2-1	a|b
+true	true	true	true
+re: missing closing ) at position 1 in /(a/
+re: unexpected ) at position 2 in /a)/
+re: invalid nested repetition operator at position 3 in /a**/
+re: invalid character class range (end before start) at position 5 in /[z-a]/
+re: repeat count too large (at most 1000) at position 2 in /x{2000}/
+re: backreferences are not supported at position 2 in /\1/
+re: invalid or unsupported group syntax (no lookaround or backreferences) at position 3 in /(?=x)/
+re: invalid group name (letters, digits and _, not starting with a digit) at position 4 in /(?<!x)/
+re: missing closing ] at position 1 in /[/
+re: trailing backslash at end of pattern at position 2 in /\/
+re: missing argument to repetition operator at position 1 in /*a/
+re: invalid group name (letters, digits and _, not starting with a digit) at position 6 in /(?P<1>x)/
+re: duplicate group name at position 14 in /(?P<n>a)(?P<n>b)/
+re: invalid escape sequence at position 2 in /\q/
+re: unknown POSIX class name at position 2 in /[[:nope:]]/
+re: invalid or unsupported group syntax (no lookaround or backreferences) at position 3 in /(?z)/
+re: unknown flag in "q" (use i, m, s, U)
+re: missing closing ) at position 1 in /(a/
+re.test: not a compiled regex (its __prog was changed)
+-- escape and linear time
+a\.b\*c\[d\]\(e\)\|\{f\}\^\$\\	true
+false	false	false

@@ -327,7 +327,7 @@ a number (by value: `bigint.new(5) == 5`).
 | `string.byte` | `byte(s [, i]) → int` | Byte value at position `i` (1-based, default 1) |
 | `string.char` | `char(...) → string` | Build a string from byte values |
 | `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%`, with flags, width and precision (`%-8s`, `%05.1f`). No length limit; a plain `%s` copies any bytes. `%d`/`%x` print a bigint with all its digits. An unknown conversion is written as is |
-| `string.find` | `find(s, pattern [, init]) → int\|nil` | Return 1-based start position of first occurrence of `pattern`, or `nil` |
+| `string.find` | `find(s, pattern [, init]) → int\|nil` | Return 1-based start position of first occurrence of `pattern` (plain text, not a regex: see module `re`), or `nil` |
 | `string.split` | `split(s, sep) → array` | Split `s` by separator string; returns an array of strings |
 | `string.contains` | `contains(s, sub) → bool` | True if `sub` is present in `s` |
 | `string.trim` | `trim(s) → string` | Strip leading and trailing whitespace |
@@ -841,6 +841,60 @@ touches the file system except `path.abs`, which reads the working directory.
 
 ---
 
+## Module: `re`
+
+Regular expressions with RE2's syntax and guarantees: matching takes time
+linear in the input for **every** pattern (a Pike VM: no backtracking, so
+`(a*)*b` on a long string is as fast as any other), and the first match is the
+leftmost, preferring earlier alternatives and greedy repeats (as in Perl, Go,
+Python). There are no backreferences and no lookaround. Patterns and subjects
+are UTF-8: `.` and classes match characters; an invalid byte is one
+character. Results are checked against Go's `regexp` (same semantics).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `re.compile` | `compile(pattern [, flags]) → regex\|error` | Compile once, reuse. `flags`: a string of `i` (case-insensitive), `m` (`^`/`$` at line breaks), `s` (`.` matches `\n`), `U` (repeats lazy by default). A bad pattern is an error value: `re: missing closing ) at position 4 in /(ab/` |
+| `re.test` | `test(p, s) → bool` | Whether `p` matches anywhere in `s` |
+| `re.match` | `match(p, s [, init]) → match\|nil` | The first match at or after byte `init` (1-based, negative from the end) |
+| `re.all` | `all(p, s [, n]) → array` | Successive non-overlapping matches (at most `n`), as match tables. An empty match right after the previous match is skipped |
+| `re.findall` | `findall(p, s [, n]) → array` | The same, as strings (the whole match) |
+| `re.gsub` | `gsub(p, s, repl [, n]) → string` | Replace every match (or the first `n`). `repl`: a string where `$0`/`$1`/`${12}`/`${name}` insert groups and `$$` is a `$`; a function `fn(match)` returning the replacement (`nil` or `false` keeps the match; other values go through `tostring`); or a table from matched text to replacement (missing: kept) |
+| `re.split` | `split(p, s [, n]) → array` | The pieces between matches (`n > 0`: at most `n` pieces, the last holding the rest; `n = 0`: none), like Go's `regexp.Split`: `split("x*", "axbc")` is `{"a", "b", "c"}` |
+| `re.escape` | `escape(s) → string` | `s` with the metacharacters `\ . + * ? ( ) \| [ ] { } ^ $` escaped, to match it literally |
+
+`p` is a pattern string (compiled for that call) or a regex from `re.compile`,
+whose methods are the same functions: `rx:test(s)`, `rx:match(s [, init])`,
+`rx:all`, `rx:findall`, `rx:gsub`, `rx:split`. A regex also has `pattern`,
+`flags`, `groups` (number of capture groups) and `names` (`{name = index}`).
+A pattern string that does not compile is a runtime error in these functions.
+
+A **match** is a table: `text` (the matched text), `start`/`stop` (1-based
+byte positions, inclusive, like `string.find`), `groups` (array: `[0]` the
+whole match, `[i]` group `i`, `nil` when it did not take part), `spans`
+(`[i] = {start, stop}` or `nil`) and `named` (`{name = text}`).
+
+**Syntax:**
+
+| | |
+|-|-|
+| Characters | literal; `.` any but `\n`; `\n \t \r \f \v \a \e \0`; `\x41`, `\x{263A}`, `\u{1F600}`; `\` before punctuation makes it literal |
+| Classes | `[abc]`, `[^a-z]`, `[\d\-.]`, `[[:alpha:]]` (also `alnum ascii blank cntrl digit graph lower print punct space upper word xdigit`, `[[:^digit:]]`); `\d \w \s` (ASCII: `[0-9]`, `[0-9A-Za-z_]`, `[\t\n\f\r ]`) and `\D \W \S` |
+| Anchors | `^` `$` (text start/end; line start/end with `m`), `\A` `\z` (always text), `\b` `\B` (ASCII word boundary) |
+| Groups | `(x)` capturing, `(?P<name>x)` or `(?<name>x)` named, `(?:x)` non-capturing, `x\|y` alternation |
+| Repeats | `*` `+` `?` `{n}` `{n,}` `{n,m}` (counts up to 1000), lazy with a trailing `?` (`*?`, `{2,5}?`); `{` that is not a valid repeat is literal |
+| Flags | `(?i)` `(?m)` `(?s)` `(?U)`, clearing with `-` (`(?i-s)`), until the end of the enclosing group; `(?i:x)` for `x` only. Case-insensitive matching folds Latin, Greek, Cyrillic and Armenian letters (`utf8.lower`/`upper`) |
+
+```sea
+local m = re.match("(?P<user>[\\w.]+)@(?P<host>[\\w.]+)", "write to ana@sea.dev")
+print(m.named.user, m.named.host, m.start)            -- ana  sea.dev  10
+local date = re.compile("(\\d{4})-(\\d\\d)-(\\d\\d)")
+print(date:gsub("on 2026-10-16", "$3/$2/$1"))           -- on 16/10/2026
+print(re.gsub("\\d+", "a1b22", function(m) return tonumber(m.text) * 2 end))   -- a2b44
+print(string.join(re.split("\\s*;\\s*", "a ; b;c"), ","))  -- a,b,c
+```
+
+---
+
 ## Collection Literals
 
 | Syntax | Type | Description |
@@ -1177,8 +1231,8 @@ local json = require("./libs/json/json")   -- relative to the requiring file
 local http = require("./libs/http/http")
 ```
 
-Built-in modules (`math`, `string`, `utf8`, `io`, `os`, `fs`, `path`, `sync`,
-`net`, `time`, `gc`, `sort`, `bigint`, `sea/parser`) are found first. An absolute path
+Built-in modules (`math`, `string`, `utf8`, `re`, `io`, `os`, `fs`, `path`,
+`sync`, `net`, `time`, `gc`, `sort`, `bigint`, `sea/parser`) are found first. An absolute path
 (`require("/opt/sea/libs/yaml/yaml")`) names the file itself, tried as
 `.sea`, `/init.sea`, then `.so`. Otherwise the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)

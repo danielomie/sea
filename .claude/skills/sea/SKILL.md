@@ -1,6 +1,6 @@
 ---
 name: sea
-description: Sea language reference — keywords, operators, built-ins, stdlib (math, string, utf8, io, os, fs, path, sync, time, net, sort, bigint, sea/parser), collection literals ([], [=], {}), concurrency, error handling, and external libraries (json, yaml, xml, console, http, ssl, jwt, flags, tensor, duckdb). Invoke when writing, reviewing, or debugging Sea code, or when you need the exact syntax/API for any Sea feature or library.
+description: Sea language reference — keywords, operators, built-ins, stdlib (math, string, utf8, re, io, os, fs, path, sync, time, net, sort, bigint, sea/parser), collection literals ([], [=], {}), concurrency, error handling, and external libraries (json, yaml, xml, console, http, ssl, jwt, flags, tensor, duckdb). Invoke when writing, reviewing, or debugging Sea code, or when you need the exact syntax/API for any Sea feature or library.
 ---
 
 Read **both** files in the current project:
