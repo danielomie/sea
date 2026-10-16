@@ -48,6 +48,7 @@ extern "C" {
 #include "sea_struct.h"
 #include "sea_typed_array.h"
 #include "sea_bigint.h"
+#include "sea_utf8.h"
 #include "sea_vm.h"
 
 /* ---- visibility ---- */

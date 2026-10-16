@@ -373,6 +373,30 @@ todos os caminhos (`floor_div` no interpretador, o mesmo ajuste no JIT e no
 folding). **Teste:** fim de `tests/unit/13_math.sea`; o `96_jit_arith.expected`
 tinha gravado o `//` truncado.
 
+## Bug 19: literais de string paravam no primeiro byte NUL **(FIXED 2026-10)**
+
+```sea
+print(len("a\0b"))   -- era 1; agora 3
+```
+
+O lexer guardava o tamanho do literal, mas o compilador registrava a
+constante com `sea_chunk_add_const_str`, que mede com `strlen`: tudo depois de
+um `\0` sumia (`"a\0b" == "a"` dava `true`). **Correção:**
+`sea_chunk_add_const_strn` recebe o tamanho; literais e chaves de tabela
+literais passam a usá-la (o `.seac` já gravava o tamanho). **Teste:**
+`tests/unit/118_utf8.sea`.
+
+## Fontes UTF-8 e módulo `utf8` **(2026-10)**
+
+O lexer passou a exigir UTF-8 no fonte (byte inválido é erro de compilação
+com linha e coluna; o BOM é ignorado) e aceita o escape `\u{XXXX}`. O código
+de UTF-8 que `libs/json`, `libs/xml`, `libs/yaml` e `libs/console` tinham
+copiado foi para `src/sea_utf8.c` (API em `sea_utf8.h`), usado também pelo
+novo módulo `utf8`. No console, `utf8_char_bytes` confiava no byte inicial e
+lia além do fim do texto quando ele terminava numa sequência truncada (um
+`0xF0` final no shimmer); a versão compartilhada para no fim e conta um byte
+inválido como um caractere.
+
 ## Tipo `bigint` **(2026-10)**
 
 Inteiros de precisão arbitrária: um tipo explícito (`bigint.new`, o módulo

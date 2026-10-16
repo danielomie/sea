@@ -25,7 +25,9 @@ Require paths are relative to the calling file. Examples within a lib's `example
 Writing a native library: see `src/sea.h` for the module convention and
 [memory.md](memory.md#writing-native-functions) for the ownership rules. In
 short, functions borrow their arguments and return an owned value
-(`sea_val_ref()` for an argument or a container element).
+(`sea_val_ref()` for an argument or a container element). For UTF-8, use
+`src/sea_utf8.h` (decode, encode, validate, case mapping, terminal widths)
+instead of a private copy.
 
 ---
 

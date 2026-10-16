@@ -402,42 +402,16 @@ static double gauss(double x, double sigma) {
     return exp(-(x * x) / (2.0 * sigma * sigma));
 }
 
-/* Count printable columns in a UTF-8 string (approximate: count leading bytes). */
+/* Characters (display cells) in a UTF-8 string; an invalid byte is one. */
 static int utf8_display_len(const char *s, size_t bytes) {
-    int n = 0;
-    for (size_t i = 0; i < bytes; ) {
-        unsigned char c = (unsigned char)s[i];
-        if (c < 0x80)      { i += 1; n++; }
-        else if (c < 0xC0) { i += 1; }      /* continuation byte, skip */
-        else if (c < 0xE0) { i += 2; n++; }
-        else if (c < 0xF0) { i += 3; n++; }
-        else               { i += 4; n++; }
-    }
-    return n;
+    return (int)sea_utf8_len(s, bytes);
 }
 
-/* Get byte offset for the n-th display cell (0-indexed). */
+/* Byte offset of the n-th cell (0-indexed). */
 static size_t utf8_cell_offset(const char *s, size_t bytes, int cell) {
-    int n = 0;
-    for (size_t i = 0; i < bytes; ) {
-        if (n == cell) return i;
-        unsigned char c = (unsigned char)s[i];
-        if (c < 0x80)      i += 1;
-        else if (c < 0xE0) i += 2;
-        else if (c < 0xF0) i += 3;
-        else               i += 4;
-        n++;
-    }
-    return bytes;
-}
-
-/* Number of bytes for the codepoint starting at s[i]. */
-static size_t utf8_char_bytes(const char *s) {
-    unsigned char c = (unsigned char)s[0];
-    if (c < 0x80) return 1;
-    if (c < 0xE0) return 2;
-    if (c < 0xF0) return 3;
-    return 4;
+    size_t i = 0;
+    for (int n = 0; n < cell && i < bytes; n++) i = sea_utf8_next(s, bytes, i);
+    return i;
 }
 
 static void sleep_ms(int ms) {
@@ -512,7 +486,7 @@ static SeaValue fn_shimmer(SeaVM *vm, int argc, SeaValue *args) {
             if (blend > 0.7) out("\x1b[1m"); else out("\x1b[22m");
 
             size_t off = utf8_cell_offset(text, text_bytes, cell);
-            size_t cb  = utf8_char_bytes(text + off);
+            size_t cb  = sea_utf8_next(text, text_bytes, off) - off;
             fwrite(text + off, 1, cb, stdout);
         }
         out("\x1b[0m");
@@ -588,7 +562,7 @@ static void render_shimmer_frame_raw(const char *text, size_t tbytes,
         outf("\x1b[38;2;%d;%d;%dm", c.r, c.g, c.b);
         if (blend > 0.7) out("\x1b[1m"); else out("\x1b[22m");
         size_t off = utf8_cell_offset(text, tbytes, cell);
-        size_t cb  = utf8_char_bytes(text + off);
+        size_t cb  = sea_utf8_next(text, tbytes, off) - off;
         fwrite(text + off, 1, cb, stdout);
     }
     out("\x1b[0m");

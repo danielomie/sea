@@ -93,6 +93,7 @@ void sea_chunk_free(SeaChunk *chunk);
 // Add a constant to the pool (returns index)
 int sea_chunk_add_const(SeaChunk *c, SeaValue val);
 int sea_chunk_add_const_str(SeaChunk *c, const char *s);
+int sea_chunk_add_const_strn(SeaChunk *c, const char *s, size_t len);
 
 // Emit an instruction
 void sea_chunk_emit(SeaChunk *c, uint32_t instr, int line);

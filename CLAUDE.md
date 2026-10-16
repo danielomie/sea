@@ -152,6 +152,7 @@ at that point. Natives should still report failures as error values.
 - **Numeric for is inclusive on both ends:** `for i = 0, n-1 do` iterates n times. When n=0 this becomes `for i = 0, -1 do` — correctly executes zero iterations (fixed 2026-05; no guard needed).
 - **Loop variables are fresh per iteration** (numeric `for` and `for-in`, as in Lua 5.4 / Go 1.22): closures and goroutines created in a loop body capture that iteration's value — no `local j = i` copy needed (changed 2026-10).
 - **String indexing is 1-based** in `string.sub`, `string.find`, `string.byte` (matching Lua convention), but array/table indexing is 0-based.
+- **Strings are bytes; source is UTF-8.** `len` and `string.*` count bytes (`len("é")` is 2); the built-in `utf8` module counts characters (`utf8.len`, `utf8.sub`, `utf8.upper`, ...). A `.sea` file with invalid UTF-8 is a compile error; `"\u{E9}"` writes a code point. Native code uses `src/sea_utf8.h`.
 - **Cycles** are freed by the cycle collector (automatically, or `gc.collect()`), except cycles of objects shared between goroutines, which still leak; break those by setting a field to nil (see `docs/memory.md`).
 - **`int` is 48-bit** (±140 737 488 355 327). Wider integers are `bigint`s, an explicit type: `bigint.new("…")` and `bigint.add/sub/mul/div/mod/pow` (the operators `+ - *` do not take bigints; comparisons, `==`, `tostring`, `..` and `sort` do).
 - **`//` and `%` floor** (toward minus infinity) for ints and floats: `-7 // 2` is `-4`, `-7 % 2` is `1`.

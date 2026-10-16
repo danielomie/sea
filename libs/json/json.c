@@ -120,53 +120,11 @@ static int fmt_double(char *out, double d) {
 
 /* ---- UTF-8 ------------------------------------------------------------------ */
 
-/* Length of the valid UTF-8 sequence at s (n bytes available) and its code
- * point, or 0 if it is not valid (overlong, surrogate, > U+10FFFF, truncated). */
-static int utf8_seq(const unsigned char *s, size_t n, uint32_t *cp) {
-    unsigned char c = s[0];
-    if (c < 0x80) { *cp = c; return 1; }
-    if (c >= 0xC2 && c <= 0xDF) {
-        if (n < 2 || (s[1] & 0xC0) != 0x80) return 0;
-        *cp = ((uint32_t)(c & 0x1F) << 6) | (s[1] & 0x3F);
-        return 2;
-    }
-    if (c >= 0xE0 && c <= 0xEF) {
-        if (n < 3 || (s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80) return 0;
-        uint32_t v = ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-        if (v < 0x800 || (v >= 0xD800 && v <= 0xDFFF)) return 0;
-        *cp = v;
-        return 3;
-    }
-    if (c >= 0xF0 && c <= 0xF4) {
-        if (n < 4 || (s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80 || (s[3] & 0xC0) != 0x80) return 0;
-        uint32_t v = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(s[1] & 0x3F) << 12) |
-                     ((uint32_t)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
-        if (v < 0x10000 || v > 0x10FFFF) return 0;
-        *cp = v;
-        return 4;
-    }
-    return 0;
-}
+#define utf8_seq(s, n, cp) sea_utf8_decode((s), (n), (cp))   /* sea_utf8.h */
 
 static void push_utf8(Buf *b, uint32_t cp) {
     char t[4];
-    if (cp < 0x80) { buf_putc(b, (char)cp); return; }
-    if (cp < 0x800) {
-        t[0] = (char)(0xC0 | (cp >> 6));
-        t[1] = (char)(0x80 | (cp & 0x3F));
-        buf_push(b, t, 2);
-    } else if (cp < 0x10000) {
-        t[0] = (char)(0xE0 | (cp >> 12));
-        t[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        t[2] = (char)(0x80 | (cp & 0x3F));
-        buf_push(b, t, 3);
-    } else {
-        t[0] = (char)(0xF0 | (cp >> 18));
-        t[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-        t[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        t[3] = (char)(0x80 | (cp & 0x3F));
-        buf_push(b, t, 4);
-    }
+    buf_push(b, t, (size_t)sea_utf8_encode(cp, t));
 }
 
 /* ======================================================================== */

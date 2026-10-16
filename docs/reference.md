@@ -4,6 +4,17 @@ Keywords, operators, and built-in functions available in the Sea scripting langu
 
 ---
 
+## Source Encoding
+
+Source files are **UTF-8**. A byte-order mark at the start is skipped; any
+byte that is not valid UTF-8 (a Latin-1 `é`, say), in code, strings or
+comments, is a compile error that names its line and column:
+`file.sea:2:15: invalid UTF-8 in source (byte 0xE9)`. Identifiers are ASCII;
+non-ASCII text goes in strings and comments. Strings themselves are byte
+strings: escapes such as `\xFF` can still put any byte in one.
+
+---
+
 ## Comments & Shebang
 
 ```sea
@@ -49,12 +60,13 @@ Integer (`int`) and float (`number`) are **distinct types**. `1 == 1.0` is **fal
 | `\\` | backslash |
 | `\'` | single quote |
 | `\"` | double quote |
-| `\0` | null byte |
+| `\0` | null byte (a literal keeps it: `len("a\0b")` is 3) |
 | `\a` | bell |
 | `\b` | backspace |
 | `\f` | form feed |
 | `\v` | vertical tab |
 | `\xHH` | byte with hex value `HH` (exactly two hex digits) |
+| `\u{H…}` | the code point `H…` (1 to 6 hex digits, up to `10FFFF`, not a surrogate) as UTF-8: `"\u{E9}"` is `"é"`, `"\u{1F600}"` is `"😀"`. Anything else after `\u` is a compile error |
 
 ### Long strings (no escape processing)
 
@@ -302,6 +314,7 @@ a number (by value: `bigint.new(5) == 5`).
 ## Module: `string`
 
 > **Note:** Index arguments (`i`, `j`) are **1-based** and support negative indices (−1 = last character), following Lua convention.
+> The string functions work on **bytes** (`len("é")` is 2); module [`utf8`](#module-utf8) works on characters.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
@@ -726,6 +739,46 @@ print(bigint.tostring(id, 16), bigint.toint(id))   -- 7fffffffffffffff  nil
 
 ---
 
+## Module: `utf8`
+
+Strings read as UTF-8. The `string` module and `len()` count bytes; these
+functions count characters (code points). Character indexes are 1-based and
+negative ones count from the end, as in `string.sub`. A byte that is not part
+of a valid UTF-8 sequence counts as one character, and the functions keep it
+as it is (`utf8.valid`/`utf8.invalid` find such bytes, `utf8.sanitize`
+replaces them). Valid means RFC 3629: no overlong forms, no surrogates,
+nothing above U+10FFFF.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `utf8.len` | `len(s) → int` | Number of characters |
+| `utf8.valid` | `valid(s) → bool` | Whether `s` is valid UTF-8 |
+| `utf8.invalid` | `invalid(s) → int\|nil` | Byte position (1-based) of the first invalid byte, `nil` if none |
+| `utf8.sanitize` | `sanitize(s [, repl]) → string` | `s` with each invalid byte replaced by `repl` (default U+FFFD `"�"`) |
+| `utf8.char` | `char(cp, ...) → string`, `char(array) → string` | The UTF-8 encoding of code points; an invalid code point is a runtime error |
+| `utf8.codepoint` | `codepoint(s [, i]) → int\|nil` | Code point of character `i` (default 1); `nil` past the end or at an invalid byte |
+| `utf8.codepoints` | `codepoints(s) → array` | Every code point (invalid bytes give 0xFFFD) |
+| `utf8.chars` | `chars(s) → array` | The characters as one-character strings |
+| `utf8.sub` | `sub(s, i [, j]) → string` | Characters `i` to `j` (inclusive; `j` defaults to -1) |
+| `utf8.offset` | `offset(s, n) → int\|nil` | Byte position (1-based) where character `n` starts; `len + 1` gives the position after the end; `nil` out of range. Use it to pass character positions to `string.*` |
+| `utf8.upper`, `utf8.lower` | `upper(s) → string` | Simple case mapping of Latin (with Latin-1, Extended-A/B and Vietnamese letters), Greek, Cyrillic, Armenian and fullwidth letters; other characters unchanged. One code point maps to one (`ß` stays `ß`) |
+| `utf8.reverse` | `reverse(s) → string` | Characters in reverse order |
+| `utf8.width` | `width(s) → int` | Terminal columns: East Asian wide and fullwidth characters and emoji take 2, combining marks and zero-width characters 0, control characters 0 |
+
+```sea
+local s = "Ação 日本 😀"
+print(len(s), utf8.len(s))              -- 18  9
+print(utf8.upper(s), utf8.sub(s, -4))   -- AÇÃO 日本 😀  日本 😀
+print(utf8.codepoint("€"), utf8.char(0x48, 0xE9))   -- 8364  Hé
+print(utf8.width("日本"))                -- 4
+```
+
+Native libraries use the same code through `src/sea_utf8.h` (`sea_utf8_decode`,
+`sea_utf8_encode`, `sea_utf8_check`, `sea_utf8_len`, `sea_utf8_next`,
+`sea_utf8_upper`/`lower`, `sea_utf8_cpwidth`), included by `sea.h`.
+
+---
+
 ## Collection Literals
 
 | Syntax | Type | Description |
@@ -1046,6 +1099,7 @@ once can stall the other goroutines.
 | `1 == 1.0` is `false` | it is `true`: `==` compares int and float numerically (they remain distinct types: `type(1)` is `"int"`, `type(1.0)` is `"number"`) |
 | `!=` | `~=` |
 | `string.sub(s, 0, 2)` | `string.sub(s, 1, 2)` (1-based) |
+| `len("é")` expecting 1 | `len` and `string.*` count bytes (2); `utf8.len("é")` is 1 |
 | `mu.lock(mu)` | `mu.acquire(mu)` |
 | `mu.unlock(mu)` | `mu.release(mu)` |
 | Long ns arithmetic (weeks) | use `time.unix(sec, 0)` instead of `base.add(base, 7*24*time.Hour)` |

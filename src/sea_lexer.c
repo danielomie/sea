@@ -1,5 +1,6 @@
 #include "sea_lexer.h"
 #include "sea_memory.h"
+#include "sea_utf8.h"
 #include <ctype.h>
 #include <errno.h>
 
@@ -164,6 +165,32 @@ static SeaToken scan_string(SeaLexer *l, char quote) {
                 case 'b':  c = '\b'; break;
                 case 'f':  c = '\f'; break;
                 case 'v':  c = '\v'; break;
+                case 'u': {
+                    /* \u{XXXX} — a code point (1 to 6 hex digits), written as UTF-8 */
+                    const char *p = l->cur;
+                    uint32_t cp = 0;
+                    int digits = 0;
+                    if (*p == '{') {
+                        p++;
+                        while (isxdigit((unsigned char)*p) && digits < 7) {
+                            int h = isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10);
+                            cp = cp * 16 + (uint32_t)h;
+                            digits++;
+                            p++;
+                        }
+                    }
+                    char enc[4];
+                    int n = 0;
+                    if (digits >= 1 && digits <= 6 && *p == '}') n = sea_utf8_encode(cp, enc);
+                    if (!n) {
+                        if (buf) sea_free(buf, (size_t)buf_cap);
+                        return error_token(l, "invalid \\u escape (use \\u{XXXX} with a code point up to 10FFFF, not a surrogate)");
+                    }
+                    l->cur = p + 1;
+                    for (int k = 0; k < n - 1; k++) SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, enc[k]);
+                    c = enc[n - 1];
+                    break;
+                }
                 case 'x': {
                     /* \xNN — two hex digits */
                     char h1 = *l->cur, h2 = *(l->cur + 1);
@@ -412,6 +439,23 @@ void sea_lexer_init_ex(SeaLexer *l, const char *source, bool keep_comments) {
     l->keep_comments = keep_comments;
     l->has_lookahead = false;
     l->err_msg = NULL;
+    /* Source is UTF-8: a byte-order mark is skipped, invalid bytes are an error */
+    if ((unsigned char)source[0] == 0xEF && (unsigned char)source[1] == 0xBB && (unsigned char)source[2] == 0xBF) {
+        l->cur = l->start = l->line_start = source + 3;
+    }
+    size_t n = strlen(l->cur);
+    size_t bad = sea_utf8_check(l->cur, n);
+    if (bad < n) {
+        const char *at = l->cur + bad;
+        for (const char *p = l->cur; p < at; p++)
+            if (*p == '\n') { l->line++; l->line_start = p + 1; }
+        l->tok_line = l->line;
+        l->tok_col = (int)(at - l->line_start) + 1;
+        snprintf(l->msg_buf, sizeof(l->msg_buf), "invalid UTF-8 in source (byte 0x%02X)", (unsigned char)*at);
+        l->cur = l->start = at + strlen(at);       /* nothing after the error */
+        l->current = error_token(l, l->msg_buf);
+        return;
+    }
     // Pre-scan first token
     l->current = scan_token(l);
 }

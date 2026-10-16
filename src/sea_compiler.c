@@ -1304,7 +1304,7 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
 
         case NODE_STRING: {
             /* a pinned constant: no refcounting (sea_chunk_add_const_str) */
-            int kidx = add_const_str(c, node->string.ptr);
+            int kidx = sea_chunk_add_const_strn(c->chunk, node->string.ptr, node->string.len);
             emit_abx(c, OP_LOAD_K, dst, kidx, line);
             reg_set_scalar(c, dst);
             break;
@@ -2000,7 +2000,7 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
                         int val_reg = alloc_reg(c);
                         compile_expr(c, node->table.vals[i], val_reg);
                         SeaNode *key_node = node->table.keys[i];
-                        int kidx = add_const_str(c, key_node->string.ptr);
+                        int kidx = sea_chunk_add_const_strn(c->chunk, key_node->string.ptr, key_node->string.len);
                         if (kidx <= 255 && !use_arena && can_move_from(c, val_reg)) {
                             emit_abc(c, OP_SET_FIELD_MOVE, dst, kidx, val_reg, line);
                             c->reg_meta[val_reg].is_owned = 0;   /* consumed */
@@ -2034,7 +2034,7 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
                             SeaNode *key_node = node->table.keys[i];
                             if (key_node->type == NODE_STRING) {
                                 // String key - use SET_FIELD
-                                int kidx = add_const_str(c, key_node->string.ptr);
+                                int kidx = sea_chunk_add_const_strn(c->chunk, key_node->string.ptr, key_node->string.len);
                                 if (kidx <= 255) {
                                     emit_abc(c, OP_SET_FIELD, dst, kidx, val_reg, line);
                                 } else {

@@ -434,4 +434,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_parser_register(vm);
     sea_lib_sort_register(vm);
     sea_lib_bigint_register(vm);
+    sea_lib_utf8_register(vm);
 }

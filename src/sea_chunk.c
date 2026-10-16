@@ -106,9 +106,14 @@ int sea_chunk_add_const(SeaChunk *c, SeaValue val) {
 }
 
 int sea_chunk_add_const_str(SeaChunk *c, const char *s) {
+    return sea_chunk_add_const_strn(c, s, strlen(s));
+}
+
+/* As sea_chunk_add_const_str, for len bytes (a literal may hold NUL bytes). */
+int sea_chunk_add_const_strn(SeaChunk *c, const char *s, size_t len) {
     // Intern the string and keep a reference alive for the lifetime of this chunk
     // by NOT releasing the ref from intern. The chunk "owns" this reference.
-    SeaString *str = sea_string_intern(s, strlen(s));
+    SeaString *str = sea_string_intern(s, len);
     // Check if it's already in the constant pool
     SeaValue val = sea_obj_val(&str->obj);
     int existing = find_const(c, val);
