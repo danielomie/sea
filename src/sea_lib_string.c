@@ -518,7 +518,6 @@ static SeaValue str_normalize_ws(SeaVM *vm, int argc, SeaValue *args) {
 // string.join(arr, sep) → concatena elementos de arr com separador sep
 // Evita O(N²) de concatenação incremental: constrói o resultado em um único buffer.
 static SeaValue str_join(SeaVM *vm, int argc, SeaValue *args) {
-    (void)vm;
     if (argc < 1 || !sea_is_obj(args[0])) return sea_obj_val(&sea_string_from_cstr("")->obj);
     SeaArray *arr = (SeaArray*)sea_as_obj(args[0]);
     if (arr->obj.type != OBJ_ARRAY) return sea_obj_val(&sea_string_from_cstr("")->obj);
@@ -532,12 +531,14 @@ static SeaValue str_join(SeaVM *vm, int argc, SeaValue *args) {
 
     uint32_t n = arr->len;
 
-    /* Flatten any rope elements up front so we can measure and copy correctly. */
+    /* Flatten any rope elements up front so we can measure and copy
+     * correctly; other values (numbers, booleans) join as tostring shows them. */
     SeaString **flat = (SeaString**)sea_malloc(n * sizeof(SeaString*));
     size_t total = 0;
     for (uint32_t i = 0; i < n; i++) {
         SeaValue v = arr->data[i];
         flat[i] = sea_value_get_flat_string(v);
+        if (!flat[i]) flat[i] = sea_vm_tostring(vm, v);
         if (flat[i]) total += flat[i]->len;
         if (i + 1 < n) total += sep_len;
     }

@@ -16,6 +16,7 @@ pure-Sea libraries work out of the box.
 | `ssl` | `libs/ssl/ssl` | Sea + native | `make -C libs/ssl` |
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
 | `flags` | `libs/flags/flags` | pure Sea | — |
+| `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
 
@@ -96,29 +97,130 @@ constant when it has one, so `obj.name` lookups compare pointers.
 
 ## `xml`
 
+XML 1.0 in C: a strict parser, an encoder, queries (a small XPath subset), a
+SAX mode and helpers to build and edit trees. Build: `make -C libs/xml`.
+
 ```sea
-local xml = require("./libs/xml/xml")
+local xml = require("../libs/xml/xml")   -- relative to the requiring file
 ```
-
-Node table format: `{ tag="name", attrs={k=v,...}, children=[...], text="..." }`
-
-- `children` — element-type children only (no text nodes)
-- `text` — concatenation of all text content inside the element (including CDATA)
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `xml.parse` | `parse(s) → node\|nil` | Parse an XML string into a node tree |
-| `xml.encode` | `encode(node) → string\|nil` | Serialize a node tree back to XML |
-| `xml.find` | `find(node, tag) → node\|nil` | First direct child element with the given tag |
-| `xml.findall` | `findall(node, tag) → array` | All direct child elements with the given tag (0-indexed) |
-| `xml.attr` | `attr(node, name) → string\|nil` | Value of an attribute, or `nil` if absent |
-| `xml.text` | `text(node) → string` | Text content of the node (empty string if none) |
+| `xml.parse` | `parse(s [, opts]) → element\|document\|error` | Parse a document into a tree |
+| `xml.valid` | `valid(s) → bool` | Check well-formedness without building a tree |
+| `xml.sax` | `sax(s, handlers [, opts]) → bool\|error` | Call handlers as the document is read (no tree) |
+| `xml.encode` | `encode(node [, opts]) → string\|error` | Serialize an element or a document |
+| `xml.escape` | `escape(s [, attr]) → string` | Escape `& < >` (and `" ' \n \t` when `attr` is true) |
+| `xml.find` | `find(node, tag) → element\|nil` | First child element with that tag (`"*"`: any) |
+| `xml.findall` | `findall(node, tag) → array` | Child elements with that tag (`"*"`: all) |
+| `xml.descendants` | `descendants(node [, tag]) → array` | Every element under `node` in document order, optionally only one tag |
+| `xml.query` | `query(node, path) → array\|error` | Elements, attribute values or text matching a path (see below) |
+| `xml.query_one` | `query_one(node, path) → value\|nil\|error` | First match of `query` |
+| `xml.attr` | `attr(node, name [, default]) → value` | An attribute, or `default` (nil) when absent |
+| `xml.text` | `text(node [, deep]) → string` | The element's own text; with `deep`, all text under it in order |
+| `xml.element` | `element(tag [, attrs [, content...]]) → element` | Build an element; content is strings, elements, comment/cdata/pi/text nodes or arrays of them |
+| `xml.append` | `append(node, x) → x` | Append a string, element or comment/cdata/pi/text node |
+| `xml.set_text` | `set_text(node, s) → node` | Replace the whole content with the text `s` |
+| `xml.set_attr` | `set_attr(node, name, value) → node` | Set an attribute (string, number or bool) keeping `attr_order`; `nil` removes it |
+| `xml.remove` | `remove(node, child) → bool` | Remove a child (element or node by identity, a string by value) |
+
+**Elements** are tables:
 
 ```sea
-local root = xml.parse("<items><item id='1'>Hello</item></items>")
-local item = xml.find(root, "item")
-print(xml.attr(item, "id"))   -- "1"
-print(xml.text(item))         -- "Hello"
+{ tag = "item",
+  attrs = {id = "1", lang = "pt"},   -- attribute values are strings
+  attr_order = ["id", "lang"],       -- names in document order
+  children = [ ... ],                -- child elements only
+  nodes = [ ... ],                   -- all content, in document order
+  text = "..." }                     -- the element's own text, joined
+```
+
+`nodes` holds text as plain strings, the same element tables as `children`,
+and (when kept) `{type = "comment", value}`, `{type = "cdata", value}` and
+`{type = "pi", target, value}`. So `<p>Hello <b>world</b>!</p>` has
+`nodes = ["Hello ", <b>, "!"]`, `children = [<b>]` and `text = "Hello !"`.
+Test an entry with `type(n) == "string"` (text), `n.tag` (element) or `n.type`.
+
+**`parse` options** (table, map or struct):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ignore_whitespace` | `false` | Drop text that is only whitespace (indentation) from `nodes` and `text` |
+| `comments` | `false` | Keep comments as nodes |
+| `cdata` | `false` | Keep CDATA sections as nodes (otherwise they are text) |
+| `pi` | `false` | Keep processing instructions as nodes |
+| `namespaces` | `false` | Resolve namespaces: each element gets `ns` (the URI, absent when none) and `name` (the local name); `tag` keeps the prefix. An unbound prefix is an error |
+| `document` | `false` | Return a document: `{type = "document", root, nodes, doctype, version, encoding, standalone}`; `nodes` holds the top-level comments/PIs, a `{type = "doctype", value}` node and the root |
+| `max_depth` | `512` | Deepest nesting allowed (deeper input is an error; the parser never recurses) |
+
+Parsing is strict: one root element, matching end tags, quoted and unique
+attributes, no `<` in attribute values, no bare `&`, only the five predefined
+entities and valid character references, no `]]>` in text or `--` in comments,
+valid UTF-8 (other encodings are rejected) and no control characters. Line ends
+become `"\n"` and whitespace characters in attribute values become spaces, as
+the spec says. A DOCTYPE is skipped, never interpreted: its entities are not
+expanded, so using one is an error. A UTF-8 byte-order mark is skipped.
+Failures are **error values** with a position, e.g.
+`xml.parse: expected </b>, found </a> at line 1, column 7`.
+
+**`encode` options:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `indent` | — | Pretty-print with a number of spaces (up to 16) or a string such as `"\t"`. Whitespace-only text is replaced by the indentation; elements with mixed content are written inline |
+| `declaration` | `false` | Start with `<?xml version="1.0" encoding="UTF-8"?>` |
+| `sort_attrs` | `false` | Write attributes sorted by name instead of `attr_order` first |
+| `max_depth` | `512` | Deepest nesting allowed (at most 10000); also stops a node that contains itself |
+
+`encode` takes an element or a document; nodes may be tables, maps or structs,
+so `{tag = "a", attrs = {k = 1}, text = "hi"}` works. Attributes come in
+`attr_order` and then the rest by name, so output is stable. Attribute values
+may be strings, numbers or bools. Content comes from `nodes` when present,
+otherwise from `text` followed by `children`. When `nodes` disagrees with
+`children` or `text` (an element added to `children` by hand, say), `encode`
+fails rather than drop the edit. The exception is a node whose `nodes` holds
+only text, as in `leaf.text = "new"`: `text` and `children` are used. Edit
+through `append`, `set_text` and `remove`, or set `nodes = nil`. Invalid names,
+control characters, invalid UTF-8, `--` in a comment and `?>` in a PI are
+errors; `]]>` in CDATA is split across two sections.
+
+**Paths** for `query` start at the given node:
+
+| Path | Selects |
+|------|---------|
+| `book`, `shelf/book` | child elements by tag (qualified names such as `d:title` as written) |
+| `*` | any child element |
+| `//book`, `shelf//title` | descendants at any depth |
+| `/lib/book` | from the top: the first step must match the node itself (or a document's root) |
+| `.` | the node itself |
+| `@id`, `@*` | attribute values (last step only) |
+| `text()` | text nodes (last step only) |
+| `[2]`, `[last()]` | position among the matches for each parent (1-based) |
+| `[@id]`, `[@id='2']`, `[@id!='2']` | has the attribute / its value equals / differs |
+| `[year]`, `[year='1881']` | has a child element / one whose text equals |
+| `[text()='x']` | the element's text equals |
+
+Predicates can be chained (`book[@lang][2]`); unquoted numbers are compared as
+text (`[year=1881]`). There is no `..` (nodes do not link to their parent).
+A bad path returns an error value.
+
+**`sax` handlers** (all optional): `start(tag, attrs [, ns])`, `finish(tag)`,
+`text(s)`, `cdata(s)`, `comment(s)`, `pi(target, data)`, `doctype(s)`. CDATA,
+comments and PIs are reported only when their handler exists (CDATA otherwise
+counts as text). The options are those of `parse` (`ignore_whitespace`,
+`namespaces` adds the `ns` argument, `max_depth`). A handler returning `false`
+stops the parse and `sax` returns `false`; a panic in a handler propagates.
+The checks and errors are the same as for `parse`.
+
+```sea
+local doc = xml.parse(src, {ignore_whitespace = true})?
+for _, book in xml.query(doc, "//book[@lang='pt']") do
+    print(xml.attr(book, "id"), xml.text(xml.find(book, "title")))
+end
+
+local feed = xml.element("feed", {version = 2}, xml.element("title", nil, "News & more"))
+xml.append(feed, xml.element("item", {id = 1}, "first"))
+print(xml.encode(feed, {indent = 2, declaration = true}))
 ```
 
 ---
@@ -684,6 +786,61 @@ flags.parse()
 print(host.value)     -- "localhost" (or whatever was passed)
 print(flags.narg())   -- number of positional args
 ```
+
+---
+
+## `tensor`
+
+Numeric kernels on `float_array`: the heavy loops of a small transformer
+(matrix-vector products and their backward passes, RMSNorm, causal
+attention, softmax, Adam), so a model written in Sea trains at C speed while
+the orchestration stays in Sea. On a small transformer written in Sea, swapping
+these kernels in for the same functions written in Sea gave identical results,
+58× faster.
+
+**Require:** `require("../../libs/tensor/tensor")` (relative to your file)
+**Build:** `make -C libs/tensor` (compiled with `-O3 -march=native`)
+
+Every function works in place on float_arrays addressed as `(array, offset)`
+and returns `nil` unless noted. Matrices are row-major: `w[i*nout + j]` links
+input `i` to output `j`. Backward functions accumulate (`+=`) into their
+gradient arguments; the caller zeroes them. A range outside an array, or an
+argument of the wrong type, is a runtime error (a panic).
+
+| Function | Effect |
+|----------|--------|
+| `matvec(x, xo, w, nin, nout, out, oo)` | `out[oo+j] = Σ_i x[xo+i]·w[i·nout+j]` |
+| `matvec_back(dout, doo, x, xo, w, dw, nin, nout, dx, dxo)` | `dw += x ⊗ dout`, `dx += w · dout` |
+| `matvec_cols(x, xo, w, nin, nout, cols, ncols, out, oo)` | only the outputs listed in `cols` (an `int_array`): `out[oo+k] = Σ_i x[xo+i]·w[i·nout+cols[k]]` |
+| `matvec_cols_back(dout, doo, x, xo, w, dw, nin, nout, cols, ncols, dx, dxo)` | its backward |
+| `rmsnorm(x, xo, y, yo, n) → r` | `y = x·r` with `r = 1/√(mean(x²) + 1e-5)` |
+| `rmsnorm_back(dy, dyo, x, xo, r, n, dx, dxo)` | `dx += r·dy − x·r³·(dy·x)/n` |
+| `relu(x, xo, y, yo, n)` | `y = max(x, 0)` |
+| `relu_back(d, doff, x, xo, n)` | `d = 0` where `x ≤ 0` |
+| `softmax(p, off, n)` | in place, numerically stable |
+| `attention(q, k, v, att, y, T, C, H, B)` | causal multi-head attention over `T` positions of width `C`, `H` heads, context `B` (`T ≤ B`); `att` (`H·B·B`) keeps the probabilities for the backward |
+| `attention_back(q, k, v, att, dy, dq, dk, dv, T, C, H, B)` | accumulates into `dq`, `dk`, `dv` |
+| `zero(a [, off, n])` | zero a range (the whole array by default) |
+| `add(dst, doff, src, soff, n)` | `dst[doff+i] += src[soff+i]` |
+| `copy(dst, doff, src, soff, n)` | copy a range (overlap allowed) |
+| `adam(w, g, m, v, n, lr, beta1, beta2, c1, c2, eps)` | one Adam step; `c1 = 1 − beta1^t`, `c2 = 1 − beta2^t` |
+| `save(path, a [, append]) → bytes` | write the array as raw doubles (native byte order); an error value on failure |
+| `load(path, a, offset) → next offset` | fill the whole array from the file at a byte offset; an error value if the file is short |
+
+```sea
+local tensor = require("../../libs/tensor/tensor")
+local x = float_array()
+x[] = 1.0
+x[] = 2.0
+local w = float_array()
+for i = 1, 6 do w[] = i end
+local out = float_array()
+for i = 1, 3 do out[] = 0.0 end
+tensor.matvec(x, 0, w, 2, 3, out, 0)      -- out = 9, 12, 15
+```
+
+Calls from several goroutines on different arrays run in parallel. Test:
+`tests/unit/113_tensor.sea`.
 
 ---
 

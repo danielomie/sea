@@ -107,10 +107,10 @@ check("roundtrip attr",   xml.attr(rtch, "id"),  "x")
 
 -- ---- Error cases ------------------------------------------------------------
 
-check("parse empty",   xml.parse(""),          nil)
-check("parse garbage", xml.parse("not xml"),   nil)
-check("parse unclosed",xml.parse("<a>"),        nil)
-check("encode non-node", xml.encode("string"), nil)
+check("parse empty",   is_error(xml.parse("")),        true)
+check("parse garbage", is_error(xml.parse("not xml")), true)
+check("parse unclosed",is_error(xml.parse("<a>")),     true)
+check("encode non-node", is_error(xml.encode("string")), true)
 
 -- ---- Summary ----------------------------------------------------------------
 

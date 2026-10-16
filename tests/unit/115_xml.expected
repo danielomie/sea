@@ -1,0 +1,118 @@
+xml.parse: expected </b>, found </a> at line 1, column 7
+xml.parse: text after the root element at line 1, column 5
+xml.parse: more than one root element at line 1, column 5
+xml.parse: duplicate attribute 'x' in <a> at line 1, column 1
+xml.parse: attribute values must be quoted at line 1, column 6
+xml.parse: '<' is not allowed in attribute values (write &lt;) at line 1, column 7
+xml.parse: undefined entity &foo; at line 1, column 4
+xml.parse: character reference &#0; is not an XML character at line 1, column 4
+xml.parse: '&' must start an entity reference (write &amp;) at line 1, column 6
+xml.parse: ']]>' is not allowed in text (write ]]&gt;) at line 1, column 6
+xml.parse: '--' is not allowed inside a comment at line 1, column 11
+xml.parse: invalid UTF-8 at line 2, column 6
+xml.parse: character U+0001 is not allowed in XML at line 1, column 4
+xml.parse: the XML declaration is only allowed at the start of the document at line 1, column 5
+xml.parse: no root element at line 1, column 1
+xml.parse: expected </a>, found the end of the input at line 1, column 4
+xml.parse: nesting too deep (more than 512 levels) at line 1, column 1537
+a
+valid	true	false	false
+refs	é😀<&'">
+crlf	l1|l2|l3	x y
+nodes	3	Hello 	b	!	text	Hello !
+<p>Hello <b>world</b>!</p>
+deep text	Hello world!
+kept	9	comment	 note 	pi	app
+cdata node	cdata	a < b
+<r>
+  <x id="1">one</x>
+  <!-- note -->
+  <y><![CDATA[a < b]]></y>
+  <?app go?>
+</r>
+lean	2	[]
+<r>
+  <x id="1">one</x>
+  <!-- note -->
+  <y><![CDATA[a < b]]></y>
+  <?app go?>
+</r>
+<?xml version="1.0" encoding="UTF-8"?>
+<r>
+	<x id="1">one</x>
+	<y>a &lt; b</y>
+</r>
+<r>
+  <p>Hi <b>there</b></p>
+  <q/>
+</r>
+<a z="1" b="2" m="3"/>	<a b="2" m="3" z="1"/>
+<n b="true" f="1.5" k="42">a'b"c</n>
+<s x="1">a struct node</s>
+xml.encode: <n>: attribute 'k': string, number or bool expected, got table
+xml.encode: <a b>: invalid tag name
+xml.encode: <a>: character U+0001 cannot be written in XML
+xml.encode: an element or a document expected
+xml.encode: <a>: nesting too deep (more than 512 levels) or a node contains itself
+escape	&lt;a &amp; 'b' "c"&gt;	&quot;q&quot;&#10;
+doc	document	1.0	UTF-8	true	lib [ <!ENTITY x "y"> <!-- it's ] fine --> ]	3	lib
+ns	urn:lib	lib	urn:dc	title
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE lib [ <!ENTITY x "y"> <!-- it's ] fine --> ]>
+<!-- catalog -->
+<lib xmlns="urn:lib" xmlns:d="urn:dc">
+  <book id="1" lang="pt">
+    <d:title>Dom Casmurro</d:title>
+    <year>1899</year>
+  </book>
+  <book id="2">
+    <d:title>Memorias</d:title>
+    <year>1881</year>
+  </book>
+  <shelf>
+    <book id="3" lang="en">
+      <d:title>Ulysses</d:title>
+    </book>
+  </shelf>
+</lib>
+xml.parse: unbound namespace prefix 'x' at line 1, column 1
+xml.parse: namespace prefix 'p' cannot be undeclared at line 1, column 1
+xml prefix	pt
+book	1,2
+//book	1,2,3
+/lib/book	1,2
+from doc	3
+[@lang]	1,3
+[@lang='en']	3
+[@lang!='en']	1
+[2] [last()]	2	2
+[year=1881]	2
+[year]	1,2
+[text()]	1	1
+@id	1,2,3
+@*	1,pt
+text()	Dom Casmurro,Memorias,Ulysses
+* //*	1,2,-	10
+./book	1,2
+query_one	Dom Casmurro	nil
+xml.query: expected a name in the predicate at position 6
+xml.query: '..' is not supported (nodes have no parent link) at position 1
+xml.query: @attribute and text() must be the last step at position 4
+descendants	9	3
+find *	book	3
+attr default	dflt	nil
+sax	true	start:a:1 text:hi start:b:nil end:b comment:c text:z end:a
+sax stop	false	2
+sax ns	a=urn:a b=urn:a
+xml.sax: expected </a>, found the end of the input at line 1, column 4
+sax panic	boom
+<feed lang="pt" version="2"><title>News &amp; more</title><!-- generated --><item id="1" z="last" a="true">text<![CDATA[a]]]]><![CDATA[>b]]></item></feed>
+item text	texta]]>b	2
+<item id="1" z="last" a="true">new</item>	1
+remove	true	false	1
+<feed version="2"><title>News &amp; more</title><!-- generated --></feed>
+append error	true
+element error	true
+xml.encode: <p>: nodes, children and text disagree: change content with xml.append, xml.set_text and xml.remove, or set nodes to nil
+<p>ac<b/><i/></p>
+<q>y</q>

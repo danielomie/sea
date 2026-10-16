@@ -427,4 +427,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_gc_register(vm);
     sea_lib_net_register(vm);
     sea_lib_parser_register(vm);
+    sea_lib_sort_register(vm);
 }

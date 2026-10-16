@@ -34,9 +34,10 @@ for i = 1, 6 do print(<-results) end
   goroutines) plus a cycle collector; see [memory](docs/memory.md).
 - **Fast** — NaN-boxed values, computed-goto dispatch, an optimizing compiler,
   and an optional JIT (libgccjit) that speeds hot numeric code up 2–4×.
-- **Batteries** — `math`, `string`, `io`, `os`, `sync`, `time`, `net`, and
+- **Batteries** — `math`, `string`, `io`, `os`, `sync`, `time`, `net`, `sort`, and
   `sea/parser` (Sea's own parser: AST, tokens, checks, a formatter); external
-  libraries for JSON, XML, HTTP, TLS, JWT, CLI flags and a terminal UI.
+  libraries for JSON, XML, HTTP, TLS, JWT, CLI flags, a terminal UI and
+  numeric kernels for training models.
 
 ## Quick start
 
@@ -71,7 +72,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 |----------|----------|
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
-| [Libraries](docs/libs.md) | `json`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags` |
+| [Libraries](docs/libs.md) | `json`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |

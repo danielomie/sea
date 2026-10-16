@@ -77,9 +77,15 @@ SEA_INLINE bool sea_is_int(SeaValue v) {
 
 // ---- Constructors ----
 
+// The NaN that stands for every computed NaN: positive, so outside the tag
+// space. x86 produces 0xFFF8000000000000 for 0/0 — the bit pattern of nil.
+#define SEA_CANON_NAN  UINT64_C(0x7FF8000000000000)
+
 SEA_INLINE SeaValue sea_number_val(double n) {
     SeaValue v;
     memcpy(&v, &n, sizeof(v));
+    // a NaN in the tag space would read as nil/bool/int/pointer: canonicalize
+    if (__builtin_expect((v & SEA_NAN_BASE) == SEA_NAN_BASE, 0)) v = SEA_CANON_NAN;
     return v;
 }
 

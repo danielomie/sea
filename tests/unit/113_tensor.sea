@@ -1,0 +1,133 @@
+-- Test: libs/tensor (needs make -C libs/tensor)
+-- Each kernel against a plain Sea reference on small arrays, plus range
+-- errors and the save/load round trip.
+
+local tensor = require("./libs/tensor/tensor")
+
+local function fa(vals)
+    local a = float_array()
+    for _, v in string.split(vals, " ") do a[] = tonumber(v) end
+    return a
+end
+
+local function zeros(n)
+    local a = float_array()
+    for i = 1, n do a[] = 0.0 end
+    return a
+end
+
+local function close(a, b)
+    if len(a) ~= len(b) then return false end
+    for i = 0, len(a) - 1 do
+        if math.abs(a[i] - b[i]) > 1e-12 then return false end
+    end
+    return true
+end
+
+local function show(a)
+    local parts = []
+    for i = 0, len(a) - 1 do parts[] = string.format("%.4f", a[i]) end
+    return string.join(parts, " ")
+end
+
+-- matvec: out = x @ w (x: 2, w: 2×3)
+local x = fa("1 2")
+local w = fa("1 2 3 4 5 6")
+local out = zeros(3)
+tensor.matvec(x, 0, w, 2, 3, out, 0)
+print("matvec", show(out))
+
+-- matvec_back: dw += x ⊗ dout, dx += w @ dout
+local dout = fa("1 0 -1")
+local dw = zeros(6)
+local dx = zeros(2)
+tensor.matvec_back(dout, 0, x, 0, w, dw, 2, 3, dx, 0)
+print("matvec_back dw", show(dw))
+print("matvec_back dx", show(dx))
+
+-- matvec_cols: only outputs 2 and 0
+local cols = int_array()
+cols[] = 2
+cols[] = 0
+local oc = zeros(2)
+tensor.matvec_cols(x, 0, w, 2, 3, cols, 2, oc, 0)
+print("matvec_cols", show(oc))
+local dwc = zeros(6)
+local dxc = zeros(2)
+tensor.matvec_cols_back(fa("1 1"), 0, x, 0, w, dwc, 2, 3, cols, 2, dxc, 0)
+print("matvec_cols_back", show(dwc), "|", show(dxc))
+
+-- rmsnorm and its backward, against the formulas in Sea
+local v = fa("3 4")
+local y = zeros(2)
+local r = tensor.rmsnorm(v, 0, y, 0, 2)
+local rr = 1.0 / math.sqrt((9 + 16) / 2 + 1e-5)
+print("rmsnorm", math.abs(r - rr) < 1e-12, show(y))
+local dv = zeros(2)
+tensor.rmsnorm_back(fa("1 0"), 0, v, 0, r, 2, dv, 0)
+local k = r * r * r * 3 / 2
+print("rmsnorm_back", close(dv, fa(string.format("%.17g %.17g", r - 3 * k, -4 * k))))
+
+-- relu, softmax
+local h = fa("-1 2 0 3")
+local hr = zeros(4)
+tensor.relu(h, 0, hr, 0, 4)
+local d = fa("1 1 1 1")
+tensor.relu_back(d, 0, h, 0, 4)
+print("relu", show(hr), "|", show(d))
+local p = fa("1 2 3")
+tensor.softmax(p, 0, 3)
+print("softmax", show(p))
+
+-- attention: one head, two positions; position 0 can only see itself
+local q = fa("1 0 0 1")
+local kk = fa("1 0 0 1")
+local vv = fa("1 2 3 4")
+local att = zeros(4)
+local ya = zeros(4)
+tensor.attention(q, kk, vv, att, ya, 2, 2, 1, 2)
+local e = math.exp(1 / math.sqrt(2))
+print("attention row 0", show(fa("1 2")) == string.format("%.4f %.4f", ya[0], ya[1]))
+print("attention row 1", math.abs(ya[2] - (1 + 3 * e) / (1 + e)) < 1e-12)
+local dq, dk, dvv = zeros(4), zeros(4), zeros(4)
+tensor.attention_back(q, kk, vv, att, fa("0 0 1 1"), dq, dk, dvv, 2, 2, 1, 2)
+print("attention_back dv", show(dvv))
+
+-- zero, add, copy, adam
+local a = fa("1 2 3 4")
+tensor.add(a, 1, fa("10 20"), 0, 2)
+tensor.copy(a, 0, a, 3, 1)
+tensor.zero(a, 3, 1)
+print("add/copy/zero", show(a))
+local wa, ga, ma, va = fa("1"), fa("0.5"), fa("0"), fa("0")
+tensor.adam(wa, ga, ma, va, 1, 0.1, 0.9, 0.999, 1 - 0.9, 1 - 0.999, 1e-8)
+print("adam", show(wa))
+
+-- out of range is a runtime error (a panic)
+local function try(f)
+    local msg = nil
+    local function run()
+        defer function()
+            local e2 = recover()
+            if e2 ~= nil then msg = tostring(e2) end
+        end
+        f()
+    end
+    run()
+    return msg
+end
+local m1 = try(function() tensor.matvec(x, 1, w, 2, 3, out, 0) end)
+print("range error", m1 ~= nil and string.contains(m1, "tensor.matvec"))
+local m2 = try(function() tensor.add(a, 0, 7, 0, 1) end)
+print("type error", m2 ~= nil and string.contains(m2, "float_array"))
+
+-- save / load round trip
+local path = "/tmp/sea_tensor_test.bin"
+local s1 = tensor.save(path, fa("1.5 -2.25"))
+local s2 = tensor.save(path, fa("3"), true)
+local b1, b2 = zeros(2), zeros(1)
+local off = tensor.load(path, b1, 0)
+off = tensor.load(path, b2, off)
+print("save/load", s1, s2, off, show(b1), show(b2))
+print("load past end", is_error(tensor.load(path, zeros(4), 0)))
+os.exec("rm -f " .. path)

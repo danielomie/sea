@@ -1,0 +1,181 @@
+-- Test: libs/xml beyond the basics (needs make -C libs/xml)
+-- Strict parsing with error positions, mixed content, encode options,
+-- namespaces, documents, queries, SAX, and building/editing nodes.
+
+local xml = require("./libs/xml/xml")
+
+local function err(v)
+    if is_error(v) then return v.message end
+    return "no error"
+end
+
+-- ---- well-formedness errors, with line and column -----------------------
+print(err(xml.parse("<a><b></a></b>")))
+print(err(xml.parse("<a/>junk")))
+print(err(xml.parse("<a/><b/>")))
+print(err(xml.parse('<a x="1" x="2"/>')))
+print(err(xml.parse("<a x=1/>")))
+print(err(xml.parse('<a x="<"/>')))
+print(err(xml.parse("<a>&foo;</a>")))
+print(err(xml.parse("<a>&#0;</a>")))
+print(err(xml.parse("<a>a & b</a>")))
+print(err(xml.parse("<a>x ]]> y</a>")))
+print(err(xml.parse("<a><!-- a -- b --></a>")))
+print(err(xml.parse("<a>\n  <b>\xff</b>\n</a>")))
+print(err(xml.parse("<a>\x01</a>")))
+print(err(xml.parse("<a/><?xml version=\"1.0\"?>")))
+print(err(xml.parse("")))
+print(err(xml.parse("<a>")))
+print(err(xml.parse(string.rep("<a>", 600) .. string.rep("</a>", 600))))
+print(xml.parse(string.rep("<a>", 600) .. string.rep("</a>", 600), {max_depth = 1000}).tag)
+print("valid", xml.valid("<a/>"), xml.valid("<a>"), xml.valid("x"))
+print("refs", xml.parse("<a>&#233;&#x1F600;&lt;&amp;&apos;&quot;&gt;</a>").text)
+print("crlf", string.replace(xml.parse("<a t=\"x\ny\">l1\r\nl2\rl3</a>").text, "\n", "|"),
+      xml.attr(xml.parse("<a t=\"x\ny\"/>"), "t"))
+
+-- ---- mixed content keeps its order ----------------------------------------
+local p = xml.parse("<p>Hello <b>world</b>!</p>")
+print("nodes", len(p.nodes), p.nodes[0], p.nodes[1].tag, p.nodes[2], "text", p.text)
+print(xml.encode(p))
+print("deep text", xml.text(p, true))
+
+-- ---- whitespace, comments, cdata, pi ----------------------------------------
+local src = "<r>\n  <x id='1'>one</x>\n  <!-- note -->\n  <y><![CDATA[a < b]]></y>\n  <?app go?>\n</r>"
+local all = xml.parse(src, {comments = true, cdata = true, pi = true})
+print("kept", len(all.nodes), all.nodes[3].type, all.nodes[3].value, all.nodes[7].type, all.nodes[7].target)
+print("cdata node", xml.find(all, "y").nodes[0].type, xml.find(all, "y").text)
+print(xml.encode(all))
+local lean = xml.parse(src, {ignore_whitespace = true})
+print("lean", len(lean.nodes), "[" .. lean.text .. "]")
+
+-- ---- encode options ---------------------------------------------------------
+print(xml.encode(all, {indent = 2}))
+print(xml.encode(lean, {indent = "\t", declaration = true}))
+print(xml.encode(xml.parse("<r><p>Hi <b>there</b></p><q/></r>"), {indent = 2}))
+local ordered = xml.parse('<a z="1" b="2" m="3"/>')
+print(xml.encode(ordered), xml.encode(ordered, {sort_attrs = true}))
+print(xml.encode({tag = "n", attrs = {k = 42, b = true, f = 1.5}, text = "a'b\"c"}))
+print(xml.encode({tag = "s", attrs = {x = "1"}, text = "a struct node"}))
+print(err(xml.encode({tag = "n", attrs = {k = {}}})))
+print(err(xml.encode({tag = "a b"})))
+print(err(xml.encode({tag = "a", text = "\x01"})))
+print(err(xml.encode("x")))
+local cyc = xml.element("a")
+cyc.children[] = cyc
+cyc.nodes = nil
+print(err(xml.encode(cyc)))
+print("escape", xml.escape("<a & 'b' \"c\">"), xml.escape("\"q\"\n", true))
+
+-- ---- documents and namespaces -----------------------------------------------
+local docsrc = [[<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!DOCTYPE lib [ <!ENTITY x "y"> <!-- it's ] fine --> ]>
+<!-- catalog -->
+<lib xmlns="urn:lib" xmlns:d="urn:dc">
+  <book id="1" lang="pt"><d:title>Dom Casmurro</d:title><year>1899</year></book>
+  <book id="2"><d:title>Memorias</d:title><year>1881</year></book>
+  <shelf><book id="3" lang="en"><d:title>Ulysses</d:title></book></shelf>
+</lib>]]
+local doc = xml.parse(docsrc, {document = true, comments = true, namespaces = true, ignore_whitespace = true})
+print("doc", doc.type, doc.version, doc.encoding, doc.standalone, doc.doctype, len(doc.nodes), doc.root.tag)
+local title = xml.find(xml.find(doc.root, "book"), "d:title")
+print("ns", doc.root.ns, doc.root.name, title.ns, title.name)
+print(xml.encode(doc, {indent = 2, declaration = true}))
+print(err(xml.parse("<x:a/>", {namespaces = true})))
+print(err(xml.parse('<a xmlns:p=""/>', {namespaces = true})))
+print("xml prefix", xml.parse('<a xml:lang="pt"/>', {namespaces = true}).attrs["xml:lang"])
+
+-- ---- queries ------------------------------------------------------------------
+local function ids(list)
+    local out = []
+    for _, n in list do
+        if type(n) == "string" then out[] = n else out[] = xml.attr(n, "id", "-") end
+    end
+    return string.join(out, ",")
+end
+local r = doc.root
+print("book", ids(xml.query(r, "book")))
+print("//book", ids(xml.query(r, "//book")))
+print("/lib/book", ids(xml.query(doc, "/lib/book")))
+print("from doc", ids(xml.query(doc, "lib/shelf/book")))
+print("[@lang]", ids(xml.query(r, "//book[@lang]")))
+print("[@lang='en']", ids(xml.query(r, "//book[@lang='en']")))
+print("[@lang!='en']", ids(xml.query(r, "//book[@lang!='en']")))
+print("[2] [last()]", ids(xml.query(r, "book[2]")), ids(xml.query(r, "book[last()]")))
+print("[year=1881]", ids(xml.query(r, "book[year=1881]")))
+print("[year]", ids(xml.query(r, "//book[year]")))
+print("[text()]", len(xml.query(r, "//year[text()='1899']")), len(xml.query(r, "//year[text()!='1899']")))
+print("@id", ids(xml.query(r, "//book/@id")))
+print("@*", ids(xml.query(r, "book[1]/@*")))
+print("text()", ids(xml.query(r, "//d:title/text()")))
+print("* //*", ids(xml.query(r, "*")), len(xml.query(r, "//*")))
+print("./book", ids(xml.query(r, "./book")))
+print("query_one", xml.query_one(r, "//d:title").text, xml.query_one(r, "//nothing"))
+print(err(xml.query(r, "book[")))
+print(err(xml.query(r, "../x")))
+print(err(xml.query(r, "@id/x")))
+print("descendants", len(xml.descendants(r)), len(xml.descendants(r, "book")))
+print("find *", xml.find(r, "*").tag, len(xml.findall(r, "*")))
+print("attr default", xml.attr(r, "nope", "dflt"), xml.attr(r, "nope"))
+
+-- ---- SAX ------------------------------------------------------------------------
+local events = []
+local res = xml.sax("<a x='1'>hi<b/><!--c--><![CDATA[z]]></a>", {
+    start = function(tag, attrs) events[] = "start:" .. tag .. ":" .. tostring(attrs.x) end,
+    finish = function(tag) events[] = "end:" .. tag end,
+    text = function(s) events[] = "text:" .. s end,
+    comment = function(s) events[] = "comment:" .. s end,
+})
+print("sax", res, string.join(events, " "))
+local seen = 0
+local function stopper(tag)
+    seen = seen + 1
+    return seen < 2
+end
+print("sax stop", xml.sax("<a><b/><b/><b/></a>", {start = stopper}), seen)
+local nsseen = []
+xml.sax('<a xmlns="urn:a"><b/></a>', {start = function(tag, attrs, ns) nsseen[] = tag .. "=" .. ns end},
+        {namespaces = true})
+print("sax ns", string.join(nsseen, " "))
+print(err(xml.sax("<a>", {})))
+local function try(f)
+    local msg = nil
+    local function run()
+        defer function()
+            local e = recover()
+            if e ~= nil then msg = tostring(e) end
+        end
+        f()
+    end
+    run()
+    return msg
+end
+print("sax panic", try(function() xml.sax("<a/>", {start = function() panic("boom") end}) end))
+
+-- ---- building and editing ---------------------------------------------------------
+local feed = xml.element("feed", {version = 2, lang = "pt"},
+    xml.element("title", nil, "News & more"),
+    {type = "comment", value = " generated "})
+local item = xml.append(feed, xml.element("item", {id = 1}))
+xml.set_attr(item, "z", "last")
+xml.set_attr(item, "a", true)
+xml.append(item, "text")
+xml.append(item, {type = "cdata", value = "a]]>b"})
+print(xml.encode(feed))
+print("item text", item.text, len(item.nodes))
+xml.set_text(item, "new")
+print(xml.encode(item), len(item.nodes))
+print("remove", xml.remove(feed, item), xml.remove(feed, item), len(feed.children))
+xml.set_attr(feed, "lang", nil)
+print(xml.encode(feed))
+print("append error", try(function() xml.append(feed, 3 > 2) end) ~= nil)
+print("element error", try(function() xml.element("a b") end) ~= nil)
+
+-- edits through the views: nodes, children and text must agree
+local m = xml.parse("<p>a<b/>c</p>")
+m.children[] = xml.element("i")
+print(err(xml.encode(m)))
+m.nodes = nil
+print(xml.encode(m))
+local leaf = xml.parse("<q>x</q>")
+leaf.text = "y"
+print(xml.encode(leaf))

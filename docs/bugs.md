@@ -470,3 +470,61 @@ Encontrados no caminho:
 - o lexer montava "unexpected character" num buffer `static`, compartilhado entre threads;
 - um `#` fora do início da linha virava token de erro sem mensagem;
 - tokens de string multilinha levavam a linha do fim, não a do começo.
+
+## Achados escrevendo um modelo de linguagem em Sea **(2026-10)**
+
+Um GPT de caracteres treinado do zero em Sea (backward escrito à mão e
+conferido por diferenças finitas) achou dois problemas no VM:
+- **Campo de struct com chave criada em tempo de execução.** `s[k]`, com `k`
+  vindo de `string.sub`, `string.split` etc., devolvia `nil`, e `s[k] = v`
+  dava "attempt to add field". Isso acontecia em cerca de metade das strings
+  possíveis: `sea_string_new` gravava o hash sem limpar o bit 30, que é a
+  flag de "internada". A busca do struct confia na flag (ponteiro igual =
+  mesma string) e pulava a comparação por conteúdo. O cache de strings de
+  1 byte tinha o mesmo erro.
+- **`int_array`/`float_array` no caminho lento.** `GET_TABLE`/`SET_TABLE`
+  só tinham caminho rápido para arrays comuns; os tipados passavam pelo
+  `table_get`/`table_set` genérico. Agora têm caminho rápido próprio, que
+  continua registrando o feedback de tipo para o JIT. Um `matvec` ficou 25%
+  mais rápido no interpretador.
+
+## Módulo `sort` **(2026-10)**
+
+O Sea não tinha como ordenar (o único sort era o `qsort` interno do
+`os.glob`): quem precisava escrevia um merge sort à mão. O módulo embutido
+`sort` traz `sort`, `by`, `sorted`, `reverse`, `is_sorted`, `search`, `asc` e
+`desc`, estável, para arrays e arrays tipados.
+
+Encontrados no caminho:
+- **NaN virava `nil` no x86.** `0/0`, `0.0/0.0` e `math.huge - math.huge`
+  davam `nil`, e `type(0/0)` era `"nil"`: o x86 produz para uma operação
+  inválida o NaN `0xFFF8000000000000`, que é exatamente o padrão de bits de
+  `nil` no NaN-boxing. (No aarch64 o NaN padrão é positivo, por isso lá não
+  aparecia.) Agora `sea_number_val` e o JIT trocam todo NaN do espaço das
+  marcas pelo NaN positivo canônico.
+- **`string.join` deixava números em branco.** `string.join(numeros, ",")` dava
+  `",,,"`: só strings entravam. Agora os outros valores entram como o
+  `tostring` os mostra.
+
+## Revisão da lib xml **(2026-10)**
+
+A `libs/xml` foi reescrita: parser estrito com erros por linha e coluna,
+conteúdo misto em ordem (`nodes`), `encode` com `indent`/`declaration` e
+ordem de atributos estável, namespaces, modo documento, `query` (um
+subconjunto de XPath), `sax` e funções para montar e editar árvores (ver
+`docs/libs.md`).
+
+Defeitos da versão anterior:
+- **Segfault com aninhamento profundo.** O parser era recursivo e não tinha
+  limite: 200 mil `<a>` estouravam a pilha C e derrubavam o processo, sem
+  chance de `recover()`. Agora o parser é iterativo e tem `max_depth` (512).
+- **`&#0;` cortava o texto.** A referência virava um byte NUL e o resto do
+  texto sumia. Referências a caracteres que o XML não permite (NUL,
+  surrogates, acima de U+10FFFF) agora são erro.
+- **Aceitava documentos malformados.** Tags de fechamento trocadas
+  (`<a><b></a></b>`), lixo depois da raiz, atributos duplicados, `<` em
+  atributo e entidades desconhecidas passavam sem aviso, e todo erro virava
+  `nil`, sem dizer o motivo.
+- **Perdia informação no `encode`.** Em `<p>Olá <b>mundo</b>!</p>` o texto
+  saía todo antes dos filhos, a indentação do original era reescrita fora do
+  lugar e um atributo numérico fazia o `encode` inteiro devolver `nil`.

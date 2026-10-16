@@ -318,7 +318,7 @@ An initial newline immediately after the opening bracket is ignored. The number 
 | `string.pad_left` | `pad_left(s, width [, char]) → string` | Right-align `s` in a field of `width`, padding with `char` (default `' '`) |
 | `string.pad_right` | `pad_right(s, width [, char]) → string` | Left-align `s` in a field of `width` |
 | `string.pad_center` | `pad_center(s, width [, char]) → string` | Center `s` in a field of `width` |
-| `string.join` | `join(arr [, sep]) → string` | Join array elements with separator; O(N), preferred over incremental `..` |
+| `string.join` | `join(arr [, sep]) → string` | Join array elements with separator; numbers and other values join as `tostring` shows them. O(N), preferred over incremental `..` |
 | `string.normalize_ws` | `normalize_ws(s) → string` | Collapse internal whitespace runs to a single space and strip leading/trailing whitespace |
 
 ---
@@ -641,6 +641,43 @@ tree.
 Limits: the parser rejects code nested more than 1000 levels (expressions and
 blocks) or with more than 100 nested functions, with an error rather than a
 stack overflow; these limits apply to every program, not just this library.
+
+---
+
+## Module: `sort`
+
+Sorting and binary search. Works on arrays, `int_array` and `float_array`.
+Without a comparator the order is the natural one: numbers by value (ints and
+floats together, NaN last) and strings by bytes. Every sort is **stable**:
+equal elements keep their order.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `sort.sort` | `sort(a [, less]) → a` | Sort in place. `less(x, y)` returns true when `x` goes before `y` |
+| `sort.by` | `by(a, key [, reverse]) → a` | Sort in place by a key: a function (called once per element) or a field name of tables/structs/maps; keys compare in the natural order |
+| `sort.sorted` | `sorted(a [, less]) → array` | A sorted copy (same kind of array); `a` is untouched |
+| `sort.reverse` | `reverse(a) → a` | Reverse in place |
+| `sort.is_sorted` | `is_sorted(a [, less]) → bool` | Whether `a` is already in order |
+| `sort.search` | `search(a, x [, less]) → int` | Binary search in a sorted array: the first index whose element is not less than `x` (`len(a)` if none) — where `x` is, or would be inserted |
+| `sort.asc`, `sort.desc` | comparators | The natural order and its reverse: `sort.sort(a, sort.desc)`. Passed to a sort function they run in C, without calling back into Sea |
+
+```sea
+local scores = []
+scores[] = {name = "ana", points = 7}
+scores[] = {name = "bia", points = 9}
+scores[] = {name = "caio", points = 7}
+sort.by(scores, "points", true)                 -- bia 9, ana 7, caio 7 (stable)
+
+local words = string.split("pear apple fig", " ")
+sort.sort(words, function(a, b) return len(a) < len(b) end)   -- fig pear apple
+local i = sort.search(sort.sorted(words), "grape")             -- 1
+```
+
+Errors are runtime errors (panics), raised before the array is changed:
+values the natural order cannot compare (a number with a string, tables
+without a comparator), a comparator that is not a function. A comparator
+written in Sea works on a copy, so a panic inside it leaves the array as it
+was, and a comparator that changes the array is an error.
 
 ---
 
@@ -980,7 +1017,7 @@ local http = require("./libs/http/http")
 ```
 
 Built-in modules (`math`, `string`, `io`, `os`, `sync`, `net`, `time`, `gc`,
-`sea/parser`) are found first. Then the search order is:
+`sort`, `sea/parser`) are found first. Then the search order is:
 1. Directory of the requiring source file + path (`.sea` then `.so`)
 2. Current working directory + path
 3. Each directory in `SEA_PATH` (colon-separated environment variable)

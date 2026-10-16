@@ -846,6 +846,14 @@ static void sea_chunk_feedback(SeaChunk *c, int pc, SeaValue container) {
         __atomic_fetch_or(&slot->idx, f, __ATOMIC_RELAXED);
 }
 
+/* The same feedback from the interpreter's typed-array fast path: one
+ * relaxed load once the bit is set. */
+static inline void sea_chunk_feedback_typed(SeaChunk *c, int pc) {
+    struct SeaTableICSlot *slot = &sea_chunk_ics(c)[pc];
+    if (!(__atomic_load_n(&slot->idx, __ATOMIC_RELAXED) & SEA_FB_TYPED_ARRAY))
+        __atomic_fetch_or(&slot->idx, SEA_FB_TYPED_ARRAY, __ATOMIC_RELAXED);
+}
+
 /* SEA_TYPE_CHECK=1 (diagnostic, `make test-dwe`): IIADD/IISUB — emitted only
  * for operands the compiler proved to be ints — abort if that proof was
  * wrong, instead of silently computing garbage. */
@@ -1874,6 +1882,25 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
                 REG(a) = _arr->data[_idx];
                 DISPATCH();
             }
+        } else if (sea_is_obj(_obj) && sea_is_int(_key)) {
+            /* int_array / float_array, in range: no refcounting involved */
+            SeaObject *_o = sea_as_obj(_obj);
+            int64_t _idx = sea_as_int(_key);
+            if (_o->type == OBJ_FLOAT_ARRAY) {
+                SeaFloatArray *_fa = (SeaFloatArray*)_o;
+                if (SEA_LIKELY(_idx >= 0 && (uint64_t)_idx < _fa->len)) {
+                    sea_chunk_feedback_typed(chunk, (int)(ip - 1 - chunk->code));
+                    REG(a) = sea_number_val(_fa->data[_idx]);
+                    DISPATCH();
+                }
+            } else if (_o->type == OBJ_INT_ARRAY) {
+                SeaIntArray *_ia = (SeaIntArray*)_o;
+                if (SEA_LIKELY(_idx >= 0 && (uint64_t)_idx < _ia->len)) {
+                    sea_chunk_feedback_typed(chunk, (int)(ip - 1 - chunk->code));
+                    REG(a) = sea_int_val(_ia->data[_idx]);
+                    DISPATCH();
+                }
+            }
         }
         SAVE_IP();
         sea_chunk_feedback(chunk, (int)(ip - 1 - chunk->code), _obj);   /* for the JIT */
@@ -1899,6 +1926,26 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
                 _arr->data[_idx] = _val;
                 vm_release_val(_old);
                 DISPATCH();
+            }
+        } else if (sea_is_obj(_obj) && sea_is_int(_key)) {
+            SeaObject *_o = sea_as_obj(_obj);
+            int64_t _idx = sea_as_int(_key);
+            if (_o->type == OBJ_FLOAT_ARRAY && (sea_is_number(_val) || sea_is_int(_val))) {
+                SeaFloatArray *_fa = (SeaFloatArray*)_o;
+                if (SEA_LIKELY(_idx >= 0 && (uint64_t)_idx < _fa->len)) {
+                    sea_chunk_feedback_typed(chunk, (int)(ip - 1 - chunk->code));
+                    _fa->data[_idx] = sea_is_number(_val) ? sea_as_number(_val)
+                                                          : (double)sea_as_int(_val);
+                    DISPATCH();
+                }
+            } else if (_o->type == OBJ_INT_ARRAY && (sea_is_int(_val) || sea_is_number(_val))) {
+                SeaIntArray *_ia = (SeaIntArray*)_o;
+                if (SEA_LIKELY(_idx >= 0 && (uint64_t)_idx < _ia->len)) {
+                    sea_chunk_feedback_typed(chunk, (int)(ip - 1 - chunk->code));
+                    _ia->data[_idx] = sea_is_int(_val) ? sea_as_int(_val)
+                                                       : (int64_t)sea_as_number(_val);
+                    DISPATCH();
+                }
             }
         }
         SAVE_IP();

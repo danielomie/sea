@@ -167,7 +167,7 @@ void sea_string_ensure_hash(SeaString *s) {
 
 SeaString* sea_string_new(const char *data, size_t len) {
     SeaString *s = sea_string_alloc(len);
-    s->hash       = sea_string_hash(data, len) & ~SEA_HASH_UNCOMPUTED;
+    s->hash       = sea_string_hash(data, len) & SEA_STRING_HASH_MASK;   /* not interned */
     if (data) memcpy(s->data, data, len);
     s->data[len] = '\0';
     return s;
@@ -329,7 +329,7 @@ void sea_string_cache_init(void) {
         SeaString *s = sea_string_alloc(1);
         s->data[0]      = (char)(unsigned char)i;
         s->data[1]      = '\0';
-        s->hash         = sea_string_hash(s->data, 1) & ~SEA_HASH_UNCOMPUTED;
+        s->hash         = sea_string_hash(s->data, 1) & SEA_STRING_HASH_MASK;
         sea_obj_pin(&s->obj);   /* shared by every thread: retain/release are no-ops */
         g_byte_cache[i] = s;
     }

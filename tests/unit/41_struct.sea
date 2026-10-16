@@ -62,3 +62,15 @@ dyn.z = 3
 print(dyn.x)          -- 1
 print(dyn.y)          -- 2
 print(dyn.z)          -- 3
+
+-- fields by a key built at run time (a string that is not interned)
+local opts = {steps = 1, samples = 2}
+local key = string.sub("--samples", 3)
+print(opts[key])
+opts[key] = 5
+print(opts.samples)
+local found = 0
+for _, k in string.split("steps,samples,nope", ",") do
+    if opts[k] ~= nil then found = found + 1 end
+end
+print(found)

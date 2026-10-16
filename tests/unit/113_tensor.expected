@@ -1,0 +1,18 @@
+matvec	9.0000 12.0000 15.0000
+matvec_back dw	1.0000 0.0000 -1.0000 2.0000 0.0000 -2.0000
+matvec_back dx	-2.0000 -2.0000
+matvec_cols	15.0000 9.0000
+matvec_cols_back	1.0000 0.0000 1.0000 2.0000 0.0000 2.0000	|	4.0000 10.0000
+rmsnorm	true	0.8485 1.1314
+rmsnorm_back	true
+relu	0.0000 2.0000 0.0000 3.0000	|	0.0000 1.0000 0.0000 1.0000
+softmax	0.0900 0.2447 0.6652
+attention row 0	true
+attention row 1	true
+attention_back dv	0.3302 0.3302 0.6698 0.6698
+add/copy/zero	4.0000 12.0000 23.0000 0.0000
+adam	0.9000
+range error	true
+type error	true
+save/load	16	8	24	1.5000 -2.2500	3.0000
+load past end	true

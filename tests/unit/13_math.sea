@@ -28,3 +28,8 @@ print(-10 % 3)  -- 2  (floored modulo)
 print(math.exp(0))   -- 1
 print(math.log(1))   -- 0
 print(math.floor(math.log(math.exp(5)) + 0.5))  -- 5
+
+-- NaN is a number, not nil (x86 produces the nil bit pattern for 0/0)
+local zero = 0
+local nan = zero / zero
+print(type(nan), isnan(nan), nan ~= nil, type(math.huge - math.huge))

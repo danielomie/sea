@@ -417,8 +417,18 @@ static gcc_jit_rvalue *int_val(JitCtx *J, gcc_jit_rvalue *i /*i64*/) {
 static gcc_jit_rvalue *as_number(JitCtx *J, gcc_jit_rvalue *v) {
     return gcc_jit_context_new_bitcast(J->ctx, NULL, v, J->dbl);
 }
+/* a double as a value; a NaN in the tag space (x86's 0/0 is the nil
+ * pattern) becomes SEA_CANON_NAN, as sea_number_val does — without a branch:
+ * u ^ ((u ^ CANON) & -(tagged)) */
 static gcc_jit_rvalue *number_val(JitCtx *J, gcc_jit_rvalue *d) {
-    return gcc_jit_context_new_bitcast(J->ctx, NULL, d, J->u64);
+    gcc_jit_rvalue *u = gcc_jit_context_new_bitcast(J->ctx, NULL, d, J->u64);
+    gcc_jit_rvalue *top = bin(J, GCC_JIT_BINARY_OP_BITWISE_AND, J->u64, u, cu64(J, SEA_NAN_BASE));
+    gcc_jit_rvalue *tagged = gcc_jit_context_new_cast(J->ctx, NULL,
+        cmp(J, GCC_JIT_COMPARISON_EQ, top, cu64(J, SEA_NAN_BASE)), J->u64);
+    gcc_jit_rvalue *mask = bin(J, GCC_JIT_BINARY_OP_MINUS, J->u64, cu64(J, 0), tagged);
+    gcc_jit_rvalue *diff = bin(J, GCC_JIT_BINARY_OP_BITWISE_XOR, J->u64, u, cu64(J, SEA_CANON_NAN));
+    return bin(J, GCC_JIT_BINARY_OP_BITWISE_XOR, J->u64, u,
+               bin(J, GCC_JIT_BINARY_OP_BITWISE_AND, J->u64, diff, mask));
 }
 static gcc_jit_rvalue *bool_val(JitCtx *J, gcc_jit_rvalue *b /*bool*/) {
     gcc_jit_rvalue *u = gcc_jit_context_new_cast(J->ctx, NULL, b, J->u64);
