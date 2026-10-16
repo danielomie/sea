@@ -34,3 +34,5 @@ perf.data*
 .claude/scheduled_tasks.lock
 libs/duckdb/vendor/
 libs/duckdb/test.out
+libs/sqlite/vendor/
+libs/sqlite/test.out

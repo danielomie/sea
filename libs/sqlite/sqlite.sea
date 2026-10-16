@@ -1,0 +1,174 @@
+-- libs/sqlite/sqlite.sea — SQLite (embedded SQL database) for Sea
+--
+-- Build first:  make -C libs/sqlite   (downloads the SQLite source into vendor/)
+-- Usage:        local sqlite = require("../libs/sqlite/sqlite")
+--
+--   local db = sqlite.open("app.db")?                  -- nil or ":memory:" for in-memory
+--   local _ = db:exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")?
+--   local _ = db:exec("INSERT INTO t (name) VALUES (?)", "ana")?
+--   for _, row in db:query("SELECT * FROM t WHERE id > ?", 0)? do print(row.name) end
+--   db:close()
+--
+-- Failures are error values (is_error(e), e.message). Parameters are values
+-- after the SQL (`?`, `?2`), one positional table {a, b}, or a table of named
+-- values {name = v} for `:name` / `@name` / `$name`. In a goroutine a query
+-- runs on a worker thread and only that goroutine waits.
+
+local native = require("sqlite_native")
+
+local M = {}
+
+local Db = {}
+local Stmt = {}
+
+local function with_methods(obj, methods)
+    for k, f in methods do obj[k] = f end
+    return obj
+end
+
+local function new_db(h, path)
+    local d = {}
+    d.handle = h
+    d.path = path
+    return with_methods(d, Db)
+end
+
+-- sqlite.version() → "3.53.4"
+function M.version()
+    return native.version()
+end
+
+-- sqlite.open([path [, opts]]) → db | error
+-- opts: read_only, create (true), timeout (ms to wait for a lock; 5000),
+-- wal (journal_mode = WAL), foreign_keys (true)
+function M.open(path, opts)
+    local h = native.open(path, opts)
+    if is_error(h) then return h end
+    return new_db(h, path or ":memory:")
+end
+
+-- sqlite.blob(bytes): a value bound as a BLOB (strings bind as TEXT)
+function M.blob(bytes)
+    local b = {}
+    b.__sqlite_blob = bytes
+    return b
+end
+
+-- ---- databases -------------------------------------------------------------------
+
+-- db:query(sql, params...) → array of rows (tables keyed by column name)
+function Db.query(self, sql, ...)
+    return native.run(self.handle, sql, "rows", ...)
+end
+
+-- db:exec(sql, params...) → number of rows changed. Without parameters the
+-- SQL may hold several statements separated by ';'.
+function Db.exec(self, sql, ...)
+    return native.run(self.handle, sql, "exec", ...)
+end
+
+-- db:row(sql, params...) → the first row, or nil
+function Db.row(self, sql, ...)
+    return native.run(self.handle, sql, "row", ...)
+end
+
+-- db:value(sql, params...) → the first column of the first row, or nil
+function Db.value(self, sql, ...)
+    return native.run(self.handle, sql, "value", ...)
+end
+
+-- db:each(sql, fn, params...) → rows seen; fn(row) returning false stops.
+-- Rows are read one at a time (memory stays flat).
+function Db.each(self, sql, fn, ...)
+    return native.each(self.handle, sql, fn, ...)
+end
+
+-- db:prepare(sql) → stmt | error
+function Db.prepare(self, sql)
+    local h = native.prepare(self.handle, sql)
+    if is_error(h) then return h end
+    local info = native.info(h)
+    local s = {}
+    s.handle = h
+    s.sql = sql
+    s.params = info.params
+    s.columns = info.columns
+    return with_methods(s, Stmt)
+end
+
+-- db:transaction(fn) → what fn returns | error. Commits when fn returns;
+-- rolls back when it returns an error value or panics (the panic goes on).
+function Db.transaction(self, fn)
+    local began = self:exec("BEGIN")
+    if is_error(began) then return began end
+    local done = false
+    local result = nil
+    local function body()
+        defer function()
+            if not done then self:exec("ROLLBACK") end
+        end
+        result = fn(self)
+        if not is_error(result) then done = true end
+    end
+    body()
+    if not done then return result end
+    local committed = self:exec("COMMIT")
+    if is_error(committed) then return committed end
+    return result
+end
+
+-- db:last_insert_id() → the rowid of the last INSERT on this connection
+function Db.last_insert_id(self)
+    return native.last_insert_id(self.handle)
+end
+
+-- db:backup(path) → true | error: a consistent copy of the database
+function Db.backup(self, path)
+    return native.backup(self.handle, path)
+end
+
+-- db:connect() → another connection to the same database file (for
+-- goroutines that write in parallel; use wal = true when opening)
+function Db.connect(self)
+    local h = native.connect(self.handle)
+    if is_error(h) then return h end
+    return new_db(h, self.path)
+end
+
+-- db:interrupt(): stop the statement running on this connection
+function Db.interrupt(self)
+    return native.interrupt(self.handle)
+end
+
+-- db:close(): also closes the statements prepared on it
+function Db.close(self)
+    return native.close(self.handle)
+end
+
+-- ---- prepared statements -----------------------------------------------------------
+
+function Stmt.query(self, ...)
+    return native.run(self.handle, nil, "rows", ...)
+end
+
+function Stmt.exec(self, ...)
+    return native.run(self.handle, nil, "exec", ...)
+end
+
+function Stmt.row(self, ...)
+    return native.run(self.handle, nil, "row", ...)
+end
+
+function Stmt.value(self, ...)
+    return native.run(self.handle, nil, "value", ...)
+end
+
+function Stmt.each(self, fn, ...)
+    return native.each(self.handle, nil, fn, ...)
+end
+
+function Stmt.close(self)
+    return native.close(self.handle)
+end
+
+return M

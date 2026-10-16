@@ -20,6 +20,7 @@ pure-Sea libraries work out of the box.
 | `flags` | `libs/flags/flags` | pure Sea | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
+| `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
 
@@ -1172,6 +1173,61 @@ end
 All failures are error values whose message is DuckDB's
 (`duckdb.query: Catalog Error: Table with name nope does not exist!`),
 including a closed handle (`the connection or statement is closed`).
+
+---
+
+## `sqlite`
+
+SQLite, the embedded transactional SQL database, compiled into the module
+(nothing to install). `make -C libs/sqlite` downloads the SQLite 3.53.4
+amalgamation into `libs/sqlite/vendor/` (`fetch.sh`, pinned SHA-256) and
+builds `sqlite_native.so`; `make -C libs/sqlite test` runs its tests. Built
+with FTS5, R*Tree, JSON and math functions; extension loading is off.
+
+```sea
+local sqlite = require("../libs/sqlite/sqlite")   -- relative to the requiring file
+
+local db = sqlite.open("app.db", {wal = true})?
+local _ = db:exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INT)")?
+local _ = db:exec("INSERT INTO users (name, age) VALUES (?, ?)", "ana", 31)?
+print(db:last_insert_id())
+for _, u in db:query("SELECT * FROM users WHERE age >= :min", {min = 18})? do print(u.id, u.name) end
+db:close()
+```
+
+| Function | Description |
+|----------|-------------|
+| `sqlite.open([path [, opts]]) → db\|error` | Open (or create) a database file; `nil` or `":memory:"` for an in-memory one. `opts`: `read_only`, `create` (default `true`), `timeout` (ms to wait for another connection's lock; 5000), `wal` (`PRAGMA journal_mode = WAL`: readers and a writer at once), `foreign_keys` (default `true`) |
+| `sqlite.version() → string` | `"3.53.4"` |
+| `sqlite.blob(bytes)` | A value that binds as a BLOB (strings bind as TEXT) |
+| `db:exec(sql, params...) → int\|error` | Run a statement; the rows changed. Without parameters the SQL may hold several statements separated by `;` |
+| `db:query(sql, params...) → array\|error` | The rows, tables keyed by column name |
+| `db:row(sql, params...) → row\|nil\|error` | The first row |
+| `db:value(sql, params...) → value\|nil\|error` | The first column of the first row |
+| `db:each(sql, fn, params...) → int\|error` | Call `fn(row)` for each row as it is read (memory stays flat; `false` from `fn` stops); `fn` may use the same database |
+| `db:prepare(sql) → stmt\|error` | A prepared statement: `stmt:query/exec/row/value(params...)`, `stmt:each(fn, params...)`, `stmt:close()`, `stmt.params` (parameter names, `"1"`, `"2"`... for `?`), `stmt.columns` |
+| `db:transaction(fn) → value\|error` | `BEGIN`, `fn(db)`, then `COMMIT`; rolls back when `fn` returns an error value or panics (the panic goes on) |
+| `db:last_insert_id() → int` | The rowid of the last `INSERT` on this connection |
+| `db:backup(path) → true\|error` | A consistent copy of the database into a file (online backup) |
+| `db:connect() → db\|error` | Another connection to the same file (for goroutines writing in parallel; open with `wal = true`) |
+| `db:interrupt()` | Stop the statement running on the connection (from another goroutine) |
+| `db:close()` | Close the connection and its statements; later calls are error values |
+
+**Parameters**: values after the SQL for `?` / `?NNN`, one positional table
+`{a, b}`, or a table of named values `{name = v}` for `:name`, `@name` or
+`$name`. Sea values bind as: `nil` → NULL, `bool` → 0/1, `int` → INTEGER,
+`number` → REAL, `string` → TEXT, `sqlite.blob(s)` → BLOB, `bigint` →
+INTEGER (TEXT beyond 64 bits).
+
+**Results**: INTEGER → `int` within ±2^47, `number` while exact (±2^53),
+`bigint` beyond; REAL → `number`; TEXT → `string`; BLOB → `string` (bytes);
+NULL → `nil`.
+
+**Goroutines**: in a goroutine, `exec`/`query`/`row`/`value` run on a worker
+thread (at most 8) and only that goroutine waits; on the main thread they run
+in place. One connection runs one statement at a time; use `db:connect()` for
+parallel work. Failures are error values: `sqlite.exec: UNIQUE constraint
+failed: users.email`, `sqlite.query: expected 2 parameters, got 1`.
 
 ---
 

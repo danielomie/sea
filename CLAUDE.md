@@ -14,6 +14,7 @@ make sea-jit          # Build bin/sea-jit (optional JIT, needs libgccjit headers
 # Native libraries under libs/ (e.g. json, yaml, csv, xml, console, http, ssl, jwt, tensor, duckdb)
 make -C libs/json     # Build a library's .so
 make -C libs/duckdb test  # duckdb: first build downloads libduckdb into libs/duckdb/vendor/
+make -C libs/sqlite test  # sqlite: first build downloads the SQLite amalgamation into libs/sqlite/vendor/
 ```
 
 ## Test Commands
@@ -81,7 +82,7 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
 2. Current working directory + path
 3. Each directory in `SEA_PATH` (colon-separated env var)
 
-Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `yaml`, `csv`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `duckdb` (Sea + native) and `flags` (pure Sea) — see `docs/libs.md`.
+Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `yaml`, `csv`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `duckdb`, `sqlite` (Sea + native) and `flags` (pure Sea) — see `docs/libs.md`.
 TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.
 The parser is also exposed to Sea code as the built-in `sea/parser` module (`src/sea_lib_parser.c`:
 parse, tokenize, check, walk, format). Changing the AST (`sea_ast.h`) or the parser means updating
