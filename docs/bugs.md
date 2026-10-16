@@ -386,6 +386,30 @@ um `\0` sumia (`"a\0b" == "a"` dava `true`). **Correção:**
 literais passam a usá-la (o `.seac` já gravava o tamanho). **Teste:**
 `tests/unit/118_utf8.sea`.
 
+## Bug 20: local capturado vazava quando a closure não era criada **(FIXED 2026-10)**
+
+```sea
+for i = 1, 1000000 do
+    local t = make()
+    if rare then keep = function() return t end end   -- quase nunca roda
+end                                                      -- antes: t nunca era liberado
+```
+
+Um local capturado por uma closure não recebe `RELEASE` no fim do escopo:
+o compilador conta com o `CLOSE_UP`, que move a referência do registrador
+para o upvalue. Mas o `CLOSE_UP` só alcança os upvalues que existem; se a
+closure estava num ramo que não rodou, não há upvalue e o valor ficava no
+registrador sem dono (~190 bytes por iteração no exemplo; 1 milhão de
+iterações, 187 MB). Apareceu num laço de teste do `libs/sqlite`: o objeto
+`db` era capturado pela goroutine de outro ramo do `if`.
+
+**Correção:** depois de cada `CLOSE_UP` (fim de escopo, `break`/`continue`,
+e agora também `return`, que antes deixava o fechamento para o `RETURN`), um
+`RELEASE` para cada local capturado não escalar: se o upvalue existia, o
+`CLOSE_UP` já zerou o registrador e o `RELEASE` não faz nada; se não, libera
+(`emit_release_captured` em `sea_compiler.c`). **Teste:**
+`tests/unit/124_captured_release.sea` (mede o RSS; falha sem a correção).
+
 ## Fontes UTF-8 e módulo `utf8` **(2026-10)**
 
 O lexer passou a exigir UTF-8 no fonte (byte inválido é erro de compilação

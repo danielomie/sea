@@ -517,16 +517,31 @@ static bool local_needs_release(SeaCompiler *c, int i) {
     return !reg_scalar(c, r);
 }
 
+/* A captured local still owns its value when no closure was created for it
+ * (the closure sits in a branch that did not run): CLOSE_UP moves the value
+ * only into upvalues that exist and nils those registers, so a RELEASE
+ * after it frees the rest (and is a no-op for the moved ones). Emitted right
+ * after a CLOSE_UP that covers c->locals[from..). Bug 20 in docs/bugs.md. */
+static void emit_release_captured(SeaCompiler *c, int from, int keep_reg, int line) {
+    for (int i = c->local_count - 1; i >= from && i >= 0; i--) {
+        SeaLocal *loc = &c->locals[i];
+        if (!loc->captured || loc->reg == keep_reg || reg_scalar(c, loc->reg)) continue;
+        emit(c, SEA_MAKE_ABC(OP_RELEASE, loc->reg, 0, 0), line);
+    }
+}
+
 /* Release the locals c->locals[from..] (innermost first) for a jump out of
- * their scopes; with close, also close the upvalues of the captured ones
- * (break/continue — a return closes everything itself). keep_reg is not
- * released (a local whose reference `return` hands over). */
+ * their scopes, closing the upvalues of the captured ones first (break,
+ * continue and return: `close` is kept for the callers, a return used to
+ * leave the closing to RETURN). keep_reg is not released (a local whose
+ * reference `return` hands over). */
 static void emit_locals_cleanup(SeaCompiler *c, int from, bool close, int keep_reg, int line) {
+    (void)close;
     int close_from = -1;
     for (int i = c->local_count - 1; i >= from && i >= 0; i--) {
         SeaLocal *loc = &c->locals[i];
         if (loc->captured) {
-            if (close && (close_from < 0 || loc->reg < close_from)) {
+            if (close_from < 0 || loc->reg < close_from) {
                 if (c->reg_meta[loc->reg].has_copy) {
                     emit_abc(c, OP_MOVE, loc->reg, c->reg_meta[loc->reg].copy_of, 0, line);
                     c->reg_meta[loc->reg].has_copy = 0;
@@ -540,7 +555,10 @@ static void emit_locals_cleanup(SeaCompiler *c, int from, bool close, int keep_r
          * change what the fall-through code believes about the local */
         emit(c, SEA_MAKE_ABC(OP_RELEASE, loc->reg, 0, 0), line);
     }
-    if (close_from >= 0) emit_abx(c, OP_CLOSE_UP, close_from, 0, line);
+    if (close_from >= 0) {
+        emit_abx(c, OP_CLOSE_UP, close_from, 0, line);
+        emit_release_captured(c, from, keep_reg, line);
+    }
 }
 
 /* Owned temporaries live at this point (not named locals), e.g. arguments
@@ -564,6 +582,8 @@ static void end_scope(SeaCompiler *c, int line) {
     // Close upvalues for locals that go out of scope
     // and free their registers
     int close_from = -1;
+    int captured_regs[SEA_MAX_REGISTERS];
+    int ncaptured = 0;
     while (c->local_count > 0 &&
            c->locals[c->local_count-1].depth > c->scope_depth) {
         SeaLocal *loc = &c->locals[c->local_count-1];
@@ -578,6 +598,7 @@ static void end_scope(SeaCompiler *c, int line) {
             }
             if (close_from < 0 || loc->reg < close_from)
                 close_from = loc->reg;
+            if (!reg_scalar(c, loc->reg)) captured_regs[ncaptured++] = loc->reg;
         } else if (local_needs_release(c, c->local_count - 1)) {
             emit_abc(c, OP_RELEASE, loc->reg, 0, 0, line);
         }
@@ -587,6 +608,8 @@ static void end_scope(SeaCompiler *c, int line) {
     }
     if (close_from >= 0) {
         emit_abx(c, OP_CLOSE_UP, close_from, 0, line);
+        /* see emit_release_captured */
+        for (int k = 0; k < ncaptured; k++) emit_abc(c, OP_RELEASE, captured_regs[k], 0, 0, line);
     }
     // Reset reg_top to after last local
     if (c->local_count > 0) {
