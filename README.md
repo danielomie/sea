@@ -72,6 +72,8 @@ bin/sea check                         # undefined/unused variables, bad calls, .
 bin/sea build -o app main.sea         # standalone executable (program + modules + natives)
 bin/sea prof app.sea                  # CPU profile: hot functions and lines (-folded for flame graphs)
 bin/sea test -cover                   # line coverage of the code under test (-coverprofile out.lcov)
+bin/sea new myapp                     # start a project (sea.toml, main.sea, a test)
+bin/sea get https://host/repo@v1.0    # add a dependency: sea_modules/, sea.lock; require("repo")
 ```
 
 Native libraries are built per library, e.g. `make -C libs/json`.

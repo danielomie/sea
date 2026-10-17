@@ -9,7 +9,8 @@
 -- with -i. Files the program reads at run time (templates, data) are not
 -- included.
 --
---   -o out    the executable (default: the main file's name without .sea)
+--   -o out    the executable (default: the package name from sea.toml next to
+--             the main file, else the main file's name without .sea)
 --   -i path   also include this module (.sea or .so; may repeat)
 --   -v        list the files included
 
@@ -69,7 +70,20 @@ if not fs.isfile(main) then
     io.write_err("sea build: " .. main .. ": no such file\n")
     os.exit(2)
 end
-if out == nil then out = path.basename(main, ".sea") end
+-- the default name: the package's (sea.toml next to the main file), else the file's
+local function package_name(dir)
+    local toml = fs.read(path.join(dir, "sea.toml"))
+    if is_error(toml) then return nil end
+    local in_package = false
+    for _, l in string.split(toml, "\n") do
+        l = string.trim(l)
+        if string.starts_with(l, "[") then in_package = l == "[package]" end
+        local m = in_package and re.match("^name\\s*=\\s*\"([^\"]+)\"", l) or nil
+        if m ~= nil then return m.groups[1] end
+    end
+    return nil
+end
+if out == nil then out = package_name(path.dirname(main)) or path.basename(main, ".sea") end
 
 local builtin = {}
 for _, g in parser.globals() do builtin[g] = true end
@@ -87,6 +101,20 @@ local function resolve(name, dir)
     end
     if path.isabs(name) then return try(name) end
     local found = try(path.join(dir, name)) or try(name)
+    -- a package from `sea get`: sea_modules/ here or above
+    if found == nil and not string.starts_with(name, ".") then
+        local d = path.normalize(path.abs(dir))
+        while found == nil do
+            local mods = path.join(d, "sea_modules")
+            if fs.isdir(mods) then
+                found = try(path.join(mods, name))
+                local own = path.join(mods, name, path.basename(name) .. ".sea")
+                if found == nil and fs.isfile(own) then found = path.normalize(path.abs(own)) end
+            end
+            if d == "/" then break end
+            d = path.dirname(d)
+        end
+    end
     if found == nil then
         local sp = os.getenv("SEA_PATH")
         if sp ~= nil then

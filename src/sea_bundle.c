@@ -134,5 +134,10 @@ const SeaBundleEntry *sea_bundle_find(const char *from, const char *name) {
         for (int j = 0; j < n_entries; j++)
             if (ends_with(entries[j].name, cand)) return &entries[j];
     }
+    /* a package's name/name.sea (sea_modules/name/name.sea) */
+    const char *last = strrchr(tail, '/');
+    if ((size_t)snprintf(cand, sizeof cand, "%s/%s.sea", tail, last ? last + 1 : tail) >= sizeof cand) return NULL;
+    for (int j = 0; j < n_entries; j++)
+        if (ends_with(entries[j].name, cand)) return &entries[j];
     return NULL;
 }

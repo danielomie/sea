@@ -226,4 +226,56 @@ p = process.run({SEA, "prof", "-o", "out.folded", "hot.sea"}, {cwd = dir})
 print(p.code, string.contains(fs.read(dir .. "/out.folded"), "(anonymous) (hot.sea:9);spin (hot.sea:1) "))
 p = process.run({SEA, "prof"}, {cwd = dir})
 print(p.code, string.sub(p.stderr, 1, 15))
+
+print("-- sea new")
+print(run({"new", "--no-git", "proj"}))
+print(run({"new", "--lib", "--no-git", "mylib"}))
+print(run({"new", "9x"}))
+local function run_in(sub, args)
+    local cmd = []
+    cmd[] = SEA
+    for i = 0, len(args) - 1 do cmd[] = args[i] end
+    local r = process.run(cmd, {cwd = dir .. "/" .. sub})
+    if is_error(r) then return r.message end
+    return "[" .. tostring(r.code) .. "] " .. string.trim(r.stdout) .. (r.stderr ~= "" and (" | " .. string.trim(r.stderr)) or "")
+end
+print(untimed(run_in("proj", {"test"})))
+print(run_in("proj", {"check"}), run_in("proj", {"fmt", "-l", "."}), run_in("proj", {"main.sea", "you"}))
+print(untimed(run_in("mylib", {"test"})))
+
+print("-- sea get")
+local function sh(cwd, cmd)
+    local r = process.run({"sh", "-c", cmd}, {cwd = cwd})
+    if not r.ok then print("sh failed:", cmd, r.stderr) end
+end
+local repos = dir .. "/repos"
+fs.mkdir(repos .. "/pad", {parents = true})
+fs.mkdir(repos .. "/strutil", {parents = true})
+local commit = "git -c user.email=t@t -c user.name=t commit -qm"
+fs.write(repos .. "/pad/init.sea", "local M = {}\nfunction M.left(s, n) return string.rep(\" \", n - len(s)) .. s end\nreturn M\n")
+sh(repos .. "/pad", "git init -q && git add -A && " .. commit .. " v1 && git tag v1.0.0")
+fs.write(repos .. "/strutil/strutil.sea", "local pad = require(\"pad\")\nlocal M = {}\nM.VERSION = \"1\"\nfunction M.shout(s) return pad.left(string.upper(s), 6) end\nreturn M\n")
+fs.write(repos .. "/strutil/sea.toml", "[package]\nname = \"strutil\"\n\n[dependencies]\npad = { git = \"" .. repos .. "/pad\", tag = \"v1.0.0\" }\n")
+sh(repos .. "/strutil", "git init -q && git add -A && " .. commit .. " v1 && git tag v1.0.0 && sed -i 's/VERSION = \"1\"/VERSION = \"2\"/' strutil.sea && " .. commit ..
+    " v2 -a && git tag v2.0.0")
+fs.write(dir .. "/proj/main.sea", "local strutil = require(\"strutil\")\nprint(\"[\" .. strutil.shout(\"hi\") .. \"]\", strutil.VERSION)\n")
+local function hide(s) return string.replace(re.gsub("[0-9a-f]{12}", s, "C"), repos, "REPOS") end
+print(hide(run_in("proj", {"get", repos .. "/strutil@v1.0.0"})))
+print(run_in("proj", {"main.sea"}), run_in("proj", {"check", "main.sea"}))
+print(hide(string.replace(fs.read(dir .. "/proj/sea.toml"), "\n", " | ")))
+print(len(string.split(string.trim(fs.read(dir .. "/proj/sea.lock")), "\n")))
+fs.remove(dir .. "/proj/sea_modules", {recursive = true})
+print(hide(run_in("proj", {"get"})))
+fs.write(dir .. "/proj/sea.toml", string.replace(fs.read(dir .. "/proj/sea.toml"), "v1.0.0", "v2.0.0"))
+print(hide(run_in("proj", {"get"})), run_in("proj", {"main.sea"}))
+print(hide(run_in("proj", {"get", "-l"})))
+print(re.gsub("[0-9.]+ MB", run_in("proj", {"build", "-o", "app", "main.sea"}), "N MB"))
+fs.mkdir(dir .. "/locallib")
+fs.write(dir .. "/locallib/init.sea", "return {x = 42}\n")
+print(hide(string.replace(run_in("proj", {"get", "-path", "../locallib"}), dir, "DIR")))
+print(run_in("proj", {"get", "-rm", "strutil"}), string.join(fs.list(dir .. "/proj/sea_modules"), ","))
+print(run_in("proj", {"get", "-rm", "nothing"}))
+print(run({"get"}))
+local app = process.run({dir .. "/proj/app"}, {cwd = "/"})
+print(app.code, string.trim(app.stdout))
 fs.remove(dir, {recursive = true})

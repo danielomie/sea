@@ -56,7 +56,7 @@ local function register(name, typ, default_val, usage)
 end
 
 local function die(msg)
-    io.writeln("flag: " .. msg)
+    io.write_err("flag: " .. msg .. "\n")
     M.usage()
     os.exit(2)
 end
@@ -242,10 +242,10 @@ function M.usage()
         return
     end
 
-    io.writeln("Usage:")
-    io.writeln("  [flags] [arguments...]")
-    io.writeln("")
-    io.writeln("Flags:")
+    io.write_err("Usage:" .. "\n")
+    io.write_err("  [flags] [arguments...]" .. "\n")
+    io.write_err("" .. "\n")
+    io.write_err("Flags:" .. "\n")
 
     if _order_n > 0 then
         for i = 0, _order_n - 1 do
@@ -273,8 +273,8 @@ function M.usage()
                 default_str = tostring(f.def)
             end
 
-            io.writeln(flag_line)
-            io.writeln("    \t" .. f.usage .. " (default " .. default_str .. ")")
+            io.write_err(flag_line .. "\n")
+            io.write_err("    \t" .. f.usage .. " (default " .. default_str .. ")" .. "\n")
         end
     end
 end

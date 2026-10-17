@@ -205,10 +205,10 @@ static int require_try_dir(const char *dir, const char *name,
                             char *out, size_t outsz) {
     const char *sep = dir ? "/" : "";
     if (!dir) dir = "";
-    snprintf(out, outsz, "%s%s%s.sea", dir, sep, name);
-    if (access(out, R_OK) == 0) return REQUIRE_SOURCE;
-    snprintf(out, outsz, "%s%s%s/init.sea", dir, sep, name);
-    if (access(out, R_OK) == 0) return REQUIRE_SOURCE;
+    if ((size_t)snprintf(out, outsz, "%s%s%s.sea", dir, sep, name) < outsz &&
+        access(out, R_OK) == 0) return REQUIRE_SOURCE;
+    if ((size_t)snprintf(out, outsz, "%s%s%s/init.sea", dir, sep, name) < outsz &&
+        access(out, R_OK) == 0) return REQUIRE_SOURCE;
     return REQUIRE_NONE;
 }
 
@@ -218,11 +218,11 @@ static int require_try_native(const char *dir, const char *name,
     const char *sep = dir ? "/" : "";
     if (!dir) dir = "";
 #if defined(__APPLE__)
-    snprintf(out, outsz, "%s%s%s.dylib", dir, sep, name);
-    if (access(out, R_OK) == 0) return REQUIRE_NATIVE;
+    if ((size_t)snprintf(out, outsz, "%s%s%s.dylib", dir, sep, name) < outsz &&
+        access(out, R_OK) == 0) return REQUIRE_NATIVE;
 #endif
-    snprintf(out, outsz, "%s%s%s.so", dir, sep, name);
-    if (access(out, R_OK) == 0) return REQUIRE_NATIVE;
+    if ((size_t)snprintf(out, outsz, "%s%s%s.so", dir, sep, name) < outsz &&
+        access(out, R_OK) == 0) return REQUIRE_NATIVE;
     return REQUIRE_NONE;
 }
 
@@ -394,6 +394,38 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     }
 
     if (!found && !absolute) TRY_DIR(".");
+
+    /* A package installed by `sea get`: sea_modules/ in the requiring file's
+     * directory or any directory above it (bare names only) */
+    if (!found && !absolute && name[0] != '.') {
+        char start[PATH_MAX], dir[PATH_MAX];
+        const char *src = vm->source_name ? vm->source_name : "./x";
+        const char *slash = strrchr(src, '/');
+        if (slash) snprintf(start, sizeof start, "%.*s", (int)(slash - src), src);
+        else snprintf(start, sizeof start, ".");
+        if (!realpath(start, dir)) snprintf(dir, sizeof dir, "%s", start);
+        for (;;) {
+            char mods[PATH_MAX];
+            size_t dl = strlen(dir);
+            if (dl + sizeof "/sea_modules" > sizeof mods) break;
+            memcpy(mods, dir, dl);
+            memcpy(mods + dl, "/sea_modules", sizeof "/sea_modules");
+            if (access(mods, X_OK) == 0) {
+                TRY_DIR(mods);
+                if (!found) {
+                    /* sea_modules/<name>/<last part of name>.sea */
+                    const char *last = strrchr(name, '/');
+                    last = last ? last + 1 : name;
+                    if (snprintf(path, sizeof path, "%s/%s/%s.sea", mods, name, last) < (int)sizeof path &&
+                        access(path, R_OK) == 0) found = REQUIRE_SOURCE;
+                }
+                if (found) break;
+            }
+            char *up = strrchr(dir, '/');
+            if (!up || up == dir) break;
+            *up = '\0';
+        }
+    }
 
     if (!found && !absolute) {
         const char *sea_path = getenv("SEA_PATH");

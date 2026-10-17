@@ -30,6 +30,8 @@ sea test [flags] [path...]       # run the *_test.sea files
 sea check [flags] [path...]      # find likely mistakes without running
 sea build [-o out] file.sea      # a standalone executable
 sea prof [flags] file.sea [args] # run with the CPU profiler
+sea new [--lib] name             # start a project
+sea get [URL[@ref]]              # dependencies (sea.toml, sea.lock, sea_modules/)
 sea version
 ```
 
@@ -263,9 +265,57 @@ position before calls and operations that may fail, not at every
 instruction); the functions are exact. Run it on `bin/sea`, without
 `--jit`.
 
+### `sea new`
+
+`sea new name` creates the directory `name/` with an application:
+`sea.toml` (the manifest), `main.sea`, a module it uses (`greet.sea`) and
+its test, `README.md` and `.gitignore`, and runs `git init` there.
+`sea new --lib name` makes a library instead: `name.sea` (what
+`require("name")` loads once the library is installed with `sea get`) and
+`name_test.sea`. `--no-git` skips `git init`. The result passes `sea test`,
+`sea check` and `sea fmt` as it is, and `sea build main.sea` makes `./name`
+(`sea build` names the executable after the package in `sea.toml`).
+
+### `sea get`
+
+Dependencies of a project, the nearest directory (from the current one up)
+with a `sea.toml`:
+
+```toml
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+json5 = { git = "https://github.com/someone/sea-json5", tag = "v1.2.0" }
+utils = { git = "https://example.com/utils.git", branch = "main" }
+tools = { git = "https://example.com/tools.git", rev = "4f2a9c1" }
+mine = { path = "../mine" }
+```
+
+| Command | |
+|---------|--|
+| `sea get` | Install what `sea.toml` lists, at the commits recorded in `sea.lock` (the newest commit of each ref for a dependency that is not there yet); remove packages no longer listed |
+| `sea get URL[@ref] [name]` | Add a git dependency and install it. `ref` is a tag (`v1.2.0`, anything starting with a digit or `v` and a digit), a commit (hex) or a branch; without it, the default branch. The name defaults to the repository's (`sea-json5` → `json5`: a `sea-`/`sea_` prefix is dropped, `-` becomes `_`) |
+| `sea get -path DIR [name]` | Add a local dependency: a link to `DIR` |
+| `sea get -u [name ...]` | Move dependencies (all, or those named) to the newest commit of their ref |
+| `sea get -rm name ...` | Remove dependencies |
+| `sea get -l` | List them, with the locked commits |
+
+Packages are cloned into `sea_modules/` (add it to `.gitignore`), where
+`require("json5")` finds them from any file of the project:
+`sea_modules/json5/init.sea` or `sea_modules/json5/json5.sea`. A package's
+own `sea.toml` dependencies are installed too, in the same `sea_modules/`
+(when two packages want different versions of one, the first wins, with a
+warning). A package with a `Makefile` is built with `make` after it is
+fetched (for its native `.so` parts). `sea.lock` records the commit of
+every git package (`name url ref commit` per line): commit it with the
+project so that `sea get` installs the same code everywhere. `sea get`
+needs `git`. `sea build` and `sea check` find packages the same way.
+
 These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
-`tools/test.sea`, `tools/check.sea`, `tools/build.sea`) built into the
-binary.
+`tools/test.sea`, `tools/check.sea`, `tools/build.sea`, `tools/new.sea`,
+`tools/get.sea`) built into the binary.
 
 ---
 
@@ -1597,9 +1647,15 @@ local http = require("./libs/http/http")
 
 Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
 `os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
-`sea/parser`) are found first. An absolute path
-(`require("/opt/sea/libs/yaml/yaml")`) names the file itself, tried as
-`.sea`, `/init.sea`, then `.so`. Otherwise the search order is:
-1. Directory of the requiring source file + path (`.sea` then `.so`)
+`sea/parser`, and the Sea modules `sea/test` and `sea/check`) are found
+first, then, in an executable made by `sea build`, the modules bundled in
+it. An absolute path (`require("/opt/sea/libs/yaml/yaml")`) names the file
+itself, tried as `.sea`, `/init.sea`, then `.so`. Otherwise the search order
+is:
+1. Directory of the requiring source file + path (`.sea`, `/init.sea`, then `.so`)
 2. Current working directory + path
-3. Each directory in `SEA_PATH` (colon-separated environment variable)
+3. For a name that does not start with `.`: a package installed by
+   `sea get`, in the `sea_modules/` directory next to the requiring file or
+   in any directory above it (`sea_modules/name.sea`, `name/init.sea`,
+   `name.so`, or `name/name.sea`)
+4. Each directory in `SEA_PATH` (colon-separated environment variable)

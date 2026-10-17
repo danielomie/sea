@@ -1127,7 +1127,8 @@ Reads `os.args[1..n]`. Recognized syntax:
 - `--` ends flag parsing; remaining arguments become positional
 - `-h` / `--help` prints usage and exits with code 0
 
-Unknown flags call `flags.usage()` and exit with code 2.
+Unknown flags print `flag: <message>`, call `flags.usage()` and exit with
+code 2. The default usage text goes to stderr.
 
 ### Accessing results
 

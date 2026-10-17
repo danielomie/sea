@@ -87,7 +87,11 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
 `require("path")` searches in order:
 1. Directory of the requiring source file + path (`.sea` then `.so`)
 2. Current working directory + path
-3. Each directory in `SEA_PATH` (colon-separated env var)
+3. Bare names: `sea_modules/` (packages from `sea get`) next to the requiring file or above
+4. Each directory in `SEA_PATH` (colon-separated env var)
+
+Before the search: built-in modules, the embedded `sea/test`/`sea/check`, then (in a
+`sea build` executable) the bundled modules.
 
 Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `websocket`, `duckdb`, `sqlite` (Sea + native) and `flags`, `test`, `template` (pure Sea) — see `docs/libs.md`.
 TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.

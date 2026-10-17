@@ -7,17 +7,17 @@ local flags = require("../flags")
 
 -- Usage customizado (como flag.Usage = func() no Go)
 flags.set_usage(function()
-    io.writeln("server — servidor de exemplo em Sea")
-    io.writeln("")
-    io.writeln("Uso: server [flags]")
-    io.writeln("")
-    io.writeln("Flags:")
-    io.writeln("  -port int       porta de escuta (default 8080)")
-    io.writeln("  -host string    endereço de bind (default \"0.0.0.0\")")
-    io.writeln("  -env  string    ambiente: development|production (default \"development\")")
-    io.writeln("  -workers int    número de workers (default 4)")
-    io.writeln("  -timeout float  timeout em segundos (default 30.0)")
-    io.writeln("  -tls            habilitar TLS (default false)")
+    print("server — servidor de exemplo em Sea")
+    print("")
+    print("Uso: server [flags]")
+    print("")
+    print("Flags:")
+    print("  -port int       porta de escuta (default 8080)")
+    print("  -host string    endereço de bind (default \"0.0.0.0\")")
+    print("  -env  string    ambiente: development|production (default \"development\")")
+    print("  -workers int    número de workers (default 4)")
+    print("  -timeout float  timeout em segundos (default 30.0)")
+    print("  -tls            habilitar TLS (default false)")
 end)
 
 local port    = flags.int("port",     8080,          "porta de escuta")
@@ -38,12 +38,12 @@ print("  timeout  = " .. timeout.value .. "s")
 print("  tls      = " .. tostring(tls.value))
 
 if env.value ~= "development" and env.value ~= "production" then
-    io.writeln("erro: -env deve ser 'development' ou 'production'")
+    print("erro: -env deve ser 'development' ou 'production'")
     os.exit(1)
 end
 
 if port.value < 1 or port.value > 65535 then
-    io.writeln("erro: -port deve estar entre 1 e 65535")
+    print("erro: -port deve estar entre 1 e 65535")
     os.exit(1)
 end
 

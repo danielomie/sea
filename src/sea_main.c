@@ -348,6 +348,8 @@ static void usage(void) {
         "  sea check [flags] [path...]  Find likely mistakes (sea check -h)\n"
         "  sea build [-o out] <file>    A standalone executable (sea build -h)\n"
         "  sea prof [flags] <file> ...  Run with the CPU profiler (sea prof -h)\n"
+        "  sea new [--lib] <name>       Start a project (sea new -h)\n"
+        "  sea get [URL[@ref]]          Install / add dependencies (sea get -h)\n"
         "  sea version                  Print version\n"
     );
 }

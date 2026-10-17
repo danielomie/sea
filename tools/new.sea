@@ -1,0 +1,165 @@
+-- sea new — start a Sea project
+--
+--   sea new [--lib] [--no-git] name
+--
+-- Creates the directory name/ with a manifest (sea.toml), code, a test, a
+-- README and a .gitignore, and runs `git init` there (unless --no-git or git
+-- is missing). An application gets main.sea plus a module it uses; a library
+-- (--lib) gets <name>.sea, the file require("<name>") loads once it is
+-- installed with `sea get`.
+
+local function usage()
+    print("usage: sea new [--lib] [--no-git] name")
+    print("")
+    print("Creates a project in the directory name/: sea.toml, code, a test, README.md,")
+    print(".gitignore; --lib makes a library instead of an application.")
+end
+
+local lib = false
+local git = true
+local target = nil
+for i = 1, len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "--lib" then
+        lib = true
+    elseif a == "--no-git" then
+        git = false
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        io.write_err("sea new: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    elseif target == nil then
+        target = a
+    else
+        io.write_err("sea new: one name expected\n")
+        os.exit(2)
+    end
+end
+if target == nil then
+    usage()
+    os.exit(2)
+end
+
+local name = path.basename(target)
+if not re.test("^[A-Za-z_][A-Za-z0-9_]*$", name) then
+    io.write_err("sea new: '" .. name .. "' is not a valid name (letters, digits and _, not starting with a digit)\n")
+    os.exit(2)
+end
+if fs.exists(target) then
+    io.write_err("sea new: " .. target .. " already exists\n")
+    os.exit(1)
+end
+
+local files = []
+
+local function add(file, text)
+    local f = {}
+    f.path = string.replace(file, "NAME", name)
+    f.text = string.replace(text, "NAME", name)
+    files[] = f
+end
+
+add("sea.toml", [==[
+[package]
+name = "NAME"
+version = "0.1.0"
+
+[dependencies]
+# a package from git:   sea get https://github.com/user/repo@v1.0.0
+# a local package:      other = { path = "../other" }
+]==]
+)
+
+add(".gitignore", (lib and "" or "/NAME\n") .. "/sea_modules/\n*.lcov\n")
+
+if lib then
+    add("NAME.sea", [==[
+-- NAME — a Sea library
+--
+--   local NAME = require("NAME")
+--   print(NAME.greet("world"))
+
+local M = {}
+
+-- NAME.greet(who) → a greeting for who
+function M.greet(who)
+    return "hello, " .. who
+end
+
+return M
+]==]
+    )
+    add("NAME_test.sea", [==[
+local t = require("sea/test")
+local NAME = require("./NAME")
+
+t.describe("greet", function()
+    t.it("greets by name", function()
+        t.eq(NAME.greet("sea"), "hello, sea")
+    end)
+end)
+]==]
+    )
+else
+    add("main.sea", [==[
+-- NAME — run it with `sea main.sea [who]`
+
+local greet = require("./greet")
+
+print(greet.hello(os.args[1] or "world"))
+]==]
+    )
+    add("greet.sea", [==[
+-- greet — the greetings NAME prints
+
+local M = {}
+
+-- greet.hello(who) → "hello, <who>"
+function M.hello(who)
+    return "hello, " .. who
+end
+
+return M
+]==]
+    )
+    add("greet_test.sea", [==[
+local t = require("sea/test")
+local greet = require("./greet")
+
+t.it("says hello", function()
+    t.eq(greet.hello("sea"), "hello, sea")
+end)
+]==]
+    )
+end
+
+local run_line = lib and "" or "sea main.sea          # run\n"
+local build_line = lib and "" or "sea build main.sea    # a standalone executable: ./NAME\n"
+add("README.md", "# NAME\n\n```sh\n" .. run_line .. "sea test              # run the tests (-cover for coverage)\n" ..
+    "sea check             # find mistakes without running\n" .. "sea fmt .             # format the code\n" ..
+        "sea doc               # documentation from the comments\n" .. build_line ..
+            "sea get URL[@ref]     # add a dependency (see sea.toml)\n```\n")
+
+local made = fs.mkdir(target, {parents = true})
+if is_error(made) then
+    io.write_err("sea new: " .. made.message .. "\n")
+    os.exit(1)
+end
+for _, f in files do
+    local w = fs.write(path.join(target, f.path), f.text)
+    if is_error(w) then
+        io.write_err("sea new: " .. w.message .. "\n")
+        os.exit(1)
+    end
+end
+
+local git_note = ""
+if git then
+    local r = process.run({"git", "init", "-q"}, {cwd = target})
+    if not is_error(r) and r.ok then git_note = " (git repository)" end
+end
+print("created " .. (lib and "library" or "application") .. " " .. name .. " in " .. target .. git_note)
+for _, f in files do print("  " .. f.path) end

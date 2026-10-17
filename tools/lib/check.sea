@@ -10,7 +10,8 @@
 -- mistake). The codes:
 --
 --   syntax       the file does not parse or compile
---   undefined    a variable that is neither local, a built-in nor a global set somewhere
+--   undefined    a variable that is neither local, a built-in nor a global set
+--                somewhere, or a function a built-in module does not have (string.foo)
 --   unused       a local variable or function that is never read
 --   redeclared   a local declared twice in the same block
 --   shadow       a local that hides another local of an enclosing block
@@ -53,6 +54,23 @@ HINTS.None = "nil is Sea's null"
 HINTS.self = "self exists only in functions declared with `:` (function T:m())"
 
 local builtin_globals = nil
+local module_cache = {}
+
+-- The keys of a built-in module (nil if the name is not a module table)
+local function module_fields(name)
+    local cached = module_cache[name]
+    if cached ~= nil then return cached ~= false and cached or nil end
+    local m = require(name)
+    local t = type(m)
+    if t ~= "table" and t ~= "map" and t ~= "struct" then
+        module_cache[name] = false
+        return nil
+    end
+    local keys = {}
+    for k, _ in m do keys[k] = true end
+    module_cache[name] = keys
+    return keys
+end
 
 local function builtins()
     if builtin_globals == nil then
@@ -156,6 +174,18 @@ local function module_exists(name, dir)
     end
     if path.isabs(name) then return try(name) end
     if try(path.join(dir, name)) or try(name) then return true end
+    -- a package from `sea get`: sea_modules/ here or above
+    if not string.starts_with(name, ".") then
+        local d = path.normalize(path.abs(dir))
+        while true do
+            local mods = path.join(d, "sea_modules")
+            if fs.isdir(mods) and (try(path.join(mods, name)) or fs.isfile(path.join(mods, name, path.basename(name) .. ".sea"))) then
+                return true
+            end
+            if d == "/" then break end
+            d = path.dirname(d)
+        end
+    end
     local sp = os.getenv("SEA_PATH")
     if sp ~= nil then
         for _, d in string.split(sp, ":") do
@@ -449,6 +479,27 @@ function M.source(src, opts)
             if is_call_to(n, nil, "require") and len(n.args) == 1 and n.args[0].type == "string" then
                 local m = n.args[0].value
                 if not module_exists(m, dir) then report("require", n.args[0], "module '" .. m .. "' not found") end
+            end
+        elseif t == "field" then
+            -- math.foo: the built-in modules' fields are known
+            if n.object.type == "ident" and lookup(n.object.name) == nil and known[n.object.name] and not globals[n.object.name] then
+                local mod = module_fields(n.object.name)
+                if mod ~= nil and not mod[n.field] then
+                    local best = nil
+                    local best_d = 3
+                    for k, _ in mod do
+                        local dd = distance(n.field, k, 2)
+                        if dd < best_d then
+                            best_d = dd
+                            best = k
+                        end
+                    end
+                    local msg = n.object.name .. " has no '" .. n.field .. "'"
+                    if best ~= nil and best_d <= (len(n.field) >= 6 and 2 or 1) then msg = msg .. " (did you mean '" .. best .. "'?)" end
+                    report("undefined", n, msg)
+                end
+            else
+                expr(n.object)
             end
         elseif t == "method_call" then
             expr(n.object)

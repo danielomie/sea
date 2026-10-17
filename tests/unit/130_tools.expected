@@ -160,3 +160,50 @@ true	true	true
 6	true	true	true
 0	true
 2	usage: sea prof
+-- sea new
+[0] created application proj in proj
+  sea.toml
+  .gitignore
+  main.sea
+  greet.sea
+  greet_test.sea
+  README.md
+[0] created library mylib in mylib
+  sea.toml
+  .gitignore
+  mylib.sea
+  mylib_test.sea
+  README.md
+[2]  | sea new: '9x' is not a valid name (letters, digits and _, not starting with a digit)
+[0] ok    greet_test.sea  1 passed (T)
+
+1 file; 1 passed (T)
+[0] 	[0] 	[0] hello, you
+[0] ok    mylib_test.sea  1 passed (T)
+
+1 file; 1 passed (T)
+-- sea get
+[0] added strutil to sea.toml
+  strutil REPOS/strutil@v1.0.0 (C)
+  pad REPOS/pad@v1.0.0 (C)
+2 packages, 2 changed
+[0] [    HI]	1	[0] 
+[package] | name = "proj" | version = "0.1.0" |  | [dependencies] | # a package from git:   sea get https://github.com/user/repo@v1.0.0 | # a local package:      other = { path = "../other" } | strutil = { git = "REPOS/strutil", tag = "v1.0.0" } | 
+3
+[0] strutil REPOS/strutil@v1.0.0 (C)
+  pad REPOS/pad@v1.0.0 (C)
+2 packages, 2 changed
+[0] strutil REPOS/strutil@v2.0.0 (C)
+2 packages, 1 changed	[0] [    HI]	2
+[0] strutil  REPOS/strutil@v2.0.0  C
+[0] app: 3 files, N MB
+[0] added locallib to sea.toml
+  locallib -> DIR/locallib
+3 packages, 1 changed
+[0] removed strutil from sea.toml
+  removed pad
+  removed strutil
+1 package, up to date	locallib
+[1]  | sea get: nothing is not a dependency in sea.toml
+[1]  | sea get: no sea.toml here or above (create one with `sea new`, or write [package] name = "...")
+0	[    HI]	2

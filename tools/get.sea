@@ -1,0 +1,473 @@
+-- sea get — dependencies of a Sea project
+--
+--   sea get                      install what sea.toml lists (the commits in sea.lock)
+--   sea get URL[@ref] [name]     add a git dependency (ref: tag, branch or commit) and install it
+--   sea get -path DIR [name]     add a local dependency (a link to DIR)
+--   sea get -u [name ...]        update to the newest commit of each ref, rewrite sea.lock
+--   sea get -rm name ...         remove dependencies
+--   sea get -l                   list the dependencies
+--
+-- The project is the nearest directory (from here up) with a sea.toml.
+-- Packages go to its sea_modules/ directory, where require("name") finds
+-- them: sea_modules/name/init.sea or sea_modules/name/name.sea. A package's
+-- own sea.toml dependencies are installed too (in the same sea_modules). A
+-- package with a Makefile is built with make (for its native parts).
+-- sea.lock records the commit of every git package: commit it, so that
+-- `sea get` installs the same code everywhere.
+
+local function usage()
+    print("usage: sea get                     install the dependencies in sea.toml")
+    print("       sea get URL[@ref] [name]    add a git dependency")
+    print("       sea get -path DIR [name]    add a local dependency")
+    print("       sea get -u [name ...]       update to the newest commits")
+    print("       sea get -rm name ...        remove dependencies")
+    print("       sea get -l                  list them")
+end
+
+local function fail(msg)
+    io.write_err("sea get: " .. msg .. "\n")
+    os.exit(1)
+end
+
+-- ---- arguments ----
+
+local mode = "install"
+local args = []
+local local_path = nil
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-u" then
+        mode = "update"
+    elseif a == "-rm" then
+        mode = "remove"
+    elseif a == "-l" then
+        mode = "list"
+    elseif a == "-path" then
+        i = i + 1
+        local_path = os.args[i]
+        if local_path == nil then fail("-path takes a directory") end
+        mode = "add_path"
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        io.write_err("sea get: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    else
+        args[] = a
+    end
+    i = i + 1
+end
+if mode == "install" and len(args) > 0 then mode = "add" end
+
+-- ---- the project ----
+
+local root = fs.cwd()
+while not fs.isfile(path.join(root, "sea.toml")) do
+    if root == "/" then fail("no sea.toml here or above (create one with `sea new`, or write [package] name = \"...\")") end
+    root = path.dirname(root)
+end
+local manifest = path.join(root, "sea.toml")
+local lockfile = path.join(root, "sea.lock")
+local modules = path.join(root, "sea_modules")
+
+-- ---- sea.toml (the part sea get uses) ----
+
+-- A TOML string: "..." with the usual escapes, or '...'
+local function toml_string(s)
+    local q = string.sub(s, 1, 1)
+    if q == "'" then return string.sub(s, 2, len(s) - 1) end
+    local body = string.sub(s, 2, len(s) - 1)
+    body = string.replace(body, "\\\"", "\"")
+    return string.replace(body, "\\\\", "\\")
+end
+
+-- [dependencies] entries: name → {git, tag, branch, rev, path}
+local function read_deps(file)
+    local text = fs.read(file)
+    if is_error(text) then return nil, text.message end
+    local deps = {}
+    local order = []
+    local section = ""
+    local n = 0
+    for _, raw in string.split(text, "\n") do
+        n = n + 1
+        local l = string.trim(raw)
+        local hash = string.find(l, "#")
+        if hash == 1 then l = "" end
+        if string.starts_with(l, "[") then
+            section = string.trim(string.sub(l, 2, (string.find(l, "]") or (len(l) + 1)) - 1))
+        elseif l ~= "" and section == "dependencies" then
+            local m = re.match("^([A-Za-z0-9_.-]+|\"[^\"]+\")\\s*=\\s*(.*)$", l)
+            if m == nil then return nil, file .. ":" .. tostring(n) .. ": expected name = value" end
+            local name = m.groups[1]
+            if string.starts_with(name, "\"") then name = string.sub(name, 2, len(name) - 1) end
+            local v = string.trim(m.groups[2])
+            local d = {}
+            if string.starts_with(v, "{") then
+                for _, kv in re.all("([A-Za-z_]+)\\s*=\\s*(\"(?:[^\"\\\\]|\\\\.)*\"|'[^']*')", v) do
+                    d[kv.groups[1]] = toml_string(kv.groups[2])
+                end
+            elseif string.starts_with(v, "\"") or string.starts_with(v, "'") then
+                -- name = "URL@ref"
+                local s = toml_string(v)
+                local at = re.match("^(.*)@([^@/]+)$", s)
+                if at ~= nil and not string.contains(at.groups[2], ":") then
+                    d.git = at.groups[1]
+                    d.tag = at.groups[2]
+                else
+                    d.git = s
+                end
+            else
+                return nil, file .. ":" .. tostring(n) .. ": the value of " .. name .. " must be a string or { git = ... } / { path = ... }"
+            end
+            if d.git == nil and d.path == nil then return nil, file .. ":" .. tostring(n) .. ": " .. name .. " needs git or path" end
+            d.name = name
+            deps[name] = d
+            order[] = name
+        end
+    end
+    return deps, order
+end
+
+local function toml_quote(s)
+    return "\"" .. string.replace(string.replace(s, "\\", "\\\\"), "\"", "\\\"") .. "\""
+end
+
+local function dep_line(d)
+    local parts = []
+    if d.git ~= nil then parts[] = "git = " .. toml_quote(d.git) end
+    if d.path ~= nil then parts[] = "path = " .. toml_quote(d.path) end
+    for _, k in {"tag", "branch", "rev"} do
+        if d[k] ~= nil then parts[] = k .. " = " .. toml_quote(d[k]) end
+    end
+    return d.name .. " = { " .. string.join(parts, ", ") .. " }"
+end
+
+-- Rewrite sea.toml: set (d) or remove (d == nil) the entry name, keeping the rest
+local function write_dep(name, d)
+    local lines = string.split(fs.read(manifest), "\n")
+    local out = []
+    local section = ""
+    local done = false
+    local dep_end = -1 -- index in out after the last line of [dependencies]
+    for _, raw in lines do
+        local l = string.trim(raw)
+        if string.starts_with(l, "[") then
+            if section == "dependencies" and dep_end < 0 then dep_end = len(out) end
+            section = string.trim(string.sub(l, 2, (string.find(l, "]") or (len(l) + 1)) - 1))
+            out[] = raw
+        elseif section == "dependencies" and re.test("^(" .. re.escape(name) .. "|\"" .. re.escape(name) .. "\")\\s*=", l) then
+            if d ~= nil and not done then out[] = dep_line(d) end
+            done = true
+        else
+            out[] = raw
+        end
+    end
+    if not done and d ~= nil then
+        if section == "dependencies" and dep_end < 0 then
+            -- the section runs to the end: add after its last non-blank line
+            local k = len(out)
+            while k > 0 and string.trim(out[k - 1]) == "" do k = k - 1 end
+            local tail = []
+            for j = k, len(out) - 1 do tail[] = out[j] end
+            local head = []
+            for j = 0, k - 1 do head[] = out[j] end
+            head[] = dep_line(d)
+            for _, t in tail do head[] = t end
+            out = head
+        elseif dep_end >= 0 then
+            local k = dep_end
+            while k > 0 and string.trim(out[k - 1]) == "" do k = k - 1 end
+            local head = []
+            for j = 0, k - 1 do head[] = out[j] end
+            head[] = dep_line(d)
+            for j = k, len(out) - 1 do head[] = out[j] end
+            out = head
+        else
+            while len(out) > 0 and string.trim(out[len(out) - 1]) == "" do
+                local trimmed = []
+                for j = 0, len(out) - 2 do trimmed[] = out[j] end
+                out = trimmed
+            end
+            out[] = ""
+            out[] = "[dependencies]"
+            out[] = dep_line(d)
+        end
+    end
+    local text = string.join(out, "\n")
+    if not string.ends_with(text, "\n") then text = text .. "\n" end
+    local w = fs.write(manifest, text, {atomic = true})
+    if is_error(w) then fail(w.message) end
+end
+
+-- ---- sea.lock ----
+
+-- name → {git, ref, commit}
+local function read_lock()
+    local lock = {}
+    local text = fs.read(lockfile)
+    if is_error(text) then return lock end
+    for _, l in string.split(text, "\n") do
+        l = string.trim(l)
+        if l ~= "" and not string.starts_with(l, "#") then
+            local f = string.split(l, " ")
+            if len(f) == 4 then
+                local e = {}
+                e.git = f[1]
+                e.ref = f[2] ~= "-" and f[2] or nil
+                e.commit = f[3]
+                lock[f[0]] = e
+            end
+        end
+    end
+    return lock
+end
+
+local function write_lock(lock)
+    local names = []
+    for n, _ in lock do names[] = n end
+    sort.sort(names)
+    local out = []
+    out[] = "# sea.lock: the exact commits `sea get` installed. Commit this file."
+    for _, n in names do
+        local e = lock[n]
+        out[] = n .. " " .. e.git .. " " .. (e.ref or "-") .. " " .. e.commit
+    end
+    local w = fs.write(lockfile, string.join(out, "\n") .. "\n", {atomic = true})
+    if is_error(w) then fail(w.message) end
+end
+
+-- ---- git ----
+
+local function git(argv, cwd)
+    local cmd = []
+    cmd[] = "git"
+    for j = 0, len(argv) - 1 do cmd[] = argv[j] end
+    local opts = {}
+    if cwd ~= nil then opts.cwd = cwd end
+    opts.env = {GIT_TERMINAL_PROMPT = "0"}
+    local r = process.run(cmd, opts)
+    if is_error(r) then fail("git is needed for git dependencies (" .. r.message .. ")") end
+    return r
+end
+
+local function head_commit(dir)
+    local r = git({"rev-parse", "HEAD"}, dir)
+    return r.ok and string.trim(r.stdout) or nil
+end
+
+local function ref_of(d)
+    return d.rev or d.tag or d.branch
+end
+
+-- ---- installing ----
+
+local lock = read_lock()
+local new_lock = {}
+local installed = {} -- name → dep, this run
+local updating = {}  -- names to move to the newest commit (-u)
+local update_all = false
+local changed = 0
+
+local install = nil
+
+-- the dependencies a package declares
+local function install_children(dir, from)
+    if fs.isfile(path.join(dir, "sea.toml")) then
+        local deps, order = read_deps(path.join(dir, "sea.toml"))
+        if deps == nil then fail(order) end
+        for _, n in order do install(deps[n], from) end
+    end
+end
+
+local function build_native(dir, name)
+    if fs.isfile(path.join(dir, "Makefile")) then
+        local r = process.run({"make", "-s", "-C", dir})
+        if is_error(r) or not r.ok then
+            io.write_err("sea get: " .. name .. ": make failed\n" .. (is_error(r) and r.message or (r.stdout .. r.stderr)))
+            os.exit(1)
+        end
+    end
+end
+
+install = function(d, from)
+    local name = d.name
+    local prev = installed[name]
+    if prev ~= nil then
+        if (prev.git or prev.path) ~= (d.git or d.path) or ref_of(prev) ~= ref_of(d) then
+            io.write_err(string.format("sea get: warning: %s is wanted as %s%s by %s; keeping %s%s\n", name, d.git or d.path,
+                ref_of(d) and ("@" .. ref_of(d)) or "", from, prev.git or prev.path, ref_of(prev) and ("@" .. ref_of(prev)) or ""))
+        end
+        return
+    end
+    installed[name] = d
+    local dir = path.join(modules, name)
+    fs.mkdir(modules, {parents = true})
+
+    if d.path ~= nil then
+        local target = path.isabs(d.path) and d.path or path.join(from == "sea.toml" and root or from, d.path)
+        target = path.normalize(path.abs(target))
+        if not fs.isdir(target) then fail(name .. ": " .. target .. " is not a directory") end
+        local cur = fs.readlink(dir)
+        if is_error(cur) or cur ~= target then
+            if fs.exists(dir) or not is_error(fs.lstat(dir)) then fs.remove(dir, {recursive = true}) end
+            local s = fs.symlink(target, dir)
+            if is_error(s) then fail(s.message) end
+            print("  " .. name .. " -> " .. target)
+            changed = changed + 1
+        end
+        install_children(target, target)
+        return
+    end
+
+    local ref = ref_of(d)
+    local locked = lock[name]
+    local want = nil -- the commit to have, when known
+    if locked ~= nil and locked.git == d.git and locked.ref == ref and not (update_all or updating[name]) then
+        want = locked.commit
+    end
+    local have = fs.isdir(path.join(dir, ".git")) and head_commit(dir) or nil
+    local same_origin = false
+    if have ~= nil then
+        local r = git({"remote", "get-url", "origin"}, dir)
+        same_origin = r.ok and string.trim(r.stdout) == d.git
+    end
+
+    local fresh = false
+    if have == nil or not same_origin then
+        fresh = true
+        if fs.exists(dir) or not is_error(fs.lstat(dir)) then fs.remove(dir, {recursive = true}) end
+        local r = git({"clone", "--quiet", d.git, dir})
+        if not r.ok then fail(name .. ": git clone " .. d.git .. " failed:\n" .. r.stderr) end
+    elseif want == nil or want ~= have then
+        local r = git({"fetch", "--quiet", "--tags", "origin"}, dir)
+        if not r.ok then fail(name .. ": git fetch failed:\n" .. r.stderr) end
+    end
+
+    local target = want
+    if target == nil then
+        if ref == nil then
+            local r = git({"rev-parse", "origin/HEAD"}, dir)
+            if not r.ok then r = git({"rev-parse", "HEAD"}, dir) end
+            target = string.trim(r.stdout)
+        else
+            local candidates = {"origin/" .. ref, "refs/tags/" .. ref, ref}
+            for _, c in candidates do
+                if target == nil then
+                    local r = git({"rev-parse", "--verify", "--quiet", c .. "^{commit}"}, dir)
+                    if r.ok then target = string.trim(r.stdout) end
+                end
+            end
+            if target == nil then fail(name .. ": no tag, branch or commit '" .. ref .. "' in " .. d.git) end
+        end
+    end
+    if fresh or head_commit(dir) ~= target then
+        local r = git({"-c", "advice.detachedHead=false", "checkout", "--quiet", target}, dir)
+        if not r.ok then fail(name .. ": git checkout " .. target .. " failed:\n" .. r.stderr) end
+        print(string.format("  %s %s%s (%s)", name, d.git, ref and ("@" .. ref) or "", string.sub(target, 1, 12)))
+        changed = changed + 1
+    end
+    local e = {}
+    e.git = d.git
+    e.ref = ref
+    e.commit = target
+    new_lock[name] = e
+    build_native(dir, name)
+    install_children(dir, dir)
+end
+
+-- ---- commands ----
+
+local deps, order = read_deps(manifest)
+if deps == nil then fail(order) end
+
+local function install_all()
+    for _, n in order do install(deps[n], "sea.toml") end
+    write_lock(new_lock)
+    -- packages no longer wanted
+    local listed = fs.list(modules)
+    if not is_error(listed) then
+        for _, n in listed do
+            if installed[n] == nil then
+                fs.remove(path.join(modules, n), {recursive = true})
+                print("  removed " .. n)
+            end
+        end
+    end
+    local n = 0
+    for _, _ in installed do n = n + 1 end
+    print(string.format("%d package%s, %s", n, n == 1 and "" or "s", changed == 0 and "up to date" or (tostring(changed) .. " changed")))
+end
+
+if mode == "list" then
+    for _, n in order do
+        local d = deps[n]
+        local l = lock[n]
+        local where = d.git ~= nil and (d.git .. (ref_of(d) and ("@" .. ref_of(d)) or "")) or ("path " .. d.path)
+        local commit = l ~= nil and ("  " .. string.sub(l.commit, 1, 12)) or ""
+        local present = fs.exists(path.join(modules, n)) and "" or "  (not installed)"
+        print(n .. "  " .. where .. commit .. present)
+    end
+elseif mode == "install" then
+    install_all()
+elseif mode == "update" then
+    if len(args) == 0 then
+        update_all = true
+    else
+        for _, n in args do
+            if deps[n] == nil then fail(n .. " is not a dependency in sea.toml") end
+            updating[n] = true
+        end
+    end
+    install_all()
+elseif mode == "add" or mode == "add_path" then
+    local d = {}
+    if mode == "add" then
+        local spec = args[0]
+        local at = re.match("^(.*)@([^@/:]+)$", spec)
+        if at ~= nil then
+            d.git = at.groups[1]
+            local ref = at.groups[2]
+            if re.test("^[0-9a-f]{7,40}$", ref) then
+                d.rev = ref
+            elseif re.test("^v?[0-9]", ref) then
+                d.tag = ref
+            else
+                d.branch = ref
+            end
+        else
+            d.git = spec
+        end
+        d.name = args[1] or string.replace(path.stem(re.gsub("/+$", d.git, "")), "-", "_")
+        if len(args) > 2 then fail("too many arguments") end
+    else
+        if len(args) > 1 then fail("too many arguments") end
+        d.path = local_path
+        d.name = args[0] or path.basename(path.normalize(path.abs(local_path)))
+    end
+    if string.starts_with(d.name, "sea_") and args[1] == nil then d.name = string.sub(d.name, 5) end
+    if not re.test("^[A-Za-z_][A-Za-z0-9_]*$", d.name) then fail("'" .. d.name .. "' is not a valid package name; give one: sea get URL name") end
+    write_dep(d.name, d)
+    if deps[d.name] == nil then order[] = d.name end
+    deps[d.name] = d
+    updating[d.name] = true
+    print("added " .. d.name .. " to sea.toml")
+    install_all()
+elseif mode == "remove" then
+    if len(args) == 0 then fail("which dependencies? sea get -rm name ...") end
+    for _, n in args do
+        if deps[n] == nil then fail(n .. " is not a dependency in sea.toml") end
+        write_dep(n, nil)
+        deps[n] = nil
+        print("removed " .. n .. " from sea.toml")
+    end
+    local kept = []
+    for _, n in order do
+        if deps[n] ~= nil then kept[] = n end
+    end
+    order = kept
+    install_all()
+end
