@@ -1,0 +1,47 @@
+-- interpolation and escaping
+Hello, Sea!
+&lt;b&gt;&quot;Tom&quot; &amp; &#39;Jerry&#39;&lt;/b&gt; <b>"Tom" & 'Jerry'</b> <b>"Tom" & 'Jerry'</b>
+[] [42] [1.5] [true] [123456789012345678901]
+deep []
+-- sections
+<h1>Shop</h1>
+<ul>
+  <li>pen: 2 (Shop)</li>
+  <li>ink: 7 (Shop)</li>
+</ul>
+Nothing in "empty".
+title is set
+
+<a><b><c>
+off
+from a map
+-- partials
+<ul>
+  <li>x</li>
+</ul>
+|<li>dyn</li>
+
+[header][footer]
+Hi file! 
+-- inheritance
+<title>Home</title>
+<main>
+  <p>welcome</p>
+</main>
+
+-- lambdas
+<b>hi world</b> / world / 
+-- delimiters and options
+x {{name}} x
+y
+<raw>
+a_b
+&lt;a href=&#39;x&#39;&gt;&amp;&lt;/a&gt;
+-- errors
+error(template: unclosed section 'a' at line 1)
+error(template: closing tag 'a' without an open section at line 1)
+error(template: closing tag 'b' does not match 'a' at line 1)
+error(template: unclosed tag '{{' at line 2)
+error(template: invalid set-delimiter tag at line 1)
+error(template.compile: template source (string) expected)
+error(template: partials nested too deeply (recursion?))

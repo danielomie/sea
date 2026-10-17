@@ -1,0 +1,557 @@
+-- libs/template/template.sea — Mustache templates for Sea (pure Sea)
+--
+-- Usage:
+--   local template = require("../libs/template/template")
+--
+--   print(template.render("Hello, {{name}}!", {name = "Sea"}))
+--
+--   local page = template.compile([[
+--   <ul>
+--   {{#items}}
+--     <li>{{name}}: {{price}}</li>
+--   {{/items}}
+--   {{^items}}
+--     <li>nothing here</li>
+--   {{/items}}
+--   </ul>]])?
+--   local html = page:render(data, partials)
+--
+-- The full Mustache spec (interpolation, sections, inverted sections,
+-- comments, partials, set delimiters) plus its optional parts: lambdas
+-- (functions in the data), dynamic partial names ({{>*name}}) and
+-- inheritance ({{<parent}} with {{$block}}s). {{x}} is HTML-escaped,
+-- {{{x}}} and {{&x}} are not.
+
+local M = {}
+
+local STANDALONE = {}
+STANDALONE["section"] = true
+STANDALONE["inverted"] = true
+STANDALONE["close"] = true
+STANDALONE["comment"] = true
+STANDALONE["partial"] = true
+STANDALONE["delim"] = true
+STANDALONE["parent"] = true
+STANDALONE["block"] = true
+
+local OPENS = {}
+OPENS["section"] = true
+OPENS["inverted"] = true
+OPENS["parent"] = true
+OPENS["block"] = true
+
+local KIND_OF = {}
+KIND_OF["#"] = "section"
+KIND_OF["^"] = "inverted"
+KIND_OF["/"] = "close"
+KIND_OF["!"] = "comment"
+KIND_OF[">"] = "partial"
+KIND_OF["="] = "delim"
+KIND_OF["<"] = "parent"
+KIND_OF["$"] = "block"
+KIND_OF["&"] = "raw"
+KIND_OF["{"] = "raw"
+
+-- template.escape(s): HTML escaping as {{x}} does it (& < > " ')
+function M.escape(s)
+    s = string.replace(s, "&", "&amp;")
+    s = string.replace(s, "<", "&lt;")
+    s = string.replace(s, ">", "&gt;")
+    s = string.replace(s, "\"", "&quot;")
+    s = string.replace(s, "'", "&#39;")
+    return s
+end
+
+local function line_at(src, pos)
+    local line = 1
+    local i = 1
+    while true do
+        local nl = string.find(src, "\n", i)
+        if nl == nil or nl >= pos then break end
+        line = line + 1
+        i = nl + 1
+    end
+    return line
+end
+
+local function fail(src, pos, msg)
+    return error("template: " .. msg .. " at line " .. tostring(line_at(src, pos)))
+end
+
+local function is_blank(s)
+    return string.trim(s) == ""
+end
+
+local function new_token(kind)
+    local t = {}
+    t.kind = kind
+    return t
+end
+
+-- ---- parsing ------------------------------------------------------------------------
+
+-- The flat list of tokens of src, with standalone lines (a section, comment,
+-- partial... tag alone on its line) stripped of their whitespace and newline.
+local function tokenize(src, otag, ctag)
+    local toks = []
+    local line_start = 0
+    local pos = 1
+    local n = len(src)
+
+    local function end_line()
+        local tags = 0
+        local tagi = -1
+        local ok = true
+        for i = line_start, len(toks) - 1 do
+            local t = toks[i]
+            if t.kind == "text" then
+                if not is_blank(t.text) then ok = false end
+            else
+                tags = tags + 1
+                tagi = i
+                if not STANDALONE[t.kind] then ok = false end
+            end
+        end
+        -- a line holding only standalone tags (one or more) and whitespace:
+        -- the tags keep the line's indentation, the line itself goes
+        if ok and tags >= 1 then
+            local indent = []
+            local seen_tag = false
+            for i = line_start, len(toks) - 1 do
+                local t = toks[i]
+                if t.kind == "text" then
+                    t.removed = true
+                    if not seen_tag then indent[] = t.text end
+                else
+                    seen_tag = true
+                end
+            end
+            local ind = string.join(indent, "")
+            for i = line_start, len(toks) - 1 do
+                if toks[i].kind != "text" then toks[i].indent = ind end
+            end
+        end
+        line_start = len(toks)
+    end
+
+    local function add_text(s)
+        local i = 1
+        while i <= len(s) do
+            local nl = string.find(s, "\n", i)
+            local t = new_token("text")
+            if nl == nil then
+                t.text = string.sub(s, i)
+                toks[] = t
+                return
+            end
+            t.text = string.sub(s, i, nl)
+            toks[] = t
+            end_line()
+            i = nl + 1
+        end
+    end
+
+    while pos <= n do
+        local t0 = string.find(src, otag, pos)
+        if t0 == nil then
+            add_text(string.sub(src, pos))
+            break
+        end
+        add_text(string.sub(src, pos, t0 - 1))
+        local cs = t0 + len(otag)
+        local first = string.sub(src, cs, cs)
+        local close = ctag
+        if first == "{" then close = "}" .. ctag end
+        local c0 = string.find(src, close, cs)
+        if c0 == nil then return fail(src, t0, "unclosed tag '" .. otag .. "'") end
+        local inner = string.sub(src, cs, c0 - 1)
+        local after = c0 + len(close)
+        local kind = KIND_OF[first] or "var"
+        local t = new_token(kind)
+        t.start = t0
+        t.after = after
+        t.otag = otag
+        t.ctag = ctag
+        if kind == "var" then
+            t.name = string.trim(inner)
+        elseif kind == "delim" then
+            if string.sub(inner, len(inner)) != "=" then return fail(src, t0, "a set-delimiter tag must end with '='") end
+            local spec = string.trim(string.sub(inner, 2, len(inner) - 1))
+            local parts = re.split("\\s+", spec)
+            if len(parts) != 2 or re.test("=", spec) then return fail(src, t0, "invalid set-delimiter tag") end
+            otag = parts[0]
+            ctag = parts[1]
+        elseif kind != "comment" then
+            t.name = string.trim(string.sub(inner, 2))
+        end
+        if t.name == "" then return fail(src, t0, "a tag without a name") end
+        toks[] = t
+        pos = after
+    end
+    end_line()
+    return toks
+end
+
+-- The token tree: sections hold their children and their raw text.
+local function build(src, toks)
+    local root = []
+    local stack = []
+    local cur = root
+    for _, t in toks do
+        if t.removed then
+            -- whitespace of a standalone line
+        elseif t.kind == "text" then
+            if t.text != "" then
+                local last = len(cur) > 0 and cur[len(cur) - 1] or nil
+                if last != nil and last.kind == "text" then
+                    local merged = new_token("text")
+                    merged.text = last.text .. t.text
+                    cur[len(cur) - 1] = merged
+                else
+                    cur[] = t
+                end
+            end
+        elseif OPENS[t.kind] then
+            t.children = []
+            cur[] = t
+            local frame = {}
+            frame.tok = t
+            frame.parent = cur
+            stack[] = frame
+            cur = t.children
+        elseif t.kind == "close" then
+            if len(stack) == 0 then return fail(src, t.start, "closing tag '" .. t.name .. "' without an open section") end
+            local top = stack[len(stack) - 1]
+            if top.tok.name != t.name then
+                return fail(src, t.start, "closing tag '" .. t.name .. "' does not match '" .. top.tok.name .. "'")
+            end
+            top.tok.raw = string.sub(src, top.tok.after, t.start - 1)
+            if top.tok.kind == "block" and top.tok.indent != nil then
+                -- a standalone block: the indentation of its content's first line
+                local first = top.tok.children[0]
+                if first != nil and first.kind == "text" then
+                    local m = re.match("^[ \t]*", first.text)
+                    if m.text != "" or len(first.text) > 0 then top.tok.def_indent = m.text end
+                end
+            end
+            cur = top.parent
+            local rest = []
+            for i = 0, len(stack) - 2 do rest[] = stack[i] end
+            stack = rest
+        elseif t.kind != "comment" and t.kind != "delim" then
+            cur[] = t
+        end
+    end
+    if len(stack) > 0 then
+        local top = stack[len(stack) - 1]
+        return fail(src, top.tok.start, "unclosed section '" .. top.tok.name .. "'")
+    end
+    return root
+end
+
+local function parse(src, otag, ctag)
+    local toks = tokenize(src, otag or "{{", ctag or "}}")
+    if is_error(toks) then return toks end
+    return build(src, toks)
+end
+
+-- ---- rendering -------------------------------------------------------------------------
+
+local function is_record(v)
+    local ty = type(v)
+    return ty == "table" or ty == "map" or ty == "struct"
+end
+
+-- Arrays, and tables whose keys are 0..n-1 ({a, b, c}), are lists.
+local function is_list(v)
+    local ty = type(v)
+    if ty == "array" or ty == "int_array" or ty == "float_array" then return true end
+    if ty != "table" then return false end
+    local n = len(v)
+    if n == 0 then return false end
+    for k, _ in v do
+        if type(k) != "int" or k < 0 or k >= n then return false end
+    end
+    return true
+end
+
+local function field(v, key)
+    if not is_record(v) or is_list(v) then return nil end
+    return v[key]
+end
+
+-- name lookup through the context stack ({value, parent}); dotted names
+-- find their first part, then descend from there
+local function lookup(ctx, name)
+    if name == "." then return ctx.value end
+    local parts = string.split(name, ".")
+    local v = nil
+    local c = ctx
+    while c != nil do
+        local x = field(c.value, parts[0])
+        if x != nil then
+            v = x
+            break
+        end
+        c = c.parent
+    end
+    if v == nil then return nil end
+    for i = 1, len(parts) - 1 do
+        v = field(v, parts[i])
+        if v == nil then return nil end
+    end
+    return v
+end
+
+local function push(ctx, value)
+    local c = {}
+    c.value = value
+    c.parent = ctx
+    return c
+end
+
+local function to_text(v)
+    if v == nil then return "" end
+    if type(v) == "string" then return v end
+    return tostring(v)
+end
+
+local function falsy(v)
+    return v == nil or v == false or (is_list(v) and len(v) == 0)
+end
+
+local function indent_lines(src, indent)
+    if indent == nil or indent == "" or src == "" then return src end
+    local out = []
+    local i = 1
+    while i <= len(src) do
+        local nl = string.find(src, "\n", i)
+        if nl == nil then
+            out[] = indent .. string.sub(src, i)
+            break
+        end
+        out[] = indent .. string.sub(src, i, nl)
+        i = nl + 1
+    end
+    return string.join(out, "")
+end
+
+local render_nodes
+
+-- Each line of text: the prefix strip removed (when it has it), add put in front.
+local function reindent(text, strip, add)
+    if text == "" or (strip == "" and add == "") then return text end
+    local out = []
+    local i = 1
+    while i <= len(text) do
+        local nl = string.find(text, "\n", i)
+        local line = nl != nil and string.sub(text, i, nl) or string.sub(text, i)
+        if strip != "" and string.starts_with(line, strip) then line = string.sub(line, len(strip) + 1) end
+        if line != "\n" and line != "" then line = add .. line end
+        out[] = line
+        if nl == nil then break end
+        i = nl + 1
+    end
+    return string.join(out, "")
+end
+
+-- A partial's source (a string, a compiled template's source, or nil).
+local function partial_source(R, name)
+    local p = R.partials
+    local src = nil
+    if type(p) == "function" then
+        src = p(name)
+    elseif p != nil then
+        src = field(p, name)
+    end
+    if type(src) == "table" and src.source != nil then src = src.source end
+    if type(src) != "string" then return nil end
+    return src
+end
+
+local function compiled(R, name, src, indent)
+    local key = name .. "\0" .. (indent or "")
+    local nodes = R.cache[key]
+    if nodes == nil then
+        nodes = parse(indent_lines(src, indent))
+        if is_error(nodes) then panic(nodes) end
+        R.cache[key] = nodes
+    end
+    return nodes
+end
+
+local function partial_name(t, ctx)
+    local name = t.name
+    if string.starts_with(name, "*") then
+        local dyn = lookup(ctx, string.trim(string.sub(name, 2)))
+        if type(dyn) != "string" then return nil end
+        return dyn
+    end
+    return name
+end
+
+local function render_lambda_result(R, text, ctx, out, otag, ctag)
+    local nodes = parse(text, otag, ctag)
+    if is_error(nodes) then panic(nodes) end
+    render_nodes(R, nodes, ctx, out)
+end
+
+render_nodes = function(R, nodes, ctx, out)
+    for _, t in nodes do
+        local k = t.kind
+        if k == "text" then
+            out[] = t.text
+        elseif k == "var" or k == "raw" then
+            local v = lookup(ctx, t.name)
+            if type(v) == "function" then
+                local part = []
+                render_lambda_result(R, to_text(v()), ctx, part)
+                v = string.join(part, "")
+            end
+            local s = to_text(v)
+            if k == "var" and R.escape then s = R.escape(s) end
+            out[] = s
+        elseif k == "section" then
+            local v = lookup(ctx, t.name)
+            if type(v) == "function" then
+                render_lambda_result(R, to_text(v(t.raw)), ctx, out, t.otag, t.ctag)
+            elseif is_list(v) then
+                for i = 0, len(v) - 1 do render_nodes(R, t.children, push(ctx, v[i]), out) end
+            elseif not falsy(v) then
+                render_nodes(R, t.children, push(ctx, v), out)
+            end
+        elseif k == "inverted" then
+            local v = lookup(ctx, t.name)
+            if falsy(v) then render_nodes(R, t.children, ctx, out) end
+        elseif k == "partial" then
+            local name = partial_name(t, ctx)
+            local src = name != nil and partial_source(R, name) or nil
+            if src != nil then
+                R.depth = R.depth + 1
+                if R.depth > R.max_depth then panic("template: partials nested too deeply (recursion?)") end
+                render_nodes(R, compiled(R, name, src, t.indent), ctx, out)
+                R.depth = R.depth - 1
+            end
+        elseif k == "block" then
+            -- block indentation is removed where it is defined and added where
+            -- it is expanded (when the expanding tag is standalone)
+            local over = R.blocks != nil and R.blocks[t.name] or nil
+            local def = over or t
+            local part = []
+            render_nodes(R, def.children, ctx, part)
+            local text = string.join(part, "")
+            local site = nil
+            if t.indent != nil then site = t.def_indent or t.indent end
+            if def.def_indent != nil or site != nil then
+                text = reindent(text, def.def_indent or "", site or "")
+                if site != nil and text != "" and not string.ends_with(text, "\n") then text = text .. "\n" end
+            end
+            out[] = text
+        elseif k == "parent" then
+            local name = partial_name(t, ctx)
+            local src = name != nil and partial_source(R, name) or nil
+            if src != nil then
+                -- the blocks this tag defines, under the ones from further out
+                local blocks = [=]
+                for _, c in t.children do
+                    if c.kind == "block" then blocks[c.name] = c end
+                end
+                if R.blocks != nil then
+                    for bname, b in R.blocks do blocks[bname] = b end
+                end
+                local saved = R.blocks
+                R.blocks = blocks
+                R.depth = R.depth + 1
+                if R.depth > R.max_depth then panic("template: partials nested too deeply (recursion?)") end
+                render_nodes(R, compiled(R, name, src, t.indent), ctx, out)
+                R.depth = R.depth - 1
+                R.blocks = saved
+            end
+        end
+    end
+end
+
+-- Render nodes; panics inside (bad lambda output, recursion) become error values.
+local function run(tpl, data, partials)
+    local R = {}
+    R.partials = partials
+    R.escape = tpl.escape
+    R.cache = [=]
+    R.depth = 0
+    R.max_depth = tpl.max_depth
+    R.blocks = nil
+    local out = []
+    local failed = nil
+    local function go_render()
+        defer function()
+            local e = recover()
+            if e != nil then failed = e end
+        end
+        render_nodes(R, tpl.nodes, push(nil, data), out)
+    end
+    go_render()
+    if failed != nil then
+        if is_error(failed) then return failed end
+        return error(tostring(failed))
+    end
+    return string.join(out, "")
+end
+
+local function tpl_render(self, data, partials)
+    return run(self, data, partials)
+end
+
+-- template.compile(src [, opts]) → template | error
+-- opts: escape (a function(s) → s for {{x}}, or false for none; default
+-- HTML), delimiters ({open, close} to start with, default {"{{", "}}"}),
+-- max_depth (nested partials, default 100)
+function M.compile(src, opts)
+    if type(src) != "string" then return error("template.compile: template source (string) expected") end
+    local otag = "{{"
+    local ctag = "}}"
+    if opts != nil and opts.delimiters != nil then
+        otag = opts.delimiters[0]
+        ctag = opts.delimiters[1]
+    end
+    local nodes = parse(src, otag, ctag)
+    if is_error(nodes) then return nodes end
+    local tpl = {}
+    tpl.source = src
+    tpl.nodes = nodes
+    tpl.escape = M.escape
+    tpl.max_depth = 100
+    if opts != nil then
+        if opts.escape == false then tpl.escape = nil
+        elseif type(opts.escape) == "function" then tpl.escape = opts.escape end
+        if opts.max_depth != nil then tpl.max_depth = opts.max_depth end
+    end
+    tpl.render = tpl_render
+    return tpl
+end
+
+-- template.render(src, data [, partials [, opts]]) → string | error
+function M.render(src, data, partials, opts)
+    local tpl = M.compile(src, opts)
+    if is_error(tpl) then return tpl end
+    return tpl:render(data, partials)
+end
+
+-- template.loader(dir [, ext]) → partials function: name → the file
+-- dir/name.ext (ext default ".mustache"); names with ".." are refused
+function M.loader(dir, ext)
+    ext = ext or ".mustache"
+    local cache = [=]
+    return function(name)
+        if string.contains(name, "..") or string.starts_with(name, "/") then return nil end
+        local src = cache[name]
+        if src == nil then
+            local r = fs.read(path.join(dir, name .. ext))
+            if is_error(r) then return nil end
+            cache[name] = r
+            src = r
+        end
+        return src
+    end
+end
+
+return M

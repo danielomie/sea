@@ -1,0 +1,91 @@
+-- Test: libs/template (Mustache, pure Sea)
+local template = require("../../libs/template/template")
+
+print("-- interpolation and escaping")
+print(template.render("Hello, {{name}}!", {name = "Sea"}))
+print(template.render("{{html}} {{{html}}} {{&html}}", {html = "<b>\"Tom\" & 'Jerry'</b>"}))
+print(template.render("[{{missing}}] [{{n}}] [{{f}}] [{{yes}}] [{{big}}]", {n = 42, f = 1.5, yes = true, big = bigint.new("123456789012345678901")}))
+print(template.render("{{a.b.c}} [{{a.x.c}}]", {a = {b = {c = "deep"}}}))
+
+print("-- sections")
+local items = []
+local i1 = {}
+i1.name = "pen"
+i1.price = 2
+local i2 = {}
+i2.name = "ink"
+i2.price = 7
+items[] = i1
+items[] = i2
+local data = {}
+data.items = items
+data.title = "Shop"
+data.empty = []
+local page = template.compile([==[
+<h1>{{title}}</h1>
+<ul>
+{{#items}}
+  <li>{{name}}: {{price}} ({{title}})</li>
+{{/items}}
+</ul>
+{{^empty}}
+Nothing in "empty".
+{{/empty}}
+{{#title}}title is set{{/title}}
+{{! a comment }}
+]==])
+print(page:render(data))
+print(template.render("{{#list}}<{{.}}>{{/list}}", {list = {"a", "b", "c"}}))
+print(template.render("{{#flag}}on{{/flag}}{{^flag}}off{{/flag}}", {flag = false}))
+local m = [=]
+m["key"] = "from a map"
+print(template.render("{{#m}}{{key}}{{/m}}", {m = m}))
+
+print("-- partials")
+local partials = {}
+partials.item = "<li>{{name}}</li>\n"
+print(template.render("<ul>\n  {{>item}}\n</ul>", {name = "x"}, partials))
+print(template.render("{{>nope}}|{{>*which}}", {which = "item", name = "dyn"}, partials))
+local function lookup(name) return "[" .. name .. "]" end
+print(template.render("{{>header}} {{>footer}}", {}, lookup))
+local dir = fs.tempdir("tpl-")
+fs.write(dir .. "/greet.mustache", "Hi {{who}}")
+print(template.render("{{>greet}}! {{>../etc/passwd}}", {who = "file"}, template.loader(dir)))
+fs.remove(dir, {recursive = true})
+
+print("-- inheritance")
+partials.layout = "<title>{{$title}}Default{{/title}}</title>\n<main>\n  {{$body}}\n  {{/body}}\n</main>\n"
+print(template.render([==[
+{{<layout}}
+{{$title}}Home{{/title}}
+{{$body}}
+<p>{{msg}}</p>
+{{/body}}
+{{/layout}}
+]==], {msg = "welcome"}, partials))
+
+print("-- lambdas")
+local count = 0
+local fns = {}
+fns.upper = function(text) return string.upper(text) end
+fns.bold = function(text) return "<b>" .. text .. "</b>" end
+fns.now = function() return "{{who}}" end
+fns.who = "world"
+print(template.render("{{#bold}}hi {{who}}{{/bold}} / {{now}} / {{#upper}}{{who}}{{/upper}}", fns))
+
+print("-- delimiters and options")
+print(template.render("{{=<% %>=}}<% name %> {{name}} <%={{ }}=%>{{name}}", {name = "x"}))
+print(template.render("<%name%>", {name = "y"}, nil, {delimiters = {"<%", "%>"}}))
+print(template.render("{{x}}", {x = "<raw>"}, nil, {escape = false}))
+print(template.render("{{x}}", {x = "a b"}, nil, {escape = function(s) return string.replace(s, " ", "_") end}))
+print(template.escape("<a href='x'>&</a>"))
+
+print("-- errors")
+print(template.render("{{#a}}open", {}))
+print(template.render("{{/a}}", {}))
+print(template.render("{{#a}}{{/b}}", {}))
+print(template.render("line\n{{name", {}))
+print(template.render("{{= | =}}", {}))
+print(template.compile(42))
+partials.loop = "{{>loop}}"
+print(template.render("{{>loop}}", {}, partials))

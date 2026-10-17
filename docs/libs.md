@@ -21,6 +21,7 @@ pure-Sea libraries work out of the box.
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
 | `flags` | `libs/flags/flags` | pure Sea | — |
 | `test` | `libs/test/test` | pure Sea | — |
+| `template` | `libs/template/template` | pure Sea | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
@@ -1233,6 +1234,71 @@ it; default: the environment variable `SEA_TEST`), `format` (`"pretty"`,
 `"tap"`, `"quiet"`), `timing` (show times; default `true`). Also `t.equal(a,
 b)` (the deep equality as a bool), `t.show(v)` (a value as readable text) and
 `t.reset()` (forget the tests defined so far).
+
+---
+
+## `template`
+
+Mustache templates in pure Sea. Conformance: the whole official
+[Mustache spec](https://github.com/mustache/spec) passes, its optional
+parts included (194 of 194: interpolation, sections, inverted sections,
+comments, partials, set delimiters, lambdas, dynamic names, inheritance).
+
+```sea
+local template = require("../libs/template/template")   -- relative to the requiring file
+
+print(template.render("Hello, {{name}}!", {name = "Sea"}))     -- Hello, Sea!
+
+local page = template.compile(fs.read("page.mustache")?)?
+local html = page:render(data, template.loader("templates"))?
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `template.compile` | `compile(src [, opts]) → template\|error` | Parse once; `tpl:render(data [, partials]) → string\|error` renders it (as often as needed), `tpl.source` is the text |
+| `template.render` | `render(src, data [, partials [, opts]]) → string\|error` | Compile and render in one call |
+| `template.loader` | `loader(dir [, ext]) → function` | Partials from files: `{{>header}}` reads `dir/header.mustache` (cached; names with `..` or a leading `/` are refused) |
+| `template.escape` | `escape(s) → string` | The HTML escaping `{{x}}` applies (`& < > " '`) |
+
+`opts`: `escape` (a function `s → s` used for `{{x}}`, or `false` for none;
+default HTML), `delimiters` (`{"<%", "%>"}` to start with other tags),
+`max_depth` (nested partials, default 100: deeper is an error, which catches
+a partial that includes itself). A syntax error is an error value with the
+line: `template: unclosed section 'items' at line 4`.
+
+**Tags:**
+
+| Tag | Meaning |
+|-----|---------|
+| `{{name}}` | The value, HTML-escaped (`nil` is empty; numbers, bools and bigints as `tostring` shows them) |
+| `{{{name}}}`, `{{& name}}` | Not escaped |
+| `{{a.b.c}}` | A dotted name: `a` is looked up through the context stack, then `b` and `c` inside it |
+| `{{.}}` | The current item |
+| `{{#name}}...{{/name}}` | A section: repeated for each item of a list (an array or a table `{a, b}`), rendered once with the value pushed on the context stack for any other truthy value; skipped for `nil`, `false` and empty lists |
+| `{{^name}}...{{/name}}` | Rendered only when the value is `nil`, `false` or an empty list |
+| `{{! comment }}` | Left out |
+| `{{> name}}` | A partial: another template from `partials`, rendered in the current context (a standalone partial tag indents every line of the partial); `{{>*name}}` takes the partial's name from the value `name` |
+| `{{=<% %>=}}` | Change the delimiters from here on |
+| `{{< parent}}...{{/parent}}` | Inheritance: render the partial `parent` with its `{{$block}}`s replaced by the ones given inside this tag |
+| `{{$ block}}default{{/block}}` | A block a child template may replace |
+
+Tags alone on their line (sections, comments, partials, delimiters,
+blocks) take the whole line with them, so templates can be laid out
+naturally. `partials` is a table (or map, or struct) from names to template
+sources (or compiled templates), or a function `name → source`; a missing
+partial renders as nothing. Values are looked up in tables, maps and structs.
+
+**Lambdas:** a function in the data is called when its tag is rendered:
+`{{name}}` calls `f()` and renders the string it returns as a template (then
+escapes it); `{{#name}}text{{/name}}` calls `f(text)` with the section's
+unrendered text and renders the result in the current context.
+
+```sea
+local data = {}
+data.bold = function(text) return "<b>" .. text .. "</b>" end
+data.who = "world"
+print(template.render("{{#bold}}hi {{who}}{{/bold}}", data))   -- <b>hi world</b>
+```
 
 ---
 
