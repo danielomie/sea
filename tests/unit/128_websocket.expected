@@ -1,0 +1,14 @@
+v2
+true	echo: hello	text
+true	echo: héllo 😀
+200006
+3	binary	255
+true	true	echo: after ping
+error(websocket: a text message must be UTF-8 (send it as binary))
+nil	1000	see you	true
+error(websocket: the connection is closed)
+400	expected a WebSocket upgrade request
+nil	true	1001
+error(websocket.connect: not a ws:// or wss:// URL: http://x)	error(websocket.connect: the server did not switch protocols: HTTP/1.1 404 Not Found)
+10	echo: n1	echo: n9
+s3pPLMBiTxaQ9kYGzzhZRbK+xOo=

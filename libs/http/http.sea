@@ -289,6 +289,7 @@ local function normalize(resp)
     r["body"] = body
     r["headers"] = resp.headers
     r["close"] = resp.close
+    if status == 101 and type(resp.upgrade) == "function" then r["upgrade"] = resp.upgrade end
     return r
 end
 
@@ -315,7 +316,11 @@ local function render_response(resp, head_only, keep_alive, date)
     if not has_ct and not no_body then out[] = "Content-Type: text/plain; charset=utf-8\r\n" end
     out[] = "Date: " .. date .. "\r\n"
     if not no_body then out[] = "Content-Length: " .. len(body) .. "\r\n" end
-    out[] = keep_alive and "Connection: keep-alive\r\n" or "Connection: close\r\n"
+    if resp.upgrade then
+        out[] = "Connection: Upgrade\r\n"
+    else
+        out[] = keep_alive and "Connection: keep-alive\r\n" or "Connection: close\r\n"
+    end
     out[] = "\r\n"
     if not head_only and not no_body then out[] = body end
     return string.join(out, "")
@@ -576,6 +581,36 @@ local function conn_state(srv, key, idle)
     mu.release(mu)
 end
 
+-- The stream an upgraded connection's function gets: the bytes already read
+-- past the request, and read/write/close on the socket (plain or TLS).
+local function run_upgrade(fn, c, buffered, remote, req, on_error)
+    local st = [=]
+    st["buffered"] = buffered
+    st["remote_addr"] = remote
+    st["tls"] = c.tls
+    st["request"] = req
+    st["read"] = function(max, timeout) return c_read(c, max or 65536, timeout) end
+    st["write"] = function(data, timeout) return c_write(c, data, timeout) end
+    st["shutdown"] = function() net.shutdown(c.fd) end
+    local failed = nil
+    local function run()
+        defer function()
+            local e = recover()
+            if e ~= nil then failed = e end
+        end
+        fn(st)
+    end
+    run()
+    if failed ~= nil then
+        if on_error then
+            on_error(failed, req)
+        else
+            local m = is_error(failed) and failed.message or tostring(failed)
+            print("http: upgrade handler failed on " .. req.method .. " " .. req.target .. ": " .. m)
+        end
+    end
+end
+
 -- One connection: requests in a loop while it stays keep-alive.
 local function serve_conn(srv, c, key, remote)
     local o = srv.opts
@@ -642,6 +677,13 @@ local function serve_conn(srv, c, key, remote)
         if o.log then
             print(head.method .. " " .. head.target .. " " .. resp.status .. " " ..
                   (time.since(t0) // time.Millisecond) .. "ms")
+        end
+        if resp.upgrade and not is_error(w) then
+            -- 101 Switching Protocols: the connection now belongs to the
+            -- handler's upgrade function (srv.close() shuts it down too)
+            conn_state(srv, key, true)
+            run_upgrade(resp.upgrade, c, buf, remote, req, srv.on_error)
+            return
         end
         if is_error(w) or not keep then return end
     end

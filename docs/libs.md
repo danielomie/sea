@@ -24,6 +24,7 @@ pure-Sea libraries work out of the box.
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
+| `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
 
@@ -731,6 +732,15 @@ The server supports keep-alive and pipelining, chunked request bodies, `Expect: 
 
 **Response** (what the handler returns): a table/map `{status = 200, body = "", headers = {...}, close = false}`, or just a string (200, `text/plain`). A non-string `body` is converted with `tostring`. Header values may be arrays (repeated headers). `close = true` closes the connection after the response. Anything else — `nil`, an invalid status, a header with CR/LF — becomes a 500 and is logged. A handler that panics or hits a runtime error (indexing nil, …) also gets the client a 500; the error goes to `on_error` (by default printed with the request) and the server keeps running. Without a `Content-Type`, `text/plain; charset=utf-8` is used.
 
+**Protocol upgrades:** a response with `status = 101` and an `upgrade`
+function switches protocols: after writing it (with `Connection: Upgrade`)
+the server calls `upgrade(stream)` in the connection's goroutine and closes
+the connection when it returns. `stream` has `read(max, timeout)`,
+`write(data, timeout)` (plain or TLS, waiting through the netpoller),
+`shutdown()`, `buffered` (bytes already read past the request),
+`remote_addr`, `tls` and `request`. `srv.close()` shuts upgraded connections
+down too. `libs/websocket` is built on this.
+
 **Response helpers:**
 
 | Function | Description |
@@ -955,6 +965,73 @@ local sig = ssl.sign("rsa-sha256", k2, "data")
 print(ssl.verify("rsa-sha256", k2, "data", sig))  -- true
 ssl.key_free(k2)
 ```
+
+---
+
+## `websocket`
+
+WebSocket (RFC 6455) server and client: the server side upgrades requests
+of the `http` server, the client connects to `ws://` and `wss://` URLs.
+Sockets are the built-in `net` module (TLS from `libs/ssl`), so a connection
+waiting for a message parks only its goroutine. Conformance: the
+[Autobahn testsuite](https://github.com/crossbario/autobahn-testsuite) passes
+for both the server and the client (all cases but compression: 296 OK,
+3 informational, 2 non-strict, 0 failed). Build: `make -C libs/websocket`
+(with `libs/http` and `libs/ssl`).
+
+```sea
+local http = require("../libs/http/http")
+local ws = require("../libs/websocket/websocket")
+
+http.serve(8080, function(req)
+    if req.path == "/chat" then
+        return ws.upgrade(req, function(conn)
+            while true do
+                local msg = conn:receive()
+                if msg == nil or is_error(msg) then break end    -- closed, or failed
+                conn:send("you said: " .. msg)
+            end
+        end)
+    end
+    return http.text("not found", 404)
+end)
+```
+
+```sea
+local conn = ws.connect("wss://example.com/chat", {protocols = {"chat"}})?
+local _ = conn:send("hello")?
+print(conn:receive(5000))
+conn:close()
+```
+
+| Function | Description |
+|----------|-------------|
+| `ws.upgrade(req, fn [, opts]) → response` | Return it from an `http` handler: after the 101 response, `fn(conn, req)` runs in the connection's goroutine, and the connection is closed when it returns. A request that is not a valid WebSocket handshake gets a 400 (a wrong version, 426). `opts`: `protocols` (the subprotocols the server speaks; the first the client offers that is in this list is chosen, and `conn.protocol` names it), `max_message`, `close_timeout`, `write_timeout` |
+| `ws.is_upgrade(req) → bool` | Whether the request asks for a WebSocket |
+| `ws.connect(url [, opts]) → conn\|error` | Connect and do the handshake. `opts`: `protocols` (offered to the server), `headers` (extra request headers, e.g. `Authorization`), `timeout` (ms for connecting and the handshake; 10000), `verify` (`false` accepts any TLS certificate), `max_message`, `close_timeout`, `write_timeout` |
+| `ws.accept_key(key) → string` | The `Sec-WebSocket-Accept` value for a key |
+
+**A connection** (`conn`, from either side):
+
+| Method / field | Description |
+|----------------|-------------|
+| `conn:receive([timeout_ms]) → string\|nil\|error` | The next message (fragments joined); `nil` when the connection closed (`conn.close_code`, `conn.close_reason`; 1006 if it dropped without a close frame); an error value on timeout (`"timeout"`) or failure. `conn.last_type` is `"text"` or `"binary"`. Pings are answered and pongs consumed on the way |
+| `conn:send(data [, binary]) → true\|error` | A text message (`data` must be UTF-8), or binary with `binary = true` |
+| `conn:send_binary(data) → true\|error` | A binary message |
+| `conn:ping([data]) → true\|error` | Send a ping (at most 125 bytes) |
+| `conn:close([code [, reason]])` | The closing handshake: send a close frame (1000 by default), wait up to `close_timeout` ms (1000) for the peer's, then close the socket |
+| `conn.protocol`, `conn.closed`, `conn.close_code`, `conn.close_reason` | |
+
+**Options** shared by both sides: `max_message` (bytes, default 16 MiB:
+a bigger message closes the connection with 1009), `close_timeout` (ms),
+`write_timeout` (ms per frame, 30000).
+
+The protocol rules are enforced: client frames masked and server frames not,
+no reserved bits or unknown opcodes (close 1002), whole control frames of at
+most 125 bytes, valid close codes, and text messages (and close reasons) in
+valid UTF-8, checked as fragments arrive (1007). Sends from several
+goroutines are serialized per connection. Not supported: extensions such as
+permessage-deflate (none is negotiated).
 
 ---
 

@@ -1,0 +1,61 @@
+-- Test: libs/websocket (needs make -C libs/websocket, libs/http, libs/ssl): an echo
+-- server through http.listen and ws.upgrade, and clients with ws.connect
+local http = require("../../libs/http/http")
+local ws = require("../../libs/websocket/websocket")
+local srv = http.listen(0, function(req)
+    if req.path == "/echo" then
+        return ws.upgrade(req, function(conn)
+            while true do
+                local m = conn:receive()
+                if m == nil or is_error(m) then break end
+                if m == "bye" then
+                    conn:close(1000, "see you")
+                    break
+                end
+                if conn.last_type == "binary" then conn:send_binary(m) else conn:send("echo: " .. m) end
+            end
+        end, {protocols = {"chat", "v2"}})
+    end
+    return http.text("not found", 404)
+end)
+local url = "ws://127.0.0.1:" .. srv.port .. "/echo"
+local c = ws.connect(url, {protocols = {"v2", "chat"}})
+print(c.protocol)
+print(c:send("hello"), c:receive(), c.last_type)
+print(c:send("héllo 😀"), c:receive())
+local big = string.rep("x", 200000)
+c:send(big)
+print(len(c:receive()))
+c:send_binary(string.char(0, 255, 1))
+local b = c:receive()
+print(len(b), c.last_type, string.byte(b, 2))
+print(c:ping("p"), c:send("after ping"), c:receive())
+print(c:send(string.char(0xff)))
+c:send("bye")
+print(c:receive(), c.close_code, c.close_reason, c.closed)
+print(c:send("x"))
+-- plain HTTP to the same path is a 400
+local r = http.get("http://127.0.0.1:" .. srv.port .. "/echo")
+print(r.status, string.trim(r.body))
+-- client closes
+local c2 = ws.connect(url)
+print(c2.protocol, c2:close(1001, "going away"), c2.close_code)
+print(ws.connect("http://x"), ws.connect("ws://127.0.0.1:" .. srv.port .. "/nope"))
+-- many concurrent clients
+local ch = chan(10)
+for i = 1, 10 do
+    go function()
+        local cc = ws.connect(url)
+        cc:send("n" .. i)
+        ch <- cc:receive()
+        cc:close()
+    end()
+end
+local got = []
+for i = 1, 10 do got[] = <-ch end
+sort.sort(got)
+print(len(got), got[0], got[9])
+srv.close()
+
+-- accept key from RFC 6455, section 1.3
+print(ws.accept_key("dGhlIHNhbXBsZSBub25jZQ=="))

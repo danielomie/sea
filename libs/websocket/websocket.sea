@@ -1,0 +1,457 @@
+-- libs/websocket/websocket.sea — WebSocket (RFC 6455) client and server for Sea
+--
+-- Build first:  make -C libs/websocket   (and libs/http, libs/ssl, libs/json)
+-- Usage:        local ws = require("../libs/websocket/websocket")
+--
+-- Server (inside an http handler):
+--   http.serve(8080, function(req)
+--       if req.path == "/echo" then
+--           return ws.upgrade(req, function(conn)
+--               while true do
+--                   local msg = conn:receive()
+--                   if msg == nil or is_error(msg) then break end   -- closed / failed
+--                   conn:send(msg)
+--               end
+--           end)
+--       end
+--       return http.text("not found", 404)
+--   end)
+--
+-- Client:
+--   local conn = ws.connect("ws://localhost:8080/echo")?
+--   conn:send("hello")
+--   print(conn:receive())
+--   conn:close()
+--
+-- Sockets are the built-in net module (TLS from libs/ssl for wss://): a
+-- connection waiting for data parks only its own goroutine.
+
+local native = require("websocket_native")
+local ssl    = require("../ssl/ssl")
+
+local M = {}
+
+local GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+local OP_CONT = 0
+local OP_TEXT = 1
+local OP_BINARY = 2
+local OP_CLOSE = 8
+local OP_PING = 9
+local OP_PONG = 10
+
+local Conn = {}
+
+local function opt(o, k, dflt)
+    if o == nil then return dflt end
+    local v = o[k]
+    if v == nil then return dflt end
+    return v
+end
+
+-- base64(sha1(key .. GUID)): the Sec-WebSocket-Accept for a key
+function M.accept_key(key)
+    return encoding.base64_encode(hash.sha1(key .. GUID, true))
+end
+
+local function new_conn(stream, is_server, opts, protocol)
+    local c = {}
+    c.io = stream
+    c.server = is_server
+    c.buf = stream.buffered or ""
+    c.closed = false
+    c.close_sent = false
+    c.close_code = nil
+    c.close_reason = nil
+    c.protocol = protocol
+    c.last_type = nil
+    c.max_message = opt(opts, "max_message", 16 * 1024 * 1024)
+    c.close_timeout = opt(opts, "close_timeout", 1000)
+    c.write_timeout = opt(opts, "write_timeout", 30000)
+    c.mu = sync.mutex()
+    for k, f in Conn do c[k] = f end
+    return c
+end
+
+local function write_frame(self, op, payload)
+    local frame = native.encode(op, payload, true, not self.server)
+    local mu = self.mu
+    mu.acquire(mu)
+    local w = self.io.write(frame, self.write_timeout)
+    mu.release(mu)
+    if is_error(w) then return w end
+    return true
+end
+
+local function shutdown(self)
+    self.closed = true
+    self.io.shutdown()
+end
+
+local function close_payload(code, reason)
+    if code == nil then return "" end
+    return string.char(code // 256, code % 256) .. (reason or "")
+end
+
+-- Fail the connection: send a close frame with code, then drop it.
+local function fail(self, code, reason)
+    if not self.close_sent then
+        self.close_sent = true
+        write_frame(self, OP_CLOSE, close_payload(code, reason))
+    end
+    self.close_code = code
+    self.close_reason = reason
+    shutdown(self)
+    return error("websocket: " .. reason .. " (" .. tostring(code) .. ")")
+end
+
+-- The next frame: a table, nil when the peer went away, or an error.
+local function next_frame(self, timeout)
+    while true do
+        local f = native.decode(self.buf, self.max_message, self.server)
+        if f == nil then
+            local chunk = self.io.read(65536, timeout)
+            if is_error(chunk) then return chunk end
+            if chunk == "" then return nil end
+            self.buf = self.buf .. chunk
+        elseif f.close != nil then
+            return fail(self, f.close, f.reason)
+        else
+            self.buf = string.sub(self.buf, f.size + 1)
+            return f
+        end
+    end
+end
+
+local function valid_close_code(code)
+    if code >= 3000 and code <= 4999 then return true end
+    return code == 1000 or code == 1001 or code == 1002 or code == 1003 or
+           (code >= 1007 and code <= 1011)
+end
+
+-- conn:receive([timeout_ms]) → message (string) | nil when the connection is
+-- closed (conn.close_code, conn.close_reason) | error (timeout, failure).
+-- conn.last_type says "text" or "binary". Pings are answered on the way.
+function Conn.receive(self, timeout)
+    if self.closed then return nil end
+    local parts = []
+    local op = nil
+    local total = 0
+    local pending = ""          -- bytes of a character split across text fragments
+    while true do
+        local f = next_frame(self, timeout)
+        if f == nil then
+            if self.close_code == nil then self.close_code = 1006 end
+            shutdown(self)
+            return nil
+        end
+        if is_error(f) then return f end
+        local o = f.opcode
+        if o == OP_PING then
+            write_frame(self, OP_PONG, f.data)
+        elseif o == OP_PONG then
+            -- an answer to conn:ping (or unsolicited): nothing to do
+        elseif o == OP_CLOSE then
+            local code = 1005
+            local reason = ""
+            local d = f.data
+            if len(d) == 1 then return fail(self, 1002, "invalid close frame") end
+            if len(d) >= 2 then
+                code = string.byte(d, 1) * 256 + string.byte(d, 2)
+                reason = string.sub(d, 3)
+                if not valid_close_code(code) then return fail(self, 1002, "invalid close code") end
+                if not utf8.valid(reason) then return fail(self, 1007, "close reason is not UTF-8") end
+            end
+            self.close_code = code
+            self.close_reason = reason
+            if not self.close_sent then
+                self.close_sent = true
+                write_frame(self, OP_CLOSE, close_payload(code != 1005 and code or nil, nil))
+            end
+            shutdown(self)
+            return nil
+        else
+            if o == OP_CONT then
+                if op == nil then return fail(self, 1002, "continuation frame without a message") end
+            else
+                if op != nil then return fail(self, 1002, "new message inside a fragmented one") end
+                op = o
+            end
+            total = total + len(f.data)
+            if total > self.max_message then return fail(self, 1009, "message too big") end
+            parts[] = f.data
+            if op == OP_TEXT then
+                -- fail fast: each fragment must continue valid UTF-8
+                local chunk = pending .. f.data
+                local tail = native.utf8_tail(chunk)
+                if tail < 0 or (f.fin and tail > 0) then return fail(self, 1007, "text message is not UTF-8") end
+                pending = tail > 0 and string.sub(chunk, len(chunk) - tail + 1) or ""
+            end
+            if f.fin then
+                local msg = len(parts) == 1 and parts[0] or string.join(parts, "")
+                self.last_type = op == OP_TEXT and "text" or "binary"
+                return msg
+            end
+        end
+    end
+end
+
+-- conn:send(data [, binary]) → true | error: a text message (data must be
+-- UTF-8), or a binary one with binary = true (or {binary = true})
+function Conn.send(self, data, binary)
+    if self.closed or self.close_sent then return error("websocket: the connection is closed") end
+    if type(data) != "string" then data = tostring(data) end
+    local bin = binary == true or (type(binary) != "bool" and opt(binary, "binary", false))
+    if not bin and not utf8.valid(data) then
+        return error("websocket: a text message must be UTF-8 (send it as binary)")
+    end
+    return write_frame(self, bin and OP_BINARY or OP_TEXT, data)
+end
+
+-- conn:send_binary(data) → true | error
+function Conn.send_binary(self, data)
+    return self:send(data, true)
+end
+
+-- conn:ping([data]) → true | error (the pong is consumed by receive)
+function Conn.ping(self, data)
+    if self.closed or self.close_sent then return error("websocket: the connection is closed") end
+    data = data or ""
+    if len(data) > 125 then return error("websocket: a ping carries at most 125 bytes") end
+    return write_frame(self, OP_PING, data)
+end
+
+-- conn:close([code [, reason]]): the closing handshake (waits close_timeout
+-- ms for the peer's close frame), then the socket is closed
+function Conn.close(self, code, reason)
+    if self.closed then return true end
+    code = code or 1000
+    reason = reason or ""
+    if len(reason) > 123 then reason = string.sub(reason, 1, 123) end
+    if not self.close_sent then
+        self.close_sent = true
+        write_frame(self, OP_CLOSE, close_payload(code, reason))
+    end
+    -- wait for the peer's close (data frames still in flight are dropped)
+    local t0 = time.now()
+    while not self.closed do
+        local left = self.close_timeout - time.since(t0) // time.Millisecond
+        if left <= 0 then break end
+        local f = next_frame(self, left)
+        if f == nil or is_error(f) then break end
+        if f.opcode == OP_CLOSE then
+            local d = f.data
+            if len(d) >= 2 then
+                self.close_code = string.byte(d, 1) * 256 + string.byte(d, 2)
+                self.close_reason = string.sub(d, 3)
+            else
+                self.close_code = 1005
+            end
+            break
+        end
+    end
+    if self.close_code == nil then self.close_code = code end
+    shutdown(self)
+    return true
+end
+
+-- ---- Server -----------------------------------------------------------------------
+
+local function header_has(value, token)
+    if value == nil then return false end
+    for _, part in string.split(string.lower(value), ",") do
+        if string.trim(part) == token then return true end
+    end
+    return false
+end
+
+local function bad_request(msg, status)
+    local h = [=]
+    h["Content-Type"] = "text/plain; charset=utf-8"
+    if status == 426 then h["Sec-WebSocket-Version"] = "13" end
+    local r = [=]
+    r["status"] = status or 400
+    r["body"] = msg .. "\n"
+    r["headers"] = h
+    return r
+end
+
+-- ws.is_upgrade(req) → bool: the request asks for a WebSocket
+function M.is_upgrade(req)
+    local h = req.headers
+    return h ~= nil and header_has(h["upgrade"], "websocket") and header_has(h["connection"], "upgrade")
+end
+
+-- ws.upgrade(req, fn [, opts]) → response: return it from an http handler.
+-- After the 101 response the connection runs fn(conn, req) (in the
+-- connection's goroutine); when fn returns the connection is closed.
+-- opts: protocols (subprotocols the server speaks, in order of preference),
+-- max_message (bytes, default 16 MiB), close_timeout, write_timeout (ms).
+-- A request that is not a valid WebSocket handshake gets a 400 (or 426).
+function M.upgrade(req, fn, opts)
+    local h = req.headers or [=]
+    if req.method != "GET" then return bad_request("WebSocket handshake must be a GET", 400) end
+    if not M.is_upgrade(req) then return bad_request("expected a WebSocket upgrade request", 400) end
+    if h["sec-websocket-version"] != "13" then return bad_request("unsupported WebSocket version", 426) end
+    local key = h["sec-websocket-key"]
+    if key == nil or len(encoding.base64_decode(key) or "") != 16 then
+        return bad_request("missing or invalid Sec-WebSocket-Key", 400)
+    end
+    local chosen = nil
+    local offered = h["sec-websocket-protocol"]
+    local wanted = opt(opts, "protocols", nil)
+    if offered != nil and wanted != nil then
+        for _, p in string.split(offered, ",") do
+            local name = string.trim(p)
+            if chosen == nil then
+                for _, w in wanted do
+                    if w == name then chosen = name end
+                end
+            end
+        end
+    end
+    local headers = [=]
+    headers["Upgrade"] = "websocket"
+    headers["Sec-WebSocket-Accept"] = M.accept_key(key)
+    if chosen != nil then headers["Sec-WebSocket-Protocol"] = chosen end
+    local r = [=]
+    r["status"] = 101
+    r["headers"] = headers
+    r["upgrade"] = function(stream)
+        local conn = new_conn(stream, true, opts, chosen)
+        fn(conn, req)
+        if not conn.closed then conn:close(1000) end
+    end
+    return r
+end
+
+-- ---- Client -----------------------------------------------------------------------
+
+local function parse_ws_url(url)
+    local m = re.match("^(wss?)://(\\[[^\\]]+\\]|[^/:?#]+)(?::(\\d+))?([^#]*)", url)
+    if m == nil then return nil end
+    local u = {}
+    u.scheme = m.groups[1]
+    u.host = m.groups[2]
+    if string.starts_with(u.host, "[") then u.host = string.sub(u.host, 2, len(u.host) - 1) end
+    u.port = m.groups[3] or (u.scheme == "wss" and "443" or "80")
+    u.path = m.groups[4]
+    if u.path == "" then u.path = "/" end
+    if string.starts_with(u.path, "?") then u.path = "/" .. u.path end
+    return u
+end
+
+local function stream_for(u, timeout, opts)
+    local s = {}
+    s.buffered = ""
+    if u.scheme == "wss" then
+        local topts = {}
+        topts.timeout = timeout
+        if opt(opts, "verify", true) == false then topts.verify = false end
+        local h = ssl.dial(u.host, tonumber(u.port), topts)
+        if is_error(h) then return h end
+        s.read = function(max, t) return ssl.recv(h, max, t) end
+        s.write = function(data, t) return ssl.send(h, data, t) end
+        s.shutdown = function() ssl.close(h) end
+    else
+        local fd = net.connect(u.host, tonumber(u.port), timeout)
+        if is_error(fd) then return fd end
+        s.read = function(max, t) return net.read(fd, max, t) end
+        s.write = function(data, t) return net.write(fd, data, t) end
+        s.shutdown = function() net.close(fd) end
+    end
+    return s
+end
+
+-- ws.connect(url [, opts]) → conn | error.  url: ws://host[:port]/path or wss://...
+-- opts: protocols (array offered to the server; conn.protocol is the one
+-- chosen), headers (extra request headers), timeout (ms for connecting and
+-- the handshake; 10000), verify (false: accept any TLS certificate),
+-- max_message, close_timeout, write_timeout
+function M.connect(url, opts)
+    local u = parse_ws_url(url)
+    if u == nil then return error("websocket.connect: not a ws:// or wss:// URL: " .. url) end
+    local timeout = opt(opts, "timeout", 10000)
+    local s = stream_for(u, timeout, opts)
+    if is_error(s) then return error("websocket.connect: " .. s.message) end
+    local key = encoding.base64_encode(native.random(16))
+    local hostport = u.host
+    if string.contains(hostport, ":") then hostport = "[" .. hostport .. "]" end
+    if (u.scheme == "ws" and u.port != "80") or (u.scheme == "wss" and u.port != "443") then
+        hostport = hostport .. ":" .. u.port
+    end
+    local lines = []
+    lines[] = "GET " .. u.path .. " HTTP/1.1"
+    lines[] = "Host: " .. hostport
+    lines[] = "Upgrade: websocket"
+    lines[] = "Connection: Upgrade"
+    lines[] = "Sec-WebSocket-Key: " .. key
+    lines[] = "Sec-WebSocket-Version: 13"
+    local protocols = opt(opts, "protocols", nil)
+    if protocols != nil and len(protocols) > 0 then
+        local names = []
+        for _, p in protocols do names[] = p end
+        lines[] = "Sec-WebSocket-Protocol: " .. string.join(names, ", ")
+    end
+    local extra = opt(opts, "headers", nil)
+    if extra != nil then
+        for k, v in extra do lines[] = tostring(k) .. ": " .. tostring(v) end
+    end
+    local w = s.write(string.join(lines, "\r\n") .. "\r\n\r\n", timeout)
+    if is_error(w) then
+        s.shutdown()
+        return error("websocket.connect: " .. w.message)
+    end
+    -- the response head
+    local buf = ""
+    local head_end = nil
+    while head_end == nil do
+        local chunk = s.read(16384, timeout)
+        if is_error(chunk) or chunk == "" then
+            s.shutdown()
+            return error("websocket.connect: " .. (is_error(chunk) and chunk.message or "connection closed during the handshake"))
+        end
+        buf = buf .. chunk
+        head_end = string.find(buf, "\r\n\r\n")
+        if head_end == nil and len(buf) > 65536 then
+            s.shutdown()
+            return error("websocket.connect: response head too large")
+        end
+    end
+    local head = string.sub(buf, 1, head_end - 1)
+    local rest = string.sub(buf, head_end + 4)
+    local hl = string.split(head, "\r\n")
+    local status = re.match("^HTTP/1\\.[01] (\\d{3})", hl[0])
+    if status == nil or status.groups[1] != "101" then
+        s.shutdown()
+        return error("websocket.connect: the server did not switch protocols: " .. hl[0])
+    end
+    local hdr = [=]
+    for i = 1, len(hl) - 1 do
+        local colon = string.find(hl[i], ":")
+        if colon then
+            hdr[string.lower(string.trim(string.sub(hl[i], 1, colon - 1)))] = string.trim(string.sub(hl[i], colon + 1))
+        end
+    end
+    if not header_has(hdr["upgrade"], "websocket") or not header_has(hdr["connection"], "upgrade") or
+       hdr["sec-websocket-accept"] != M.accept_key(key) then
+        s.shutdown()
+        return error("websocket.connect: invalid handshake response (Upgrade/Connection/Sec-WebSocket-Accept)")
+    end
+    local proto = hdr["sec-websocket-protocol"]
+    if proto != nil then
+        local offered = false
+        if protocols != nil then
+            for _, p in protocols do
+                if p == proto then offered = true end
+            end
+        end
+        if not offered then
+            s.shutdown()
+            return error("websocket.connect: the server chose a subprotocol that was not offered: " .. proto)
+        end
+    end
+    s.buffered = rest
+    return new_conn(s, false, opts, proto)
+end
+
+return M
