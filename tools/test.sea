@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- sea test — run the tests of a project (built into the sea binary)
 --
 --   sea test [flags] [path ...]

@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Arithmetic edge cases for the JIT's inline MOD / IDIV / POW / NEG / bitwise
 -- paths. Each operation runs inside a loop so `make test-jit` compiles it; the
 -- output must match the interpreter exactly.

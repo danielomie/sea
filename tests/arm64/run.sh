@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) 2026 Daniel
+# SPDX-License-Identifier: MIT
+
 # Build Sea and run the unit tests on aarch64, in an arm64 Docker container.
 #
 #   bash tests/arm64/run.sh [make targets...]     (default: test test-dwe test-seac)

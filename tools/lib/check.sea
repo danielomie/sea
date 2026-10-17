@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- sea/check — static checks for Sea source code (used by `sea check` and `sea lsp`)
 --
 --   local check = require("sea/check")

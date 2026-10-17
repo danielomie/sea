@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Strings longer than 64 bytes built with `..` are ropes internally. They must
 -- behave exactly like ordinary strings everywhere (Bug 1 in docs/bugs.md:
 -- os.exec silently returned nil for a long concatenated command).

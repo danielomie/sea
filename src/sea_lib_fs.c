@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_lib_fs.c — the built-in `fs` (file system) and `path` modules.
  *
  * fs: failures are error values ("fs.read: data.txt: No such file or

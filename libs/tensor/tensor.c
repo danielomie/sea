@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * tensor.so — numeric kernels on float_array for Sea.
  *
  * The heavy loops of a small transformer (matrix-vector products and their

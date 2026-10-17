@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 local function qsort(arr, lo, hi)
     if lo >= hi then return end
     local pivot = arr[hi]

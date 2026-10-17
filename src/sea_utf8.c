@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_utf8.c — UTF-8 decoding/encoding, validation, simple case mapping and
  * terminal widths (see sea_utf8.h).
  */

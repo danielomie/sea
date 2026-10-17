@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Daniel
+# SPDX-License-Identifier: MIT
+
 CC     = gcc
 CFLAGS = -std=c11 -O3 -march=native -ffast-math -fno-finite-math-only -Wall -Wextra \
          -Wno-unused-parameter -fno-strict-aliasing -D_GNU_SOURCE -fPIC -shared

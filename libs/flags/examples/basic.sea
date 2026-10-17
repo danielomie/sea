@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- examples/basic.sea — uso básico da lib flags
 --
 -- Run: bin/sea libs/flags/examples/basic.sea -host api.example.com -port 9090 -verbose file1.txt file2.txt

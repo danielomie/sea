@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: ownership rules (docs/memory.md) — values stay alive exactly as long
 -- as something owns them. Under ASAN these were use-after-free / leaks.
 

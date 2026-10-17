@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/toml/toml.c — TOML 1.0 for Sea.
  *
  * Build:  make -C libs/toml

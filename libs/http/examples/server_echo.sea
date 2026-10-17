@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- server_echo.sea — HTTP server with simple routing and request echo.
 --
 -- Routes:

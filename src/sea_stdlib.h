@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 #include "sea_vm.h"
 #include "sea_table.h"

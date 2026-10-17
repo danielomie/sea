@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/ssl/ssl_native.c — Sea SSL/TLS + Cryptography library (OpenSSL backend).
  *
  * Build:  cd libs/ssl && make

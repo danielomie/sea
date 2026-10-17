@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: the sort module
 -- Natural order, comparators, stability, sort.by, typed arrays, sorted,
 -- reverse, is_sorted, search, errors, and a panic inside a comparator.

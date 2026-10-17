@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_bigint.c — arbitrary-precision integers (see sea_bigint.h).
  *
  * Magnitudes are arrays of 32-bit limbs, least significant first. Schoolbook

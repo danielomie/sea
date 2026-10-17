@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_gc.h"
 #include "sea_array.h"
 #include "sea_table.h"

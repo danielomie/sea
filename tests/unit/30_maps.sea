@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: map (swiss-table hash map)
 -- Covers: creation, string/int/float/bool keys, get/set, overwrite,
 --         missing keys, map.has, del, map.keys, map.values,

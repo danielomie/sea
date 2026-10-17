@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 --
 -- Broker Pub/Sub com Goroutines e Select
 --

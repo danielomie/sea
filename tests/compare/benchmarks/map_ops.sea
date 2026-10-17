@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 local m = [=]
 for i = 1, 10000000 do
     m[tostring(i)] = i

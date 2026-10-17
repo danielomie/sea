@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- libs/flags/flags.sea — Flag parsing library (Go's flag package style)
 --
 -- Uso:

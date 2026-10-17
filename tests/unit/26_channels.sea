@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: channels
 
 -- 1. Buffered channel: send and receive without blocking

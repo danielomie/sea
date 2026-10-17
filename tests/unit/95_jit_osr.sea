@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- JIT on-stack replacement (OSR) paths. Under `make test-jit` every chunk is
 -- compiled at its first loop back-edge and entered mid-function; the output
 -- must match the interpreter exactly.

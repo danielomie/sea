@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: constant folding (Etapa 2)
 -- Verifies that integer constants are folded at compile time without
 -- changing observable behavior.

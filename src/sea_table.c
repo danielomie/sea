@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_table.h"
 #include "sea_bigint.h"
 #include <sched.h>

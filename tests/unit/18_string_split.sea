@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: string split and advanced string ops
 -- split by comma
 local parts = string.split("a,b,c,d", ",")

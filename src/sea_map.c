@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_map.h"
 #include "sea_rope.h"
 #include "sea_string.h"

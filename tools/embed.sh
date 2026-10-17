@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright (c) 2026 Daniel
+# SPDX-License-Identifier: MIT
+
 # Turn Sea sources into a C header: one byte array per file and a table
 # { name, src } named TABLE. An argument is name=file, or a file whose
 # basename (without .sea) is the name.

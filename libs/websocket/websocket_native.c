@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/websocket/websocket_native.c — WebSocket frames (RFC 6455) for
  * websocket.sea: encoding with optional masking, decoding with the
  * protocol checks, and random bytes for keys and masks.

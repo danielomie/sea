@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: the encoding and hash modules (standard test vectors)
 
 print("-- digests (RFC 1321, FIPS 180)")

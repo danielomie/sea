@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * The `sort` module: sorting and binary search on arrays.
  *
  *   sort.sort(a [, less])          sort in place, stable

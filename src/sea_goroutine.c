@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_goroutine.h"
 #include "sea_memory.h"
 #include "sea_stdlib.h"

@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- examples/https_server.sea — minimal HTTPS server using the ssl lib
 --
 -- Requires a self-signed cert + key. Generate with:

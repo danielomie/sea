@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_lib_process.c — the built-in `process` module: run and talk to child
  * processes without blocking the scheduler.
  *

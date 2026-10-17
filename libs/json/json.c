@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/json/json.c — JSON (RFC 8259) encode/decode for Sea.
  *
  * Build:  make -C libs/json

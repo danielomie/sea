@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- string concat: build a large string by appending
 local s = ""
 for i = 1, 50000 do

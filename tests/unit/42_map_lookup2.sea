@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: two-value map/table lookup  (v, ok = m[k])
 
 -- 1. local form on [=] map

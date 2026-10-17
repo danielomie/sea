@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: tables (maps)
 -- table literal with string keys → struct (fixed layout)
 local t = {x=1, y=2, z=3}

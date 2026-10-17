@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test 1: Non-blocking recv with default
 local ch = chan(1)
 ch <- 42

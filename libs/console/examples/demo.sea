@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- demo.sea — console library showcase
 -- Usage: bin/sea libs/console/examples/demo.sea
 

@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: libs/toml (needs make -C libs/toml)
 local toml = require("./libs/toml/toml")
 local json = require("./libs/json/json")

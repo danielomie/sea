@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: the cycle collector (gc.collect / gc.stats, docs/memory.md)
 
 gc.collect()   -- start from an empty buffer

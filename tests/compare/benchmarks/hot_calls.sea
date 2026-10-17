@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- JIT-friendly: a hot pure-integer function called 300K times.
 -- The method JIT compiles `kernel` after it gets hot; the driver loop
 -- (main chunk) stays interpreted.

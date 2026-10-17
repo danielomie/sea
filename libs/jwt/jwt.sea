@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- libs/jwt/jwt.sea — JSON Web Tokens para Sea
 --
 -- Suporta HS256, HS384, HS512 (HMAC simétrico) e RS256 (RSA assimétrico).

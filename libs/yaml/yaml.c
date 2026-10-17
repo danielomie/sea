@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/yaml/yaml.c — YAML 1.2 for Sea: decode, encode, events and emit.
  *
  * Build:  make -C libs/yaml

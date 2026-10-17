@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea/parser — the Sea lexer and parser as a library, built into the VM:
  *
  *   local parser = require("sea/parser")

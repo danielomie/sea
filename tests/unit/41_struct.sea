@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: struct — fixed-layout objects from {k=v,...} literals
 
 -- basic struct creation and field access

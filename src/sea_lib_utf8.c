@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_lib_utf8.c — the built-in `utf8` module: strings read as UTF-8.
  *
  * The string module works on bytes; these functions work on characters

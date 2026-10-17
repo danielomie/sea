@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: green threads aggressive stress test
 -- Stresses goroutine pool recycling, work-stealing, channel contention
 

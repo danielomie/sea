@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- encode.sea — json.encode examples
 -- Usage: bin/sea libs/json/examples/encode.sea
 

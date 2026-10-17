@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/compress/compress.c — gzip / zlib / raw DEFLATE for Sea (on zlib).
  *
  * Build:  make -C libs/compress        (needs zlib's headers: zlib1g-dev)

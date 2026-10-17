@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- libs/ssl/ssl.sea — Sea SSL/TLS + cryptography library
 --
 -- Full OpenSSL-backed library for TLS connections, X.509 certificates,

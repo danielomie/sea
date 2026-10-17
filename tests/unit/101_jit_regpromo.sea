@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Register promotion (JIT Fase 4): VM registers live in native locals inside
 -- compiled loops and are synced with the frame only at helper calls, bailouts,
 -- suspension and return. Each case below breaks if a sync point is missing.

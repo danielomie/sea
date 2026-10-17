@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_compiler.h"
 #include "sea_string.h"
 #include "sea_table.h"

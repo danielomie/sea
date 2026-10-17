@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Daniel
+# SPDX-License-Identifier: MIT
+
 # Download the DuckDB C library (libduckdb.so + duckdb.h) into vendor/.
 # The version and the SHA-256 of each release archive are pinned here.
 set -euo pipefail

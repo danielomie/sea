@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 /* sea_bundle.c — programs bundled by `sea build` (see sea_bundle.h) */
 #include "sea_bundle.h"
 #include <fcntl.h>

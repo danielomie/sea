@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: advanced closures
 
 -- 1. Counter factory: each closure is independent

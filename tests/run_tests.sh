@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Daniel
+# SPDX-License-Identifier: MIT
+
 # Sea VM unit test runner
 # Usage: ./tests/run_tests.sh [test_pattern]
 #

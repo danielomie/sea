@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: string.format
 print(string.format("%d", 42))          -- 42
 print(string.format("%d + %d = %d", 1, 2, 3))  -- 1 + 2 = 3

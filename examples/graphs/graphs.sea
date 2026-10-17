@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 --
 -- Grafos em Sea: BFS em labirinto e Dijkstra com heap binário
 --

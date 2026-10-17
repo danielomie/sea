@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- server_router.sea — HTTP server usando http.router() com middleware.
 --
 -- Demonstra: rotas por método, parâmetros de path (:id),

@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/jwt/jwt_native.c — JWT crypto primitives for Sea.
  *
  * Build:  cd libs/jwt && make

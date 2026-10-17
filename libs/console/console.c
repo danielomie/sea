@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/console/console.c — Terminal manipulation library for Sea.
  *
  * Build:  cd libs/console && make

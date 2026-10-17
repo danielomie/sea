@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include <errno.h>
 #include "sea_bigint.h"
 #include "sea_stdlib.h"

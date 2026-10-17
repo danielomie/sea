@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/http/http_native.c — HTTP/1.1 parsing and encoding helpers for http.sea.
  *
  * Sockets come from the built-in `net` module and TLS from the ssl lib; this

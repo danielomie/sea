@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_vm.h"
 #include "sea_bigint.h"
 #include "sea_chunk.h"

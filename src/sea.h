@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea.h — Public C API for the Sea language.
  *
  * Include this single header when writing an external Sea module (native

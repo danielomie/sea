@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 /* sea_cover.c — line coverage records (see sea_cover.h) */
 #include "sea_cover.h"
 #include "sea_vm.h"

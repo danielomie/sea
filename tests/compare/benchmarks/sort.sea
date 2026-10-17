@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Generate pseudo-random numbers using LCG
 local nums = []
 local x = 12345

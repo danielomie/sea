@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Compiler facts (deferred copies, constants, "is int") must hold on every
 -- path that reaches a use. These used to miscompile silently: a copy
 -- materialized in one branch, a constant or int-ness learned in `then` leaking

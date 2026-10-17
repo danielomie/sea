@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: the fs and path modules
 
 local d = fs.tempdir("seatest-")

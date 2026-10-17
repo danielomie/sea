@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Regression (Bug 20): a local captured by a closure that was not created
 -- (its branch did not run) must still be released when its scope ends, on
 -- every path out: end of block, break/continue, return.

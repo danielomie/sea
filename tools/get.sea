@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- sea get — dependencies of a Sea project
 --
 --   sea get                      install what sea.toml lists (the commits in sea.lock)

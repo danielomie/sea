@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Daniel
+# SPDX-License-Identifier: MIT
+
 # Download the SQLite amalgamation (sqlite3.c + sqlite3.h) into vendor/.
 # The version and the SHA-256 of the release archive are pinned here (the
 # archive's sqlite3.c matches the SHA3-256 in SQLite's release log).

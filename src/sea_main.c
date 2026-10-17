@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_common.h"
 #include "sea_lexer.h"
 #include "sea_parser.h"

@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- sea lsp — a Language Server Protocol server for Sea (over stdin/stdout)
 --
 --   sea lsp

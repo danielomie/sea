@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- sea doc — documentation from Sea source comments (built into the sea binary)
 --
 --   sea doc [flags] [path ...] [name]

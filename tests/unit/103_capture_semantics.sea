@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Variable capture semantics.
 -- 1) Loop variables are fresh per iteration (as in Lua 5.4 and Go 1.22):
 --    closures and goroutines created in a loop body see that iteration's value.

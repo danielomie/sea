@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_lib_bigint.c — the built-in `bigint` module.
  *
  *   bigint.new(v [, base]) → bigint | error   v: int, integral number, string, bigint

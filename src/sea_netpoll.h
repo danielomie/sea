@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 #include "sea_common.h"
 #include "sea_value.h"

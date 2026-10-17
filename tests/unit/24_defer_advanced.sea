@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: advanced defer behavior
 
 -- 1. Multiple defers in one function run in LIFO order

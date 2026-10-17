@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: float_array — typed float array without per-element RC
 
 local a = float_array(4)

@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- JIT coverage for for-in, closures, goroutines and channels. Under
 -- `make test-jit` every chunk below is compiled at its first loop back-edge;
 -- the output must match the interpreter exactly.

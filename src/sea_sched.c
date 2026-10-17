@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_prof.h"
 #include "sea_sched.h"
 #include "sea_gc.h"

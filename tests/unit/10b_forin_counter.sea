@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Bug 2: variável numérica antes de for-in causava loop infinito.
 -- Todos os casos abaixo devem terminar e imprimir o valor correto.
 

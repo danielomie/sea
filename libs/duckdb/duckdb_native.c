@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/duckdb/duckdb_native.c — DuckDB bindings for Sea (used by duckdb.sea).
  *
  * Build:  make -C libs/duckdb   (fetches libduckdb into vendor/ the first time)

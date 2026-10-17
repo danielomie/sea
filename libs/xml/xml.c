@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/xml/xml.c — XML 1.0 parser, encoder and queries for Sea.
  *
  * Build:  make -C libs/xml

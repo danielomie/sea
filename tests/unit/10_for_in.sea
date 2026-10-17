@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: for-in loops
 -- over table literal (integer keys, 0-based)
 local t = {10, 20, 30}

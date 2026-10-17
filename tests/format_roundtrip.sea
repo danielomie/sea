@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Round trip of sea/parser's format over the files given as arguments:
 -- format(src) must parse to the same tree as src (positions, raw literal
 -- text and parentheses aside), and formatting it again must not change it.

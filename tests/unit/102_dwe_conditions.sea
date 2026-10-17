@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Conditions must test the right register. The dead-write eliminator used to
 -- drop the copy of a condition into a temporary, because it did not know that
 -- conditional jumps read their register (`local v, ok = t[k]; if ok then`

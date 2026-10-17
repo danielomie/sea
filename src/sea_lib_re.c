@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_lib_re.c — the built-in `re` module: regular expressions.
  *
  * RE2-style syntax matched by a Pike VM (Thompson NFA simulation with

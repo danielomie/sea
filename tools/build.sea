@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- sea build — make a standalone executable of a Sea program
 --
 --   sea build [-o out] [-i path ...] file.sea

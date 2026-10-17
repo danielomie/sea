@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- json: strict parsing, error values with positions, depth limit, encode
 -- options and conversions (see docs/libs.md)
 local json = require("../../libs/json/json")

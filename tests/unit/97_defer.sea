@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- defer: the callee and its arguments are evaluated when `defer` runs (Go
 -- semantics), and the call happens at function exit in LIFO order.
 -- Regression test for Bug 10 (docs/bugs.md): argument loads were removed as

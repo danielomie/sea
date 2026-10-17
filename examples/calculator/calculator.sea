@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 --
 -- Calculadora com Parser Descendente Recursivo em Sea
 --

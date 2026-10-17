@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: json library
 -- Covers: encode (nil, bool, int, float, string, array, table, nested),
 --         decode (null, bool, number, string, array, object, nested, errors)

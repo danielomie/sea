@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/sqlite/sqlite_native.c — SQLite for Sea (the native half; the API is
  * in sqlite.sea).
  *

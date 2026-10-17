@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: the re module (RE2-style regular expressions, linear time)
 
 local function try(f)

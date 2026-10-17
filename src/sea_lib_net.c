@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "sea_stdlib.h"
 #include "sea_netpoll.h"
 #include "sea_string.h"

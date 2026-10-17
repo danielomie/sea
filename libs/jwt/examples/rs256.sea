@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- examples/rs256.sea — JWT com algoritmo RSA-SHA256
 --
 -- Gere as chaves antes de rodar:

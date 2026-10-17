@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Test: bitwise operations
 print(0xFF & 0x0F)    -- 15
 print(0xF0 | 0x0F)    -- 255

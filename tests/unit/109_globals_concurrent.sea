@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Globals written and read from many goroutines at once: new globals force
 -- the globals table to grow while other goroutines look up builtins.
 local wg = sync.waitgroup()

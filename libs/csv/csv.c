@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * libs/csv/csv.c — CSV (RFC 4180) for Sea.
  *
  * Build:  make -C libs/csv

@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 Daniel
+-- SPDX-License-Identifier: MIT
+
 -- Bug 3: snapshot apagado ao reasignar local de loop
 
 -- Caso 1: [=] map

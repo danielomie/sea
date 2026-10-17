@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
 /* sea_prof.c — the sampling profiler behind `sea prof` (see sea_prof.h) */
 #include "sea_prof.h"
 #include "sea_vm.h"

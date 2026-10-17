@@ -1,4 +1,9 @@
 /*
+ * Copyright (c) 2026 Daniel
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
  * sea_lib_hash.c — the built-in `encoding` and `hash` modules (pure C, no
  * OpenSSL: libs/ssl has the TLS side).
  *
