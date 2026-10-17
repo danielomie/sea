@@ -1,2 +1,11 @@
 -- Test: basic print
 print("hello, world")
+
+--[[ a long comment
+     over several lines ]]
+print("after a long comment") --[==[ with ]] inside ]==]
+--[=[
+print("not run")
+]=]
+local parser = require("sea/parser")
+print(parser.parse("x = 1\n--[[ never closed\n").message)

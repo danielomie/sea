@@ -63,6 +63,32 @@ static bool match_char(SeaLexer *l, char expected) {
     return true;
 }
 
+/* At p: "[[", "[=[", "[==[", ... — the level (number of '='), or -1. */
+static int long_bracket_level(const char *p) {
+    if (*p != '[') return -1;
+    int level = 0;
+    p++;
+    while (*p == '=') { level++; p++; }
+    return *p == '[' ? level : -1;
+}
+
+/* Skip a long comment whose "--" is at l->cur: up to the "]" "="*level "]"
+ * that closes it, counting lines. False if the input ends first (l->cur is
+ * then at the end). */
+static bool skip_long_comment(SeaLexer *l, int level) {
+    l->cur += 2 + 2 + level;                       /* "--[" "="... "[" */
+    while (*l->cur != '\0') {
+        char c = *l->cur++;
+        if (c == '\n') { l->line++; l->line_start = l->cur; continue; }
+        if (c == ']') {
+            int k = 0;
+            while (l->cur[k] == '=') k++;
+            if (k == level && l->cur[k] == ']') { l->cur += k + 1; return true; }
+        }
+    }
+    return false;
+}
+
 static void skip_whitespace_and_comments(SeaLexer *l) {
     for (;;) {
         char c = peek_char(l);
@@ -76,9 +102,22 @@ static void skip_whitespace_and_comments(SeaLexer *l) {
                 l->line_start = l->cur;
                 break;
             case '-':
-                // Single line comment: -- ...
+                // Comment: -- to the end of the line, or a long one: --[[ ... ]]
                 if (peek_next(l) == '-') {
                     if (l->keep_comments) return;
+                    int level = long_bracket_level(l->cur + 2);
+                    if (level >= 0) {
+                        const char *at = l->cur;
+                        int line = l->line;
+                        const char *ls = l->line_start;
+                        if (!skip_long_comment(l, level)) {
+                            l->bad_comment = at;
+                            l->bad_comment_line = line;
+                            l->bad_comment_col = (int)(at - ls) + 1;
+                            return;
+                        }
+                        break;
+                    }
                     l->cur += 2;
                     while (*l->cur != '\0' && *l->cur != '\n') l->cur++;
                 } else {
@@ -313,6 +352,12 @@ static SeaToken scan_token(SeaLexer *l) {
     l->start = l->cur;
     l->tok_line = l->line;
     l->tok_col = (int)(l->cur - l->line_start) + 1;
+    if (l->bad_comment) {
+        l->tok_line = l->bad_comment_line;
+        l->tok_col = l->bad_comment_col;
+        l->bad_comment = NULL;
+        return error_token(l, "unfinished long comment");
+    }
 
     if (*l->cur == '\0') {
         return make_token(l, TK_EOF);
@@ -322,6 +367,11 @@ static SeaToken scan_token(SeaLexer *l) {
      * `#` line at the start of the file or of a line) */
     if ((l->cur[0] == '-' && l->cur[1] == '-') ||
         (l->cur[0] == '#' && (l->cur == l->src || l->cur[-1] == '\n'))) {
+        int level = l->cur[0] == '-' ? long_bracket_level(l->cur + 2) : -1;
+        if (level >= 0) {
+            if (!skip_long_comment(l, level)) return error_token(l, "unfinished long comment");
+            return make_token(l, TK_COMMENT);
+        }
         while (*l->cur != '\0' && *l->cur != '\n') l->cur++;
         return make_token(l, TK_COMMENT);
     }
@@ -439,6 +489,7 @@ void sea_lexer_init_ex(SeaLexer *l, const char *source, bool keep_comments) {
     l->keep_comments = keep_comments;
     l->has_lookahead = false;
     l->err_msg = NULL;
+    l->bad_comment = NULL;
     /* Source is UTF-8: a byte-order mark is skipped, invalid bytes are an error */
     if ((unsigned char)source[0] == 0xEF && (unsigned char)source[1] == 0xBB && (unsigned char)source[2] == 0xBF) {
         l->cur = l->start = l->line_start = source + 3;

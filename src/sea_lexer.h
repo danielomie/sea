@@ -60,6 +60,8 @@ typedef struct {
     SeaToken    lookahead;
     bool        has_lookahead;
     char       *err_msg;
+    const char *bad_comment;     /* an unfinished long comment starts here */
+    int         bad_comment_line, bad_comment_col;
 } SeaLexer;
 
 // Initialize lexer with source code

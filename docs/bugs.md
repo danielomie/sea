@@ -410,6 +410,17 @@ e agora também `return`, que antes deixava o fechamento para o `RETURN`), um
 (`emit_release_captured` em `sea_compiler.c`). **Teste:**
 `tests/unit/124_captured_release.sea` (mede o RSS; falha sem a correção).
 
+## Bug 21: comentários longos `--[[ ... ]]` não existiam **(FIXED 2026-10)**
+
+A referência documentava `--[[ ... ]]` e `--[=[ ... ]=]`, mas o lexer só
+conhecia `--` até o fim da linha: `--[[ a` comentava a primeira linha e o
+resto virava código (`expression is not a statement`). **Correção:** o lexer
+reconhece o colchete longo depois de `--` (com qualquer nível de `=`), conta
+as linhas de dentro, e um comentário que não fecha é o erro `unfinished long
+comment` na posição em que abre; no modo que guarda comentários
+(`sea/parser`: `tokenize`, `format`) ele é um único token. **Teste:** fim de
+`tests/unit/01_hello.sea`.
+
 ## Fontes UTF-8 e módulo `utf8` **(2026-10)**
 
 O lexer passou a exigir UTF-8 no fonte (byte inválido é erro de compilação
