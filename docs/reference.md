@@ -26,6 +26,7 @@ sea bytecode file.sea            # disassembly
 sea --jit file.sea               # with the JIT (bin/sea-jit)
 sea fmt [flags] [path...]        # format source code
 sea doc [flags] [path...] [name] # documentation from comments
+sea test [flags] [path...]       # run the *_test.sea files
 sea version
 ```
 
@@ -88,8 +89,49 @@ functions. The name of a built-in module (`sea doc fs`) lists its functions.
 | `-o FILE` | Write to a file instead of stdout |
 | `--all` | Include local functions |
 
-Both tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`) built into
-the binary.
+### `sea test`
+
+Runs the tests of a project: every `*_test.sea` file under the paths
+(default: the current directory; hidden directories are skipped), each in its
+own process started in the file's directory, several at a time. A test file
+defines tests with the built-in `sea/test` module (see `test` in
+`docs/libs.md`); `t.main()` at its end is optional.
+
+```sea
+-- stack_test.sea
+local t = require("sea/test")
+local Stack = require("./stack")
+
+t.it("pops what was pushed", function()
+    local s = Stack.new()
+    s:push(1)
+    t.eq(s:pop(), 1)
+end)
+```
+
+```
+$ sea test
+ok    stack_test.sea  1 passed (0.01 s)
+FAIL  parser/lexer_test.sea  4 passed, 1 failed (0.02 s)
+
+2 files, 1 failed; 5 passed, 1 failed (0.03 s)
+```
+
+The output of a file (its report and anything it prints) is shown when it
+fails, or always with `-v`. A file that does not parse, panics outside a
+test or is killed fails. The exit status is 1 when anything failed.
+
+| Flag | |
+|------|--|
+| `-v` | Show every file's output |
+| `-run TEXT` | Only the tests whose full name (`group > test`) contains `TEXT` |
+| `-bench TEXT` | Also run the benchmarks (`t.bench`) whose name contains `TEXT` (`.` for all); their results are shown |
+| `-benchtime S` | Seconds per benchmark (default 1) |
+| `-j N` | Files run at the same time (default: the number of CPUs) |
+| `-timeout S` | Seconds a file may take before it is killed (default 600) |
+
+These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
+`tools/test.sea`) built into the binary.
 
 ---
 

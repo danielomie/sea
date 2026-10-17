@@ -5,7 +5,7 @@ local dir = fs.tempdir("seatools-")
 local function run(args, stdin)
     local cmd = []
     cmd[] = SEA
-    for _, a in args do cmd[] = a end
+    for i = 0, len(args) - 1 do cmd[] = args[i] end
     local opts = {}
     opts.cwd = dir
     if stdin != nil then opts.stdin = stdin end
@@ -73,4 +73,36 @@ print(run({"doc", "mylib.sea", "nothing"}))
 local html = run({"doc", "-f", "html", "-o", "out.html", "mylib.sea"})
 print(html, string.contains(fs.read(dir .. "/out.html"), "<code>mylib.add(a, b)</code>"))
 print(string.sub(run({"doc", "re"}), 1, 40))
+
+print("-- sea test")
+local function untimed(s)
+    s = re.gsub("[0-9.]+ ns/op", s, "N ns/op")
+    s = re.gsub("  +[0-9]+  +N", s, " N N")
+    return re.gsub("\\([0-9.]+ s\\)", s, "(T)")
+end
+fs.mkdir(dir .. "/t")
+fs.mkdir(dir .. "/t/.git")
+fs.write(dir .. "/t/.git/x_test.sea", "print('hidden')\n")
+fs.write(dir .. "/t/lib.sea", "local M = {}\nfunction M.double(x) return x * 2 end\nreturn M\n")
+fs.write(dir .. "/t/lib_test.sea", [==[
+local t = require("sea/test")
+local lib = require("./lib")
+t.describe("double", function()
+    t.it("ints", function() t.eq(lib.double(2), 4) end)
+    t.it("floats", function() t.eq(lib.double(0.5), 1.0) end)
+end)
+t.bench("double", function(b) for i = 1, b.n do lib.double(i) end end)
+]==])
+fs.write(dir .. "/t/z_test.sea", [==[
+local t = require("sea/test")
+t.it("broken", function() print("noise"); t.eq(1, 2) end)
+t.main()
+]==])
+print(untimed(run({"test", "t"})))
+print(untimed(run({"test", "-run", "ints", "t/lib_test.sea"})))
+print(untimed(run({"test", "-v", "-bench", ".", "-benchtime", "0.01", "t/lib_test.sea"})))
+fs.write(dir .. "/t/z_test.sea", "local x = = 1\n")
+print(untimed(run({"test", "t"})))
+fs.mkdir(dir .. "/empty")
+print(run({"test", "empty"}))
 fs.remove(dir, {recursive = true})

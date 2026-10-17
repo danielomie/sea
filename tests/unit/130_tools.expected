@@ -60,3 +60,39 @@ m.join(...) → the values joined with ", "
 [0] RE  (built in)
 
     Built-in module 
+-- sea test
+[1] ok    t/lib_test.sea  2 passed (T)
+=== t/z_test.sea
+noise
+✗ broken
+
+1) broken
+   not equal
+       expected: 2
+            got: 1
+
+0 passed, 1 failed (T)
+FAIL  t/z_test.sea  0 passed, 1 failed (T)
+
+2 files, 1 failed; 2 passed, 1 failed (T)
+[0] ok    t/lib_test.sea  1 passed (T)
+
+1 file; 1 passed (T)
+[0] === t/lib_test.sea
+double
+  ✓ ints
+  ✓ floats
+
+double N N ns/op
+
+2 passed (T)
+ok    t/lib_test.sea  2 passed, 1 benchmark (T)
+
+1 file; 2 passed (T)
+[1] ok    t/lib_test.sea  2 passed (T)
+=== t/z_test.sea
+t/z_test.sea:1:11: unexpected token '=' in expression
+FAIL  t/z_test.sea  (T)
+
+2 files, 1 failed; 2 passed (T)
+[0] no test files

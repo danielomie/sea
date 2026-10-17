@@ -48,16 +48,23 @@ $(JIT_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(JIT_OBJ_DIR)
 
 -include $(JIT_OBJS:.o=.d)
 
-# The `sea fmt` / `sea doc` tools: Sea scripts in tools/, embedded in the
-# binary as byte arrays (gen/sea_tools.h, included by sea_main.c).
+# The `sea fmt`, `sea doc`, ... tools: Sea scripts in tools/, embedded in the
+# binary as byte arrays (gen/sea_tools.h, included by sea_main.c). Modules
+# that `require("sea/...")` finds without a file: gen/sea_modules.h, included
+# by sea_stdlib.c (name=file).
 TOOLS = $(wildcard tools/*.sea)
+MODULES = sea/test=libs/test/test.sea
 GEN_DIR = gen
 CFLAGS += -I$(GEN_DIR)
 
 $(GEN_DIR)/sea_tools.h: $(TOOLS) tools/embed.sh | $(GEN_DIR)
-	sh tools/embed.sh $(TOOLS) > $@
+	sh tools/embed.sh SEA_TOOLS $(TOOLS) > $@
+
+$(GEN_DIR)/sea_modules.h: $(foreach m,$(MODULES),$(lastword $(subst =, ,$(m)))) tools/embed.sh | $(GEN_DIR)
+	sh tools/embed.sh SEA_MODULES $(MODULES) > $@
 
 $(OBJ_DIR)/sea_main.o $(JIT_OBJ_DIR)/sea_main.o: $(GEN_DIR)/sea_tools.h
+$(OBJ_DIR)/sea_stdlib.o $(JIT_OBJ_DIR)/sea_stdlib.o: $(GEN_DIR)/sea_modules.h
 
 $(BIN_DIR) $(OBJ_DIR) $(JIT_OBJ_DIR) $(GEN_DIR):
 	mkdir -p $@

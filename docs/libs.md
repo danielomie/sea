@@ -1163,10 +1163,13 @@ print(flags.narg())   -- number of positional args
 ## `test`
 
 A test framework in pure Sea: groups, hooks, assertions with readable
-differences, skipping, a pretty or TAP report, and an exit status for CI.
+differences, skipping, benchmarks, a pretty or TAP report, and an exit status
+for CI. It is built into the `sea` binary as `require("sea/test")` (the same
+file as `libs/test/test.sea`), and `sea test` runs the `*_test.sea` files of
+a project with it (see "Command Line" in `reference.md`).
 
 ```sea
-local t = require("../libs/test/test")   -- relative to the requiring file
+local t = require("sea/test")
 
 t.describe("parser", function()
     local p = nil
@@ -1180,6 +1183,7 @@ t.describe("parser", function()
 end)
 
 t.main()   -- run, print the report, exit 1 if anything failed
+           -- (optional under `sea test`, which runs what the file defined)
 ```
 
 ```
@@ -1204,6 +1208,17 @@ parser
 | `t.todo(name)` | A placeholder, reported as todo |
 | `t.before_each(fn)`, `t.after_each(fn)` | Around every test of the group and its subgroups (outer `before_each` first, inner `after_each` first) |
 | `t.before_all(fn)`, `t.after_all(fn)` | Once around the group's tests (a failing `before_all` fails them) |
+| `t.bench(name, fn)` | A benchmark: `fn(b)` runs the code `b.n` times; `b.n` grows until a run takes `benchtime`; `b:reset()` restarts the clock after setup. Run only when asked (`bench` option) |
+
+```sea
+t.bench("join", function(b)
+    local parts = make_parts(1000)
+    b:reset()
+    for i = 1, b.n do string.join(parts, ",") end
+end)
+```
+
+prints `join   20000   51234.5 ns/op` (name, `b.n`, time per run).
 
 **Assertions** (a failing one stops its test; the others go on). Each takes
 an optional last `msg` that prefixes the failure:
@@ -1231,9 +1246,13 @@ A runtime error or a panic inside a test (or a hook) is reported as an
 kind, message}`); `t.main([opts])` runs and exits with status 1 when
 something failed. Options: `filter` (run the tests whose full name contains
 it; default: the environment variable `SEA_TEST`), `format` (`"pretty"`,
-`"tap"`, `"quiet"`), `timing` (show times; default `true`). Also `t.equal(a,
-b)` (the deep equality as a bool), `t.show(v)` (a value as readable text) and
-`t.reset()` (forget the tests defined so far).
+`"tap"`, `"quiet"`), `timing` (show times; default `true`), `bench` (also
+run the benchmarks whose full name contains it, `"."` for all; default
+`SEA_BENCH`), `benchtime` (seconds per benchmark; default `SEA_BENCHTIME` or
+1). The result also has `benches`: `{name, n, ns_per_op}`. Also `t.equal(a,
+b)` (the deep equality as a bool), `t.show(v)` (a value as readable text),
+`t.has_run()` (whether `run`/`main` ran) and `t.reset()` (forget the tests
+defined so far).
 
 ---
 

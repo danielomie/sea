@@ -190,6 +190,8 @@ static SeaValue fn_recover(SeaVM *vm, int argc, SeaValue *args) {
 
 /* ---- require() helpers ---- */
 
+#include "sea_modules.h"   /* gen/: Sea modules built in (sea/test) */
+
 /* Return values for require_try_* helpers */
 #define REQUIRE_NONE    0
 #define REQUIRE_SOURCE  1   /* .sea source file */
@@ -222,6 +224,57 @@ static int require_try_native(const char *dir, const char *name,
     return REQUIRE_NONE;
 }
 
+/* Parse, compile and run a module's source; cache its value under key
+ * (consumed). name is its source name (a path, or sea/... when built in). */
+static SeaValue require_run_source(SeaVM *vm, SeaString *key, const char *src,
+                                   const char *name) {
+    SeaValue key_val = sea_obj_val(&key->obj);
+    SeaParser parser;
+    sea_parser_init(&parser, src);
+    SeaNode *program = sea_parser_parse(&parser);
+
+    if (!program) {
+        char perr[PATH_MAX + 600];
+        sea_parser_error_string(&parser, name, perr, sizeof(perr));
+        fprintf(stderr, "sea: %s\n", perr);
+        sea_parser_free(&parser);
+        sea_obj_release(&key->obj);
+        return SEA_NIL_VAL;
+    }
+    sea_parser_free(&parser);
+
+    SeaChunk *chunk = sea_compile(program, name);
+    sea_node_free(program);
+
+    if (!chunk) {
+        fprintf(stderr, "sea: %s:%d: %s\n", name, sea_compile_error_line(),
+                sea_compile_error() ? sea_compile_error() : "compile error");
+        sea_obj_release(&key->obj);
+        return SEA_NIL_VAL;
+    }
+
+    /* Execute module in the current VM (re-entrant). The chunk's source name
+     * must outlive it: use the interned key's bytes when name is a buffer. */
+    const char *saved_source = vm->source_name;
+    vm->source_name = key->data;
+
+    SeaValue result = SEA_NIL_VAL;
+    sea_vm_exec_mod(vm, chunk, &result);
+
+    /* Transfer chunk ownership to the VM: closures returned from the module
+     * hold cl->chunk pointers into this chunk's proto tree.  We must NOT free
+     * the chunk here; the VM will free it on sea_vm_free(). */
+    chunk->next_owned    = vm->module_chunks;
+    vm->module_chunks    = chunk;
+
+    vm->source_name = saved_source;
+
+    /* The cache retains; the module's return value (+1) goes to the caller. */
+    sea_map_set(vm_loaded(vm), key_val, result);
+    sea_obj_release(&key->obj);
+    return result;
+}
+
 // require(name)
 static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !sea_is_string(args[0])) return SEA_NIL_VAL;
@@ -231,6 +284,19 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     SeaValue mod = SEA_NIL_VAL;
     if (sea_globals_get_str(vm, name, &mod))
         return sea_val_ref(mod);
+
+    /* 1b. Sea modules built into the binary (gen/sea_modules.h): sea/test */
+    for (int i = 0; SEA_MODULES[i].name; i++) {
+        if (strcmp(name, SEA_MODULES[i].name) != 0) continue;
+        SeaString *key = sea_string_intern(name, strlen(name));
+        SeaValue cached = SEA_NIL_VAL;
+        if (sea_map_get(vm_loaded(vm), sea_obj_val(&key->obj), &cached)) {
+            sea_obj_release(&key->obj);
+            return sea_val_ref(cached);
+        }
+        sea_map_set(vm_loaded(vm), sea_obj_val(&key->obj), SEA_NIL_VAL);
+        return require_run_source(vm, key, SEA_MODULES[i].src, SEA_MODULES[i].name);
+    }
 
     /* 2. Resolve file path
      *    For each search directory, try .sea source first, then .so native.
@@ -285,7 +351,7 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     /* 3. Resolve to canonical absolute path (cache key) */
     char abspath[PATH_MAX];
     if (!realpath(path, abspath))
-        strncpy(abspath, path, sizeof(abspath) - 1);
+        snprintf(abspath, sizeof(abspath), "%s", path);
 
     /* 4. Check module cache */
     SeaString *key     = sea_string_intern(abspath, strlen(abspath));
@@ -341,52 +407,8 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     src[nr] = '\0';
     fclose(f);
 
-    /* 7. Parse */
-    SeaParser parser;
-    sea_parser_init(&parser, src);
-    SeaNode *program = sea_parser_parse(&parser);
+    SeaValue result = require_run_source(vm, key, src, abspath);
     sea_free(src, (size_t)sz + 1);
-
-    if (!program) {
-        char perr[PATH_MAX + 600];
-        sea_parser_error_string(&parser, abspath, perr, sizeof(perr));
-        fprintf(stderr, "sea: %s\n", perr);
-        sea_parser_free(&parser);
-        sea_obj_release(&key->obj);
-        return SEA_NIL_VAL;
-    }
-    sea_parser_free(&parser);
-
-    /* 8. Compile */
-    SeaChunk *chunk = sea_compile(program, abspath);
-    sea_node_free(program);
-
-    if (!chunk) {
-        fprintf(stderr, "sea: %s:%d: %s\n", abspath, sea_compile_error_line(),
-                sea_compile_error() ? sea_compile_error() : "compile error");
-        sea_obj_release(&key->obj);
-        return SEA_NIL_VAL;
-    }
-
-    /* 9. Execute module in the current VM (re-entrant) */
-    const char *saved_source = vm->source_name;
-    vm->source_name = abspath;
-
-    SeaValue result = SEA_NIL_VAL;
-    sea_vm_exec_mod(vm, chunk, &result);
-
-    /* Transfer chunk ownership to the VM: closures returned from the module
-     * hold cl->chunk pointers into this chunk's proto tree.  We must NOT free
-     * the chunk here; the VM will free it on sea_vm_free(). */
-    chunk->next_owned    = vm->module_chunks;
-    vm->module_chunks    = chunk;
-
-    vm->source_name = saved_source;
-
-    /* 10. Update cache with actual result and return: the cache retains;
-     * the module's return value (+1) goes to the caller. */
-    sea_map_set(vm_loaded(vm), key_val, result);
-    sea_obj_release(&key->obj);
     return result;
 }
 

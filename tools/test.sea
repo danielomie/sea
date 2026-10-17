@@ -1,0 +1,261 @@
+-- sea test — run the tests of a project (built into the sea binary)
+--
+--   sea test [flags] [path ...]
+--
+-- Paths are test files or directories, searched for *_test.sea (skipping
+-- hidden directories); the default is the current directory. Each file runs
+-- in its own process, from its own directory, several at a time. A test file
+-- defines tests with require("sea/test") (t.it, t.describe, ...); calling
+-- t.main() at its end is optional.
+--
+--   -v              show the output of every file, not only of those that fail
+--   -run TEXT       only the tests whose full name contains TEXT
+--   -bench TEXT     also run the benchmarks whose name contains TEXT ("." for all)
+--   -benchtime S    seconds per benchmark (default 1)
+--   -j N            files run at the same time (default: the number of CPUs)
+--   -timeout S      seconds a file may take before it is killed (default 600)
+--
+-- The exit status is 1 when a test fails, 0 otherwise.
+
+local function usage()
+    print("usage: sea test [-v] [-run TEXT] [-bench TEXT] [-benchtime S] [-j N] [-timeout S] [path ...]")
+    print("")
+    print("Runs the *_test.sea files under the paths (default: the current directory),")
+    print("each in its own process, and prints a summary.")
+end
+
+-- Inside the child process: load the test file, then run what it defined.
+if os.args[1] == "--exec" then
+    local parser = require("sea/parser")
+    local t = require("sea/test")
+    local file = os.args[2]
+    local src = fs.read(file)
+    if is_error(src) then
+        io.write_err(src.message .. "\n")
+        os.exit(2)
+    end
+    local opts = {}
+    opts.name = os.args[3] or path.basename(file)
+    local bad = parser.check(src, opts)
+    if bad ~= nil then
+        io.write_err(bad.text .. "\n")
+        os.exit(2)
+    end
+    require(string.sub(file, 1, len(file) - 4))
+    -- t.main() / t.run() in the file already ran the tests (and wrote the counts)
+    if not t.has_run() then
+        local res = t.run()
+        os.exit(res.ok and 0 or 1)
+    end
+    os.exit(0)
+end
+
+local verbose = false
+local run = nil
+local bench = nil
+local benchtime = nil
+local jobs = nil
+local timeout = 600
+local paths = []
+
+local function number_arg(i, flag)
+    local v = tonumber(os.args[i] or "")
+    if v == nil or v <= 0 then
+        io.write_err("sea test: " .. flag .. " takes a positive number\n")
+        os.exit(2)
+    end
+    return v
+end
+
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-v" then
+        verbose = true
+    elseif a == "-run" then
+        i = i + 1
+        run = os.args[i]
+        if run == nil then
+            io.write_err("sea test: -run takes a text\n")
+            os.exit(2)
+        end
+    elseif a == "-bench" then
+        i = i + 1
+        bench = os.args[i]
+        if bench == nil then
+            io.write_err("sea test: -bench takes a text (\".\" for all)\n")
+            os.exit(2)
+        end
+    elseif a == "-benchtime" then
+        i = i + 1
+        benchtime = number_arg(i, "-benchtime")
+    elseif a == "-j" then
+        i = i + 1
+        jobs = math.floor(number_arg(i, "-j"))
+    elseif a == "-timeout" then
+        i = i + 1
+        timeout = number_arg(i, "-timeout")
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        io.write_err("sea test: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    else
+        paths[] = a
+    end
+    i = i + 1
+end
+if len(paths) == 0 then paths[] = "." end
+
+-- the test files
+local files = []
+for _, p in paths do
+    if fs.isdir(p) then
+        for _, f in fs.walk(p, {files = true}) do
+            local hidden = false
+            for _, part in path.parts(path.relative(p, f)) do
+                if string.starts_with(part, ".") and part ~= "." and part ~= ".." then hidden = true end
+            end
+            if not hidden and string.ends_with(f, "_test.sea") then files[] = path.normalize(f) end
+        end
+    elseif fs.exists(p) then
+        files[] = p
+    else
+        io.write_err("sea test: " .. p .. ": no such file or directory\n")
+        os.exit(2)
+    end
+end
+if len(files) == 0 then
+    print("no test files")
+    os.exit(0)
+end
+
+if jobs == nil then
+    local r = process.run({"nproc"})
+    jobs = (not is_error(r) and r.ok) and (tonumber(string.trim(r.stdout)) or 4) or 4
+end
+
+local self = fs.realpath("/proc/self/exe")
+local tmp = fs.tempdir("seatest-")
+if is_error(self) or is_error(tmp) then
+    io.write_err("sea test: cannot set up: " .. tostring(is_error(self) and self.message or tmp.message) .. "\n")
+    os.exit(2)
+end
+
+-- Run one file; the result goes to the channel
+local function run_file(idx, file, results)
+    local abs = fs.realpath(file)
+    local result_file = path.join(tmp, tostring(idx))
+    local env = {}
+    env.SEA_TEST_RESULT = result_file
+    env.SEA_TEST = run or false
+    env.SEA_BENCH = bench or false
+    env.SEA_BENCHTIME = benchtime and tostring(benchtime) or false
+    local opts = {}
+    opts.cwd = path.dirname(abs)
+    opts.env = env
+    opts.stderr = "stdout"
+    opts.timeout = math.floor(timeout * 1000)
+    local t0 = time.now()
+    local r = process.run({self, "test", "--exec", abs, file}, opts)
+    local res = {}
+    res.idx = idx
+    res.file = file
+    res.secs = time.since(t0) / time.Second
+    if is_error(r) then
+        res.ok = false
+        res.output = r.message .. "\n"
+    else
+        res.ok = r.ok
+        res.output = r.stdout
+        res.timed_out = r.timed_out
+        if r.signal ~= nil and not r.timed_out then
+            res.output = res.output .. "killed by signal " .. tostring(r.signal) .. "\n"
+        end
+    end
+    local counts = fs.read(result_file)
+    if not is_error(counts) then
+        local c = string.split(counts, " ")
+        res.passed = tonumber(c[0])
+        res.failed = tonumber(c[1])
+        res.skipped = tonumber(c[2])
+        res.todo = tonumber(c[3])
+        res.benches = tonumber(c[4])
+    end
+    results <- res
+end
+
+local results = chan(len(files))
+local slots = chan(jobs)
+local t_start = time.now()
+go (function()
+    for idx, f in files do
+        slots <- true
+        go (function()
+            run_file(idx, f, results)
+            local _ = <-slots
+        end)()
+    end
+end)()
+
+-- Print in the order of the files, as soon as each one (and those before it) is done
+local done = {}
+local next_idx = 0
+local total = {}
+total.passed = 0
+total.failed = 0
+total.skipped = 0
+total.todo = 0
+local failed_files = 0
+
+local function report(res)
+    local counts = ""
+    if res.passed ~= nil then
+        local parts = []
+        parts[] = tostring(res.passed) .. " passed"
+        if res.failed > 0 then parts[] = tostring(res.failed) .. " failed" end
+        if res.skipped > 0 then parts[] = tostring(res.skipped) .. " skipped" end
+        if res.todo > 0 then parts[] = tostring(res.todo) .. " todo" end
+        if res.benches > 0 then parts[] = tostring(res.benches) .. (res.benches == 1 and " benchmark" or " benchmarks") end
+        counts = string.join(parts, ", ")
+        total.passed = total.passed + res.passed
+        total.failed = total.failed + res.failed
+        total.skipped = total.skipped + res.skipped
+        total.todo = total.todo + res.todo
+    end
+    if res.timed_out then counts = "timed out after " .. tostring(timeout) .. " s" end
+    local show = verbose or not res.ok or (bench ~= nil and res.benches ~= nil and res.benches > 0)
+    if show and res.output ~= "" then
+        print("=== " .. res.file)
+        io.write(res.output)
+        if not string.ends_with(res.output, "\n") then print("") end
+    end
+    local mark = res.ok and "ok  " or "FAIL"
+    if not res.ok then failed_files = failed_files + 1 end
+    if counts ~= "" then counts = counts .. " " end
+    print(string.format("%s  %s  %s(%.2f s)", mark, res.file, counts, res.secs))
+end
+
+for _ = 1, len(files) do
+    local res = <-results
+    done[res.idx] = res
+    while done[next_idx] ~= nil do
+        report(done[next_idx])
+        done[next_idx] = nil
+        next_idx = next_idx + 1
+    end
+end
+fs.remove(tmp, {recursive = true})
+
+local parts = []
+parts[] = tostring(total.passed) .. " passed"
+if total.failed > 0 then parts[] = tostring(total.failed) .. " failed" end
+if total.skipped > 0 then parts[] = tostring(total.skipped) .. " skipped" end
+if total.todo > 0 then parts[] = tostring(total.todo) .. " todo" end
+local nfiles = len(files) == 1 and "1 file" or (tostring(len(files)) .. " files")
+if failed_files > 0 then nfiles = nfiles .. ", " .. tostring(failed_files) .. " failed" end
+print("")
+print(string.format("%s; %s (%.2f s)", nfiles, string.join(parts, ", "), time.since(t_start) / time.Second))
+os.exit(failed_files > 0 and 1 or 0)

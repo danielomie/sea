@@ -333,6 +333,7 @@ static void usage(void) {
         "  sea bytecode <file.sea>      Print disassembly\n"
         "  sea fmt [flags] [path...]    Format Sea source (sea fmt -h)\n"
         "  sea doc [flags] [path...]    Documentation from comments (sea doc -h)\n"
+        "  sea test [flags] [path...]   Run the *_test.sea files (sea test -h)\n"
         "  sea version                  Print version\n"
     );
 }

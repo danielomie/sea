@@ -1,7 +1,7 @@
 -- libs/test/test.sea — a test framework for Sea (pure Sea)
 --
 -- Usage:
---   local t = require("../libs/test/test")
+--   local t = require("sea/test")
 --
 --   t.describe("stack", function()
 --       local s = nil
@@ -29,7 +29,7 @@ local function new_suite(name, parent)
     local s = {}
     s.name = name
     s.parent = parent
-    s.items = []             -- tests and suites, in order
+    s.items = [] -- tests and suites, in order
     s.before_each = []
     s.after_each = []
     s.before_all = []
@@ -43,11 +43,11 @@ local current = root
 local has_only = false
 
 local function add_test(name, fn, mode)
-    if type(name) != "string" then panic("test: a test needs a name (string)") end
+    if type(name) ~= "string" then panic("test: a test needs a name (string)") end
     local t = {}
     t.name = name
     t.fn = fn
-    t.mode = mode            -- "run", "skip", "only", "todo"
+    t.mode = mode -- "run", "skip", "only", "todo"
     t.suite = current
     current.items[] = t
     if mode == "only" then has_only = true end
@@ -78,6 +78,22 @@ function T.it(name, fn) add_test(name, fn, "run") end
 function T.skip(name, fn) add_test(name, fn, "skip") end
 function T.only(name, fn) add_test(name, fn, "only") end
 function T.todo(name) add_test(name, nil, "todo") end
+
+local benches = []
+local has_run = false
+
+-- t.bench(name, fn): a benchmark. fn(b) runs the code b.n times (b.n grows
+-- until a run takes about a second); b:reset() restarts the clock after
+-- setup. Benchmarks run only when asked: t.run({bench = text}) or
+-- SEA_BENCH=<text> (those whose full name contains it; "." for all).
+function T.bench(name, fn)
+    if type(name) ~= "string" then panic("test: a benchmark needs a name (string)") end
+    local b = {}
+    b.name = name
+    b.fn = fn
+    b.suite = current
+    benches[] = b
+end
 
 -- hooks for the current group (and the groups inside it)
 function T.before_each(fn) current.before_each[] = fn end
@@ -159,22 +175,22 @@ local function diff(a, b, path, depth)
     if a == b then return nil end
     if depth > 100 then return nil end
     if is_list(a) and is_list(b) then
-        if len(a) != len(b) then
+        if len(a) ~= len(b) then
             return path .. " (length " .. tostring(len(b)) .. " vs " .. tostring(len(a)) .. ")"
         end
         for i = 0, len(a) - 1 do
             local d = diff(a[i], b[i], path .. "[" .. tostring(i) .. "]", depth + 1)
-            if d != nil then return d end
+            if d ~= nil then return d end
         end
         return nil
     end
     if is_record(a) and is_record(b) then
         for k, va in a do
             local d = diff(va, b[k], path .. "." .. show_key(k), depth + 1)
-            if d != nil then return d end
+            if d ~= nil then return d end
         end
         for k, vb in b do
-            if a[k] == nil and vb != nil then return path .. "." .. show_key(k) end
+            if a[k] == nil and vb ~= nil then return path .. "." .. show_key(k) end
         end
         return nil
     end
@@ -195,7 +211,7 @@ end
 local function failure(msg, user)
     local f = {}
     f.__test_failure = true
-    f.message = user != nil and (tostring(user) .. ": " .. msg) or msg
+    f.message = user ~= nil and (tostring(user) .. ": " .. msg) or msg
     panic(f)
 end
 
@@ -209,7 +225,7 @@ function T.eq(got, want, msg)
     local d = diff(want, got, "", 0)
     if d == nil then return got end
     local where = ""
-    if d != "" then
+    if d ~= "" then
         local p = d
         if string.starts_with(p, ".") then p = string.sub(p, 2) end
         where = "\n    at " .. p
@@ -236,7 +252,7 @@ function T.no(v, msg)
 end
 
 function T.is_nil(v, msg)
-    if v != nil then failure("expected nil, got " .. show(v), msg) end
+    if v ~= nil then failure("expected nil, got " .. show(v), msg) end
 end
 
 function T.not_nil(v, msg)
@@ -246,7 +262,7 @@ end
 
 -- t.near(got, want [, eps [, msg]]): |got - want| <= eps (default 1e-9 relative)
 function T.near(got, want, eps, msg)
-    if type(got) != "int" and type(got) != "number" then failure("expected a number, got " .. show(got), msg) end
+    if type(got) ~= "int" and type(got) ~= "number" then failure("expected a number, got " .. show(got), msg) end
     local tol = eps
     if tol == nil then tol = 1e-9 * math.max(1, math.abs(want)) end
     if math.abs(got - want) > tol then
@@ -257,10 +273,15 @@ end
 
 local function compare(op, got, bound, msg)
     local good = false
-    if op == ">" then good = got > bound
-    elseif op == ">=" then good = got >= bound
-    elseif op == "<" then good = got < bound
-    else good = got <= bound end
+    if op == ">" then
+        good = got > bound
+    elseif op == ">=" then
+        good = got >= bound
+    elseif op == "<" then
+        good = got < bound
+    else
+        good = got <= bound
+    end
     if not good then failure("expected a value " .. op .. " " .. show(bound) .. ", got " .. show(got), msg) end
     return got
 end
@@ -288,7 +309,7 @@ end
 
 -- t.matches(s, pattern [, msg]): s matches the regular expression (module re)
 function T.matches(s, pattern, msg)
-    if type(s) != "string" or not re.test(pattern, s) then
+    if type(s) ~= "string" or not re.test(pattern, s) then
         failure(show(s) .. " does not match /" .. pattern .. "/", msg)
     end
     return s
@@ -297,7 +318,7 @@ end
 -- t.is_error(v [, text [, msg]]): v is an error value (whose message contains text)
 function T.is_error(v, text, msg)
     if not is_error(v) then failure("expected an error value, got " .. show(v), msg) end
-    if text != nil and not string.contains(v.message, text) then
+    if text ~= nil and not string.contains(v.message, text) then
         failure("error message " .. show(v.message) .. " does not contain " .. show(text), msg)
     end
     return v
@@ -316,7 +337,7 @@ local function catch(fn)
     local function run()
         defer function()
             local p = recover()
-            if p != nil then
+            if p ~= nil then
                 caught = p
                 panicked = true
             end
@@ -338,7 +359,7 @@ function T.raises(fn, text, msg)
     local panicked, p = catch(fn)
     if not panicked then failure("expected a panic", msg) end
     local m = panic_text(p)
-    if text != nil and not string.contains(m, text) then
+    if text ~= nil and not string.contains(m, text) then
         failure("panic message " .. show(m) .. " does not contain " .. show(text), msg)
     end
     return m
@@ -350,7 +371,7 @@ local function full_name(t)
     local parts = []
     parts[] = t.name
     local s = t.suite
-    while s != nil and s.parent != nil do
+    while s ~= nil and s.parent ~= nil do
         parts[] = s.name
         s = s.parent
     end
@@ -361,17 +382,17 @@ end
 
 local function suite_chain(s)
     local chain = []
-    while s != nil do
+    while s ~= nil do
         chain[] = s
         s = s.parent
     end
     local out = []
-    for i = len(chain) - 1, 0, -1 do out[] = chain[i] end   -- outermost first
+    for i = len(chain) - 1, 0, -1 do out[] = chain[i] end -- outermost first
     return out
 end
 
 local function suite_skipped(s)
-    while s != nil do
+    while s ~= nil do
         if s.skip then return true end
         s = s.parent
     end
@@ -393,15 +414,40 @@ local function attempt(fn)
     return r
 end
 
+-- Run one benchmark → ns per op, or nil and the problem
+local function run_bench(item, budget)
+    local b = {}
+    b.n = 1
+    local start = time.now()
+    b.reset = function(self) start = time.now() end
+    local elapsed = 0
+    while true do
+        start = time.now()
+        local r = attempt(function() item.fn(b) end)
+        if r ~= nil then return nil, r end
+        elapsed = time.since(start)
+        if elapsed >= budget or b.n >= 1000000000 then break end
+        local grow = b.n * 100
+        if elapsed > 0 then grow = math.floor(b.n * budget * 1.2 / elapsed) end
+        if grow > b.n * 100 then grow = b.n * 100 end
+        if grow <= b.n then grow = b.n + 1 end
+        b.n = grow
+    end
+    return elapsed / b.n, nil, b.n
+end
+
 local function selected(t, filter)
-    if has_only and t.mode != "only" then return false end
-    if filter != nil and filter != "" and not string.contains(full_name(t), filter) then return false end
+    if has_only and t.mode ~= "only" then return false end
+    if filter ~= nil and filter ~= "" and not string.contains(full_name(t), filter) then return false end
     return true
 end
 
 -- t.run([opts]) → {passed, failed, skipped, todo, total, ok, failures}
 -- opts: filter (text in the full test name; default $SEA_TEST), format
--- ("pretty", "tap", "quiet"), timing (true: show each test's time)
+-- ("pretty", "tap", "quiet"), timing (true: show each test's time), bench
+-- (run the benchmarks whose name contains it, "." for all; default
+-- $SEA_BENCH), benchtime (seconds per benchmark, default $SEA_BENCHTIME or 1).
+-- res.benches: {name, n, ns_per_op} for each benchmark run.
 function T.run(opts)
     opts = opts or {}
     local format = opts.format or "pretty"
@@ -419,14 +465,17 @@ function T.run(opts)
     local t_start = time.now()
 
     local function say(line)
-        if format != "quiet" then print(line) end
+        if format ~= "quiet" then print(line) end
     end
 
     local function count_selected(s)
         local c = 0
         for _, item in s.items do
-            if item.items != nil then c = c + count_selected(item)
-            elseif selected(item, filter) then c = c + 1 end
+            if item.items ~= nil then
+                c = c + count_selected(item)
+            elseif selected(item, filter) then
+                c = c + 1
+            end
         end
         return c
     end
@@ -440,18 +489,18 @@ function T.run(opts)
     local function run_hooks(list)
         for _, h in list do
             local r = attempt(h)
-            if r != nil then return r end
+            if r ~= nil then return r end
         end
         return nil
     end
 
     local function run_suite(s, indent)
         if count_selected(s) == 0 then return end
-        if s.parent != nil and format == "pretty" then say(indent .. s.name) end
-        local inner = s.parent != nil and (indent .. "  ") or indent
+        if s.parent ~= nil and format == "pretty" then say(indent .. s.name) end
+        local inner = s.parent ~= nil and (indent .. "  ") or indent
         local setup_err = run_hooks(s.before_all)
         for _, item in s.items do
-            if item.items != nil then
+            if item.items ~= nil then
                 if setup_err == nil then run_suite(item, inner) end
             elseif selected(item, filter) then
                 n = n + 1
@@ -462,7 +511,7 @@ function T.run(opts)
                     status = "todo"
                 elseif item.mode == "skip" or suite_skipped(item.suite) then
                     status = "skip"
-                elseif setup_err != nil then
+                elseif setup_err ~= nil then
                     status = setup_err.kind
                     problem = "before_all: " .. setup_err.message
                 else
@@ -470,7 +519,7 @@ function T.run(opts)
                     for _, cs in chain do
                         if problem == nil then
                             local r = run_hooks(cs.before_each)
-                            if r != nil then
+                            if r ~= nil then
                                 status = r.kind
                                 problem = "before_each: " .. r.message
                             end
@@ -478,14 +527,14 @@ function T.run(opts)
                     end
                     if problem == nil then
                         local r = attempt(item.fn)
-                        if r != nil then
+                        if r ~= nil then
                             status = r.kind
                             problem = r.message
                         end
                     end
                     for i = len(chain) - 1, 0, -1 do
                         local r = run_hooks(chain[i].after_each)
-                        if r != nil and problem == nil then
+                        if r ~= nil and problem == nil then
                             status = r.kind
                             problem = "after_each: " .. r.message
                         end
@@ -493,9 +542,12 @@ function T.run(opts)
                 end
                 local ms = time.since(t0) / time.Millisecond
                 local name = full_name(item)
-                if status == "pass" then res.passed = res.passed + 1
-                elseif status == "skip" then res.skipped = res.skipped + 1
-                elseif status == "todo" then res.todo = res.todo + 1
+                if status == "pass" then
+                    res.passed = res.passed + 1
+                elseif status == "skip" then
+                    res.skipped = res.skipped + 1
+                elseif status == "todo" then
+                    res.todo = res.todo + 1
                 else
                     res.failed = res.failed + 1
                     local f = {}
@@ -518,17 +570,17 @@ function T.run(opts)
                     if status == "skip" then line = line .. " # SKIP" end
                     if status == "todo" then line = line .. " # TODO" end
                     say(line)
-                    if problem != nil then
+                    if problem ~= nil then
                         for _, l in string.split(problem, "\n") do say("  # " .. l) end
                     end
                 end
             end
         end
         local teardown = run_hooks(s.after_all)
-        if teardown != nil then
+        if teardown ~= nil then
             res.failed = res.failed + 1
             local f = {}
-            f.name = (s.parent != nil and s.name or "(top)") .. " > after_all"
+            f.name = (s.parent ~= nil and s.name or "(top)") .. " > after_all"
             f.kind = teardown.kind
             f.message = teardown.message
             res.failures[] = f
@@ -536,8 +588,52 @@ function T.run(opts)
     end
 
     run_suite(root, "")
+
+    res.benches = []
+    local bench = opts.bench or os.getenv("SEA_BENCH")
+    if bench ~= nil and bench ~= "" then
+        local budget = (opts.benchtime or tonumber(os.getenv("SEA_BENCHTIME") or "") or 1) * time.Second
+        local width = 0
+        for _, b in benches do
+            if len(full_name(b)) > width then width = len(full_name(b)) end
+        end
+        if format == "pretty" and len(benches) > 0 then say("") end
+        for _, b in benches do
+            local name = full_name(b)
+            if bench == "." or string.contains(name, bench) then
+                local ns, problem, n = run_bench(b, budget)
+                if ns == nil then
+                    res.failed = res.failed + 1
+                    local f = {}
+                    f.name = name
+                    f.kind = problem.kind
+                    f.message = problem.message
+                    res.failures[] = f
+                    if format == "pretty" then say("✗ " .. name .. " (benchmark)") end
+                else
+                    local r = {}
+                    r.name = name
+                    r.n = n
+                    r.ns_per_op = ns
+                    res.benches[] = r
+                    if format == "pretty" then
+                        say(string.format("%-" .. tostring(width) .. "s  %10d  %14.1f ns/op", name, n, ns))
+                    elseif format == "tap" then
+                        say(string.format("# bench %s %d %.1f ns/op", name, n, ns))
+                    end
+                end
+            end
+        end
+    end
+
     res.total = res.passed + res.failed + res.skipped + res.todo
     res.ok = res.failed == 0
+    has_run = true
+    -- for `sea test`: the counts of this file
+    local counts_file = os.getenv("SEA_TEST_RESULT")
+    if counts_file ~= nil then
+        fs.write(counts_file, string.format("%d %d %d %d %d", res.passed, res.failed, res.skipped, res.todo, len(res.benches)))
+    end
     if format == "pretty" then
         for i = 0, len(res.failures) - 1 do
             local f = res.failures[i]
@@ -564,11 +660,16 @@ function T.main(opts)
     os.exit(res.ok and 0 or 1)
 end
 
+-- t.has_run() → whether t.run (or t.main) ran since the tests were defined
+function T.has_run() return has_run end
+
 -- t.reset(): forget every test defined so far (for running several files)
 function T.reset()
     root = new_suite("", nil)
     current = root
+    benches = []
     has_only = false
+    has_run = false
 end
 
 return T
