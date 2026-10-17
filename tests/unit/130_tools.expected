@@ -1,0 +1,62 @@
+-- sea fmt
+[2] a.sea | sub/bad.sea:1:7: expected variable name
+[1] a.sea
+[0] local x = 1
+if x then print(x) end
+[0] local t = {a = 1}
+[0] a.sea	true
+[0] 
+[2] usage: sea fmt [-l | -d | -p | --check] [--indent N] [path ...]
+
+Formats Sea source in the canonical layout. Without flags, files are
+rewritten in place and the changed ones listed; without paths, stdin
+is formatted to stdout. | sea fmt: unknown flag --bogus
+-- sea doc
+[0] MYLIB  (mylib.sea)
+
+    mylib — a small library
+
+    Usage:
+      local m = require("mylib")
+
+FUNCTIONS
+
+  mylib.add(a, b)
+      m.add(a, b) → the sum
+
+  mylib.join(...)
+      m.join(...) → the values joined with ", "
+
+  mylib.VERSION
+      a constant
+
+BOX
+
+  Box:size()
+      the size of a box
+[0] MYLIB  (mylib.sea)
+
+FUNCTIONS
+
+  mylib.add(a, b)
+      m.add(a, b) → the sum
+[0] MYLIB  (mylib.sea)
+
+FUNCTIONS
+
+  helper(x)   (local)
+[0] # mylib
+
+`mylib.sea`
+
+## Functions
+
+### `mylib.join(...)`
+
+m.join(...) → the values joined with ", "
+[0] [{"name": "mylib", "file": "mylib.sea", "doc": "", "entries": [{"name": "Box:size", "kind": "method", "params": "", "line": 20, "doc": "the size of a box"}]}]
+[1] sea doc: nothing named nothing
+[0] 	true
+[0] RE  (built in)
+
+    Built-in module 

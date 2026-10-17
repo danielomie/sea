@@ -1,0 +1,611 @@
+-- sea doc — documentation from Sea source comments (built into the sea binary)
+--
+--   sea doc [flags] [path ...] [name]
+--
+-- Reads .sea files (directories are searched, skipping hidden ones; default
+-- the current directory) and prints the documentation of each module: the
+-- comment at the top of the file, then each function with the comment
+-- right above it. A name shows only the matching functions; the name of a
+-- built-in module (fs, string, re, ...) lists its functions.
+--
+--   -f, --format F   text (default), markdown, html or json
+--   -o FILE          write to FILE instead of stdout
+--   --all            include local (private) functions
+
+local parser = require("sea/parser")
+
+local BUILTINS = {
+    "math", "string", "utf8", "re", "encoding", "hash", "io", "os", "fs", "path",
+    "process", "sync", "time", "net", "gc", "sort", "bigint", "sea/parser",
+}
+
+local function usage()
+    print("usage: sea doc [-f text|markdown|html|json] [-o file] [--all] [path ...] [name]")
+    print("")
+    print("Prints the documentation in the comments of Sea source files: the comment")
+    print("at the top of a file, and the comment right above each function.")
+end
+
+local format = "text"
+local outfile = nil
+local show_all = false
+local args = []
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-f" or a == "--format" then
+        i = i + 1
+        format = os.args[i] or ""
+    elseif a == "-o" then
+        i = i + 1
+        outfile = os.args[i]
+    elseif a == "--all" then
+        show_all = true
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        print("sea doc: unknown flag " .. a)
+        usage()
+        os.exit(2)
+    else
+        args[] = a
+    end
+    i = i + 1
+end
+if format ~= "text" and format ~= "markdown" and format ~= "md" and format ~= "html" and format ~= "json" then
+    print("sea doc: unknown format " .. format .. " (text, markdown, html, json)")
+    os.exit(2)
+end
+if format == "md" then format = "markdown" end
+
+-- ---- output buffer ------------------------------------------------------------------
+
+local out = []
+local function emit(s)
+    out[] = s
+end
+
+-- ---- comments → text --------------------------------------------------------------------
+
+-- The text of one comment: without "--" (or the long brackets), dedented.
+local function comment_text(raw)
+    local m = re.match("^--\\[(=*)\\[", raw)
+    if m ~= nil then
+        local level = len(m.groups[1])
+        local body = string.sub(raw, len(m.text) + 1, len(raw) - 2 - level)
+        if string.starts_with(body, "\n") then body = string.sub(body, 2) end
+        local lines = string.split(body, "\n")
+        -- the smallest indentation of the non-blank lines
+        local strip = nil
+        for _, l in lines do
+            if string.trim(l) ~= "" then
+                local ind = len(re.match("^[ \\t]*", l).text)
+                if strip == nil or ind < strip then strip = ind end
+            end
+        end
+        local res = []
+        for _, l in lines do res[] = string.sub(l, (strip or 0) + 1) end
+        return string.trim(string.join(res, "\n"))
+    end
+    local t = re.gsub("^-+", raw, "")
+    if string.starts_with(t, " ") then t = string.sub(t, 2) end
+    return re.gsub("\\s+$", t, "")
+end
+
+local function count_lines(s)
+    return len(re.findall("\n", s))
+end
+
+-- ---- reading a file ---------------------------------------------------------------------
+
+local function func_params(f, drop_self)
+    local names = []
+    for idx, p in f.params do
+        if not (drop_self and idx == 0 and p.name == "self") then
+            names[] = p.is_vararg and "..." or p.name
+        end
+    end
+    return string.join(names, ", ")
+end
+
+-- A dotted name from a field/ident chain (a.b.c), or nil.
+local function chain(node)
+    if node.type == "ident" then return node.name end
+    if node.type == "field" then
+        local base = chain(node.object)
+        if base == nil then return nil end
+        return base .. "." .. node.field
+    end
+    return nil
+end
+
+local function new_entry(name, kind, params, doc, line)
+    local e = {}
+    e.name = name
+    e.kind = kind
+    e.params = params
+    e.doc = doc
+    e.line = line
+    return e
+end
+
+local function read_module(file)
+    local src = fs.read(file)
+    if is_error(src) then return src end
+    local ast = parser.parse(src, {name = file, comments = true})
+    if is_error(ast) then return ast end
+
+    -- comments by the line they end on (not those after code)
+    local by_end = [=]
+    for _, c in ast.comments do
+        if not c.inline then by_end[c.line + count_lines(c.text)] = c end
+    end
+    local function doc_above(line)
+        local parts = []
+        local l = line - 1
+        while by_end[l] ~= nil do
+            local c = by_end[l]
+            parts[] = comment_text(c.text)
+            l = c.line - 1
+        end
+        local res = []
+        for k = len(parts) - 1, 0, -1 do res[] = parts[k] end
+        return string.trim(string.join(res, "\n"))
+    end
+
+    local mod = {}
+    mod.file = file
+    mod.name = path.stem(file)
+    mod.doc = ""
+    mod.entries = []
+    local stmts = ast.stmts
+    local table_name = nil
+    for _, s in stmts do
+        if s.type == "return" and len(s.values) == 1 and s.values[0].type == "ident" then
+            table_name = s.values[0].name
+        end
+    end
+
+    -- the module comment: the comment block at the top, unless it sits right
+    -- on the first statement
+    local first_line = len(stmts) > 0 and stmts[0].line or 1000000000
+    local top = []
+    local last_end = 0
+    for _, c in ast.comments do
+        if c.inline or c.line >= first_line then break end
+        if string.starts_with(c.text, "#!") then
+            -- a shebang line
+        else
+            if last_end > 0 and c.line > last_end + 1 then break end
+            top[] = c
+            last_end = c.line + count_lines(c.text)
+        end
+    end
+    if len(top) > 0 and last_end < first_line - 1 then
+        local parts = []
+        for _, c in top do parts[] = comment_text(c.text) end
+        mod.doc = string.trim(string.join(parts, "\n"))
+    end
+
+    local function display(owner, field)
+        if owner == table_name then return mod.name .. "." .. field end
+        return owner .. "." .. field
+    end
+
+    for _, s in stmts do
+        if s.type == "assign" and len(s.targets) == 1 and len(s.values) == 1 then
+            local t = s.targets[0]
+            local v = s.values[0]
+            local name = chain(t)
+            if name ~= nil then
+                local doc = doc_above(s.line)
+                if v.type == "func" then
+                    local is_method = v.is_method or (len(v.params) > 0 and v.params[0].name == "self")
+                    local shown
+                    if t.type == "field" then
+                        local owner = chain(t.object)
+                        shown = display(owner, t.field)
+                        if is_method then
+                            shown = (owner == table_name and mod.name or owner) .. ":" .. t.field
+                        end
+                    else
+                        shown = name
+                    end
+                    local kind = t.type == "ident" and "global" or (is_method and "method" or "function")
+                    mod.entries[] = new_entry(shown, kind, func_params(v, is_method), doc, s.line)
+                elseif t.type == "field" and doc ~= "" then
+                    mod.entries[] = new_entry(display(chain(t.object), t.field), "field", nil, doc, s.line)
+                end
+            end
+        elseif s.type == "local" and show_all and len(s.values) >= 1 and s.values[0].type == "func" then
+            mod.entries[] = new_entry(s.names[0], "local", func_params(s.values[0], false), doc_above(s.line), s.line)
+        end
+    end
+    return mod
+end
+
+-- ---- built-in modules -------------------------------------------------------------------
+
+local function builtin_module(name)
+    local m = require(name)
+    local mod = {}
+    mod.file = "built in"
+    mod.name = name
+    mod.doc = "Built-in module " .. name .. ". The full reference is docs/reference.md in the Sea repository."
+    mod.entries = []
+    local keys = []
+    for k, _ in m do keys[] = k end
+    sort.sort(keys)
+    for _, k in keys do
+        local v = m[k]
+        local kind = type(v) == "function" and "function" or "field"
+        local shown = string.replace(name, "sea/", "") .. "." .. k
+        mod.entries[] = new_entry(shown, kind, kind == "function" and "..." or nil, "", 0)
+    end
+    return mod
+end
+
+-- ---- doc text → blocks (paragraphs and code) ------------------------------------------
+
+-- Lines indented by two or more spaces form code blocks; the rest are
+-- paragraphs (split at blank lines).
+local function blocks(doc)
+    local res = []
+    local cur = nil
+    for _, line in string.split(doc, "\n") do
+        local kind = nil
+        if string.trim(line) == "" then
+            kind = "blank"
+        elseif string.starts_with(line, "  ") or string.starts_with(line, "\t") then
+            kind = "code"
+        else
+            kind = "p"
+        end
+        if kind == "blank" then
+            if cur ~= nil and cur.kind == "code" then cur.lines[] = "" else cur = nil end
+        else
+            if cur == nil or cur.kind ~= kind then
+                cur = {}
+                cur.kind = kind
+                cur.lines = []
+                res[] = cur
+            end
+            cur.lines[] = line
+        end
+    end
+    for _, b in res do
+        -- no blank lines at the end of a code block
+        while b.kind == "code" and len(b.lines) > 0 and b.lines[len(b.lines) - 1] == "" do
+            local keep = []
+            for k = 0, len(b.lines) - 2 do keep[] = b.lines[k] end
+            b.lines = keep
+        end
+        if b.kind == "code" then
+            local strip = nil
+            for _, l in b.lines do
+                if l ~= "" then
+                    local ind = len(re.match("^[ \\t]*", l).text)
+                    if strip == nil or ind < strip then strip = ind end
+                end
+            end
+            local d = []
+            for _, l in b.lines do d[] = string.sub(l, (strip or 0) + 1) end
+            b.lines = d
+        end
+    end
+    return res
+end
+
+local function signature(e)
+    if e.params == nil then return e.name end
+    return e.name .. "(" .. e.params .. ")"
+end
+
+local function sections(mod)
+    local fns = []
+    local groups = [=]
+    local order = []
+    for _, e in mod.entries do
+        local owner = re.match("^([^.:]+)[.:]", e.name)
+        local gname = owner ~= nil and owner.groups[1] or nil
+        if e.kind == "global" or e.kind == "local" or gname == nil or gname == mod.name then
+            fns[] = e
+        else
+            if groups[gname] == nil then
+                groups[gname] = []
+                order[] = gname
+            end
+            groups[gname][] = e
+        end
+    end
+    return fns, groups, order
+end
+
+-- ---- text -------------------------------------------------------------------------------
+
+local function indent_text(s, pad)
+    local res = []
+    for _, l in string.split(s, "\n") do res[] = l == "" and "" or pad .. l end
+    return string.join(res, "\n")
+end
+
+local function text_entries(list)
+    for _, e in list do
+        emit("  " .. signature(e) .. (e.kind == "local" and "   (local)" or ""))
+        if e.doc ~= "" then emit(indent_text(e.doc, "      ")) end
+        emit("")
+    end
+end
+
+local function render_text(mods)
+    for idx, mod in mods do
+        if idx > 0 then emit("") end
+        emit(string.upper(mod.name) .. "  (" .. mod.file .. ")")
+        emit("")
+        if mod.doc ~= "" then
+            emit(indent_text(mod.doc, "    "))
+            emit("")
+        end
+        local fns, groups, order = sections(mod)
+        if len(fns) > 0 then
+            emit("FUNCTIONS")
+            emit("")
+            text_entries(fns)
+        end
+        for _, g in order do
+            emit(string.upper(g))
+            emit("")
+            text_entries(groups[g])
+        end
+    end
+end
+
+-- ---- markdown -----------------------------------------------------------------------------
+
+local function md_doc(doc)
+    for _, b in blocks(doc) do
+        if b.kind == "code" then
+            emit("```sea")
+            for _, l in b.lines do emit(l) end
+            emit("```")
+        else
+            emit(string.join(b.lines, "\n"))
+        end
+        emit("")
+    end
+end
+
+local function md_entries(list)
+    for _, e in list do
+        emit("### `" .. signature(e) .. "`" .. (e.kind == "local" and " (local)" or ""))
+        emit("")
+        if e.doc ~= "" then md_doc(e.doc) end
+    end
+end
+
+local function render_markdown(mods)
+    for _, mod in mods do
+        emit("# " .. mod.name)
+        emit("")
+        emit("`" .. mod.file .. "`")
+        emit("")
+        if mod.doc ~= "" then md_doc(mod.doc) end
+        local fns, groups, order = sections(mod)
+        if len(fns) > 0 then
+            emit("## Functions")
+            emit("")
+            md_entries(fns)
+        end
+        for _, g in order do
+            emit("## " .. g)
+            emit("")
+            md_entries(groups[g])
+        end
+    end
+end
+
+-- ---- html -----------------------------------------------------------------------------------
+
+local function esc(s)
+    s = string.replace(s, "&", "&amp;")
+    s = string.replace(s, "<", "&lt;")
+    s = string.replace(s, ">", "&gt;")
+    return string.replace(s, "\"", "&quot;")
+end
+
+local function anchor(s)
+    return re.gsub("[^A-Za-z0-9_.-]", s, "-")
+end
+
+local function html_doc(doc)
+    for _, b in blocks(doc) do
+        if b.kind == "code" then
+            emit("<pre><code>" .. esc(string.join(b.lines, "\n")) .. "</code></pre>")
+        else
+            emit("<p>" .. esc(string.join(b.lines, "\n")) .. "</p>")
+        end
+    end
+end
+
+local function html_entries(mod, list)
+    for _, e in list do
+        local id = anchor(mod.name .. "--" .. e.name)
+        emit("<section class=\"entry\" id=\"" .. id .. "\">")
+        emit("<h3><a href=\"#" .. id .. "\"><code>" .. esc(signature(e)) .. "</code></a>" ..
+            (e.kind == "local" and " <span class=\"tag\">local</span>" or "") .. "</h3>")
+        if e.doc ~= "" then html_doc(e.doc) end
+        emit("</section>")
+    end
+end
+
+local function render_html(mods)
+    emit("<!doctype html>")
+    emit("<html lang=\"en\"><head><meta charset=\"utf-8\">")
+    emit("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+    local title = len(mods) == 1 and mods[0].name or "Sea documentation"
+    emit("<title>" .. esc(title) .. "</title>")
+    emit("<style>")
+    emit(":root{--bg:#fff;--fg:#1d2330;--muted:#5d6675;--line:#e3e6eb;--code:#f4f6f8;--link:#1f5fbf}")
+    emit("@media (prefers-color-scheme: dark){:root{--bg:#14171c;--fg:#e4e7ec;--muted:#9aa3af;--line:#2a2f37;--code:#1d2128;--link:#7fb0ff}}")
+    emit("body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,sans-serif;display:flex}")
+    emit("nav{width:240px;flex:none;border-right:1px solid var(--line);padding:16px;height:100vh;position:sticky;top:0;overflow:auto;box-sizing:border-box}")
+    emit("nav a{display:block;color:var(--fg);text-decoration:none;padding:2px 0;font-size:14px}nav a.sub{padding-left:12px;color:var(--muted)}")
+    emit("main{flex:1;min-width:0;max-width:860px;padding:24px 32px}h1{margin-top:0}h2{border-bottom:1px solid var(--line);padding-bottom:4px;margin-top:32px}")
+    emit("h3{font-size:16px;margin:22px 0 6px}h3 a{color:var(--link);text-decoration:none}code,pre{font-family:ui-monospace,monospace;font-size:13.5px}")
+    emit("pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto}p{white-space:pre-line;margin:6px 0}.file{color:var(--muted)}")
+    emit(".tag{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px}")
+    emit("@media (max-width:700px){body{display:block}nav{width:auto;height:auto;position:static;border-right:0;border-bottom:1px solid var(--line)}main{padding:16px}}")
+    emit("</style></head><body>")
+    emit("<nav>")
+    for _, mod in mods do
+        emit("<a href=\"#" .. anchor(mod.name) .. "\"><strong>" .. esc(mod.name) .. "</strong></a>")
+        for _, e in mod.entries do
+            emit("<a class=\"sub\" href=\"#" .. anchor(mod.name .. "--" .. e.name) .. "\">" .. esc(e.name) .. "</a>")
+        end
+    end
+    emit("</nav><main>")
+    for _, mod in mods do
+        emit("<h1 id=\"" .. anchor(mod.name) .. "\">" .. esc(mod.name) .. "</h1>")
+        emit("<div class=\"file\">" .. esc(mod.file) .. "</div>")
+        if mod.doc ~= "" then html_doc(mod.doc) end
+        local fns, groups, order = sections(mod)
+        if len(fns) > 0 then
+            emit("<h2>Functions</h2>")
+            html_entries(mod, fns)
+        end
+        for _, g in order do
+            emit("<h2>" .. esc(g) .. "</h2>")
+            html_entries(mod, groups[g])
+        end
+    end
+    emit("</main></body></html>")
+end
+
+-- ---- json -------------------------------------------------------------------------------------
+
+local function jstr(s)
+    if s == nil then return "null" end
+    s = string.replace(s, "\\", "\\\\")
+    s = string.replace(s, "\"", "\\\"")
+    s = string.replace(s, "\n", "\\n")
+    s = string.replace(s, "\t", "\\t")
+    s = string.replace(s, "\r", "\\r")
+    return "\"" .. s .. "\""
+end
+
+local function render_json(mods)
+    local ms = []
+    for _, mod in mods do
+        local es = []
+        for _, e in mod.entries do
+            es[] = "{\"name\": " .. jstr(e.name) .. ", \"kind\": " .. jstr(e.kind) .. ", \"params\": " ..
+                jstr(e.params) .. ", \"line\": " .. tostring(e.line) .. ", \"doc\": " .. jstr(e.doc) .. "}"
+        end
+        ms[] = "{\"name\": " .. jstr(mod.name) .. ", \"file\": " .. jstr(mod.file) .. ", \"doc\": " .. jstr(mod.doc) ..
+            ", \"entries\": [" .. string.join(es, ", ") .. "]}"
+    end
+    emit("[" .. string.join(ms, ",\n ") .. "]")
+end
+
+-- ---- main -----------------------------------------------------------------------------------
+
+local paths = []
+local filter = nil
+local builtin = nil
+for _, a in args do
+    if fs.exists(a) then
+        paths[] = a
+    else
+        local is_builtin = false
+        for _, b in BUILTINS do
+            if b == a then is_builtin = true end
+        end
+        if is_builtin then
+            builtin = a
+        elseif filter == nil then
+            filter = a
+        else
+            print("sea doc: " .. a .. ": no such file, directory or built-in module")
+            os.exit(2)
+        end
+    end
+end
+
+local mods = []
+if builtin ~= nil then
+    mods[] = builtin_module(builtin)
+else
+    if len(paths) == 0 then paths[] = "." end
+    local files = []
+    for _, p in paths do
+        if fs.isdir(p) then
+            for _, f in fs.walk(p, {files = true}) do
+                local hidden = false
+                for _, part in path.parts(path.relative(p, f)) do
+                    if string.starts_with(part, ".") and part ~= "." and part ~= ".." then hidden = true end
+                end
+                if not hidden and path.ext(f) == ".sea" then files[] = path.normalize(f) end
+            end
+        else
+            files[] = p
+        end
+    end
+    for _, f in files do
+        local m = read_module(f)
+        if is_error(m) then
+            io.write_err("sea doc: " .. m.message .. "\n")
+        elseif len(m.entries) > 0 or m.doc ~= "" then
+            mods[] = m
+        end
+    end
+end
+
+-- only the entries matching a name
+if filter ~= nil then
+    local kept = []
+    for _, mod in mods do
+        local es = []
+        for _, e in mod.entries do
+            if e.name == filter or string.ends_with(e.name, "." .. filter) or string.ends_with(e.name, ":" .. filter) then
+                es[] = e
+            end
+        end
+        if len(es) > 0 then
+            mod.entries = es
+            mod.doc = ""
+            kept[] = mod
+        end
+    end
+    mods = kept
+    if len(mods) == 0 then
+        print("sea doc: nothing named " .. filter)
+        os.exit(1)
+    end
+end
+
+if len(mods) == 0 then
+    print("sea doc: no documented Sea code found")
+    os.exit(1)
+end
+
+if format == "markdown" then
+    render_markdown(mods)
+elseif format == "html" then
+    render_html(mods)
+elseif format == "json" then
+    render_json(mods)
+else
+    render_text(mods)
+end
+
+local text = string.join(out, "\n") .. "\n"
+if outfile ~= nil then
+    local w = fs.write(outfile, text)
+    if is_error(w) then
+        print("sea doc: " .. w.message)
+        os.exit(2)
+    end
+else
+    io.write(text)
+end

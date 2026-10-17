@@ -10,6 +10,8 @@ make debug            # Debug build (-g -O0 -DSEA_DEBUG)
 make asan             # AddressSanitizer build
 make clean            # Remove bin/ and obj/
 make sea-jit          # Build bin/sea-jit (optional JIT, needs libgccjit headers)
+bin/sea fmt -l .      # sea fmt / sea doc: Sea scripts in tools/, embedded at build
+                      # time (tools/embed.sh -> gen/sea_tools.h, included by sea_main.c)
 
 # Native libraries under libs/ (e.g. json, yaml, toml, csv, compress, xml, console, http, ssl, jwt, tensor, duckdb)
 make -C libs/json     # Build a library's .so

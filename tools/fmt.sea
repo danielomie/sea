@@ -1,0 +1,152 @@
+-- sea fmt — format Sea source code (built into the sea binary)
+--
+--   sea fmt [flags] [path ...]
+--
+-- Paths are files or directories (searched for *.sea, skipping hidden
+-- directories). Without paths, stdin is formatted to stdout.
+--
+--   (default)    rewrite the files that change and print their names
+--   -l           list the files whose formatting differs; change nothing
+--   -d           print a diff for each file that would change
+--   --check      like -l, and exit with status 1 if any file would change
+--   -p           print the formatted code to stdout instead of writing files
+--   --indent N   spaces per level (default 4)
+--
+-- A file with a syntax error is reported (file:line:col: message) and left
+-- alone; the exit status is then 2.
+
+local parser = require("sea/parser")
+
+local function usage()
+    print("usage: sea fmt [-l | -d | -p | --check] [--indent N] [path ...]")
+    print("")
+    print("Formats Sea source in the canonical layout. Without flags, files are")
+    print("rewritten in place and the changed ones listed; without paths, stdin")
+    print("is formatted to stdout.")
+end
+
+local mode = "write"
+local indent = 4
+local paths = []
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-l" then
+        mode = "list"
+    elseif a == "-d" then
+        mode = "diff"
+    elseif a == "-p" then
+        mode = "print"
+    elseif a == "--check" then
+        mode = "check"
+    elseif a == "--indent" then
+        i = i + 1
+        indent = tonumber(os.args[i] or "")
+        if indent == nil or indent < 1 or indent > 16 then
+            io.write_err("sea fmt: --indent takes a number from 1 to 16" .. "\n")
+            os.exit(2)
+        end
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") and a ~= "-" then
+        io.write_err("sea fmt: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    else
+        paths[] = a
+    end
+    i = i + 1
+end
+
+local opts = {}
+opts.indent = indent
+
+-- stdin → stdout
+if len(paths) == 0 or (len(paths) == 1 and paths[0] == "-") then
+    local src = io.read("*a") or ""
+    opts.name = "<stdin>"
+    local out = parser.format(src, opts)
+    if is_error(out) then
+        io.write_err(out.message .. "\n")
+        os.exit(2)
+    end
+    io.write(out)
+    os.exit(0)
+end
+
+-- the .sea files under the paths
+local files = []
+for _, p in paths do
+    if fs.isdir(p) then
+        for _, f in fs.walk(p, {files = true}) do
+            local hidden = false
+            for _, part in path.parts(path.relative(p, f)) do
+                if string.starts_with(part, ".") and part ~= "." and part ~= ".." then hidden = true end
+            end
+            if not hidden and path.ext(f) == ".sea" then files[] = path.normalize(f) end
+        end
+    elseif fs.exists(p) then
+        files[] = p
+    else
+        io.write_err("sea fmt: " .. p .. ": no such file or directory" .. "\n")
+        os.exit(2)
+    end
+end
+
+local function show_diff(file, old, new)
+    local dir = fs.tempdir("seafmt-")
+    if is_error(dir) then
+        print("--- " .. file .. " (no diff available)")
+        return
+    end
+    local a = path.join(dir, "a")
+    local b = path.join(dir, "b")
+    fs.write(a, old)
+    fs.write(b, new)
+    local r = process.run({"diff", "-u", "--label", file, "--label", file .. " (formatted)", a, b})
+    if is_error(r) then
+        io.write_err("sea fmt: " .. file .. ": would change (diff(1) is not available)\n")
+    else
+        io.write(r.stdout)
+    end
+    fs.remove(dir, {recursive = true})
+end
+
+local status = 0
+for _, f in files do
+    local src = fs.read(f)
+    if is_error(src) then
+        io.write_err("sea fmt: " .. src.message .. "\n")
+        status = 2
+    else
+        opts.name = f
+        local out = parser.format(src, opts)
+        if is_error(out) then
+            io.write_err(out.message .. "\n")
+            status = 2
+        elseif mode == "print" then
+            io.write(out)
+        elseif out ~= src then
+            if mode == "write" then
+                local wopts = {}
+                wopts.atomic = true
+                local st = fs.stat(f)
+                if not is_error(st) then wopts.mode = st.mode end
+                local w = fs.write(f, out, wopts)
+                if is_error(w) then
+                    io.write_err("sea fmt: " .. w.message .. "\n")
+                    status = 2
+                else
+                    print(f)
+                end
+            elseif mode == "diff" then
+                show_diff(f, src, out)
+            else
+                print(f)
+                if mode == "check" and status == 0 then status = 1 end
+            end
+        end
+    end
+end
+os.exit(status)

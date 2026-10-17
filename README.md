@@ -64,6 +64,9 @@ bin/sea app.seac                      # … and run it
 
 make sea-jit                                      # build bin/sea-jit
 bin/sea-jit --jit examples/nbody/nbody.sea        # run with the JIT
+
+bin/sea fmt src/                      # format .sea files in place (-l, -d, --check)
+bin/sea doc libs/http/http.sea        # documentation from comments (-f markdown|html|json)
 ```
 
 Native libraries are built per library, e.g. `make -C libs/json`.

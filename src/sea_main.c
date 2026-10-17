@@ -8,6 +8,7 @@
 #include "sea_string.h"
 #include "sea_memory.h"
 #include "sea_sched.h"
+#include "sea_tools.h"     /* gen/: the scripts in tools/, embedded */
 #include <unistd.h>
 
 #ifndef SEA_NO_READLINE
@@ -108,11 +109,16 @@ static char **g_script_argv = NULL;
 static bool  g_jit_enabled = false;
 
 /* Run a .sea source file or a compiled .seac file. Both get the full runtime
- * (string caches, goroutine scheduler, os.args, stdlib). */
-static void cmd_run(const char *path) {
-    bool compiled = is_seac_path(path);
+ * (string caches, goroutine scheduler, os.args, stdlib). With embedded set,
+ * path is only a name and embedded is the source (the built-in tools). */
+static void cmd_run_ex(const char *path, const char *embedded) {
+    bool compiled = !embedded && is_seac_path(path);
     char *source = NULL;
-    if (!compiled) {
+    if (embedded) {
+        size_t n = strlen(embedded);
+        source = sea_malloc(n + 1);
+        memcpy(source, embedded, n + 1);
+    } else if (!compiled) {
         source = read_file(path);
         if (!source) { exit(1); }
     }
@@ -149,6 +155,8 @@ static void cmd_run(const char *path) {
 
     if (result != SEA_OK) exit(1);
 }
+
+static void cmd_run(const char *path) { cmd_run_ex(path, NULL); }
 
 static void cmd_compile(const char *path, const char *outpath) {
     char *source = read_file(path);
@@ -323,6 +331,8 @@ static void usage(void) {
         "  sea run <file.sea>           Execute source file\n"
         "  sea compile <file> [-o out]  Compile to bytecode\n"
         "  sea bytecode <file.sea>      Print disassembly\n"
+        "  sea fmt [flags] [path...]    Format Sea source (sea fmt -h)\n"
+        "  sea doc [flags] [path...]    Documentation from comments (sea doc -h)\n"
         "  sea version                  Print version\n"
     );
 }
@@ -398,6 +408,18 @@ int main(int argc, char *argv[]) {
         }
         cmd_bytecode(argv[2]);
         return 0;
+    }
+
+    /* Built-in tools written in Sea (the scripts in tools/, embedded at build time) */
+    for (int i = 0; SEA_TOOLS[i].name; i++) {
+        if (strcmp(cmd, SEA_TOOLS[i].name) == 0) {
+            char name[64];
+            snprintf(name, sizeof name, "sea %s", SEA_TOOLS[i].name);
+            g_script_argc = argc - 2;
+            g_script_argv = argv + 2;
+            cmd_run_ex(name, SEA_TOOLS[i].src);
+            return 0;
+        }
     }
 
     // Try to run as file directly (sea file.sea [arg1 arg2 ...])

@@ -48,7 +48,18 @@ $(JIT_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(JIT_OBJ_DIR)
 
 -include $(JIT_OBJS:.o=.d)
 
-$(BIN_DIR) $(OBJ_DIR) $(JIT_OBJ_DIR):
+# The `sea fmt` / `sea doc` tools: Sea scripts in tools/, embedded in the
+# binary as byte arrays (gen/sea_tools.h, included by sea_main.c).
+TOOLS = $(wildcard tools/*.sea)
+GEN_DIR = gen
+CFLAGS += -I$(GEN_DIR)
+
+$(GEN_DIR)/sea_tools.h: $(TOOLS) tools/embed.sh | $(GEN_DIR)
+	sh tools/embed.sh $(TOOLS) > $@
+
+$(OBJ_DIR)/sea_main.o $(JIT_OBJ_DIR)/sea_main.o: $(GEN_DIR)/sea_tools.h
+
+$(BIN_DIR) $(OBJ_DIR) $(JIT_OBJ_DIR) $(GEN_DIR):
 	mkdir -p $@
 
 avx2: CFLAGS += -mavx2
@@ -132,4 +143,4 @@ test-asan: clean
 	@ASAN_OPTIONS=detect_leaks=0 $(TARGET) tests/run_tests.sea
 
 clean:
-	rm -rf $(OBJ_DIR) $(JIT_OBJ_DIR) $(BIN_DIR)
+	rm -rf $(OBJ_DIR) $(JIT_OBJ_DIR) $(BIN_DIR) $(GEN_DIR)

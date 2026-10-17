@@ -1,0 +1,76 @@
+-- Test: the built-in tools `sea fmt` and `sea doc` (run as ./bin/sea from the repo root)
+local SEA = "./bin/sea"
+
+local dir = fs.tempdir("seatools-")
+local function run(args, stdin)
+    local cmd = []
+    cmd[] = SEA
+    for _, a in args do cmd[] = a end
+    local opts = {}
+    opts.cwd = dir
+    if stdin != nil then opts.stdin = stdin end
+    local r = process.run(cmd, opts)
+    if is_error(r) then return r.message end
+    return "[" .. tostring(r.code) .. "] " .. string.trim(r.stdout) .. (r.stderr != "" and (" | " .. string.trim(r.stderr)) or "")
+end
+-- the binary path relative to dir: absolute
+SEA = fs.realpath(SEA)
+
+print("-- sea fmt")
+fs.write(dir .. "/a.sea", "local   x=1\nif x then print( x ) end\n")
+fs.write(dir .. "/ok.sea", "local y = 2\n")
+fs.mkdir(dir .. "/sub")
+fs.write(dir .. "/sub/bad.sea", "local = 1\n")
+print(run({"fmt", "-l", "."}))
+print(run({"fmt", "--check", "a.sea", "ok.sea"}))
+print(run({"fmt", "-p", "a.sea"}))
+print(run({"fmt"}, "local t={a=1}\n"))
+print(run({"fmt", "a.sea"}), fs.read(dir .. "/a.sea") == "local x = 1\nif x then print(x) end\n")
+print(run({"fmt", "--check", "a.sea", "ok.sea"}))
+print(run({"fmt", "--bogus"}))
+
+print("-- sea doc")
+fs.remove(dir .. "/sub/bad.sea")
+fs.write(dir .. "/mylib.sea", [==[
+-- mylib — a small library
+--
+-- Usage:
+--   local m = require("mylib")
+
+local M = {}
+local Box = {}
+
+-- m.add(a, b) → the sum
+function M.add(a, b)
+    return a + b
+end
+
+--[[ m.join(...) → the values joined with ", " ]]
+function M.join(...)
+    return ""
+end
+
+-- the size of a box
+function Box.size(self)
+    return 1
+end
+
+local function helper(x)
+    return x
+end
+
+-- a constant
+M.VERSION = "1.0"
+
+return M
+]==])
+print(run({"doc", "mylib.sea"}))
+print(run({"doc", "mylib.sea", "add"}))
+print(run({"doc", "--all", "mylib.sea", "helper"}))
+print(run({"doc", "-f", "markdown", "mylib.sea", "join"}))
+print(run({"doc", "-f", "json", "mylib.sea", "size"}))
+print(run({"doc", "mylib.sea", "nothing"}))
+local html = run({"doc", "-f", "html", "-o", "out.html", "mylib.sea"})
+print(html, string.contains(fs.read(dir .. "/out.html"), "<code>mylib.add(a, b)</code>"))
+print(string.sub(run({"doc", "re"}), 1, 40))
+fs.remove(dir, {recursive = true})

@@ -15,6 +15,84 @@ strings: escapes such as `\xFF` can still put any byte in one.
 
 ---
 
+## Command Line
+
+```sh
+sea                              # REPL
+sea file.sea [args...]           # run (args in os.args)
+sea run file.sea                 # the same
+sea compile file.sea -o out.seac # bytecode; run it with `sea out.seac`
+sea bytecode file.sea            # disassembly
+sea --jit file.sea               # with the JIT (bin/sea-jit)
+sea fmt [flags] [path...]        # format source code
+sea doc [flags] [path...] [name] # documentation from comments
+sea version
+```
+
+### `sea fmt`
+
+Formats Sea source in the canonical layout of `sea/parser`'s `format` (see
+that module): one statement per line, blocks indented by 4 spaces, spaced
+operators; comments, single blank lines and literals as written are kept.
+Paths are files or directories (searched for `*.sea`, skipping hidden
+directories); without paths, stdin is formatted to stdout.
+
+| Flag | |
+|------|--|
+| (none) | Rewrite the files that change (atomically, keeping their permissions) and print their names |
+| `-l` | List the files whose formatting differs; change nothing |
+| `-d` | Print a unified diff for each file that would change (uses `diff(1)`) |
+| `--check` | Like `-l`, and exit with status 1 if any file would change (for CI) |
+| `-p` | Print the formatted code instead of writing files |
+| `--indent N` | Spaces per level (1-16) |
+
+A file with a syntax error is reported as `file:line:col: message` (on
+stderr) and left alone; the exit status is then 2.
+
+### `sea doc`
+
+Prints the documentation written in comments. A **doc comment** is the
+block of `--` lines (or a `--[[ ]]` comment) right above a declaration;
+the **module comment** is the comment block at the top of a file, when a
+blank line separates it from the first statement. Documented: functions
+stored in the table the file returns (`function M.f(...)`, shown as
+`file.f`), functions and methods of other tables (`function Conn:send(...)`,
+grouped under `Conn`), global functions, and documented fields
+(`M.VERSION = "1.0"`); local functions only with `--all`. Lines of a comment
+indented by two or more spaces are shown as code.
+
+```sea
+-- greet — friendly greetings
+--
+--   local greet = require("greet")
+
+local M = {}
+
+-- greet.hello(name) → "Hello, <name>!"
+function M.hello(name)
+    return "Hello, " .. name .. "!"
+end
+
+return M
+```
+
+`sea doc greet.sea` prints the module comment and `greet.hello(name)` with
+its comment. Arguments are files or directories (default: the current
+directory; files that do not parse are reported and skipped) and,
+optionally, a name: `sea doc http.sea get` shows only the matching
+functions. The name of a built-in module (`sea doc fs`) lists its functions.
+
+| Flag | |
+|------|--|
+| `-f`, `--format F` | `text` (default), `markdown`, `html` (one page with an index, light and dark) or `json` |
+| `-o FILE` | Write to a file instead of stdout |
+| `--all` | Include local functions |
+
+Both tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`) built into
+the binary.
+
+---
+
 ## Comments & Shebang
 
 ```sea
@@ -349,6 +427,8 @@ a number (by value: `bigint.new(5) == 5`).
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `io.read` | `read([fmt]) → string\|number\|nil` | Read from stdin. `fmt`: `"*l"` / `"l"` (line, default), `"*n"` / `"n"` (number), `"*a"` / `"a"` (all) |
+| `io.write` | `write(...)` | Write the values to stdout with no separator and no line break (strings byte for byte, others as `tostring` shows them) |
+| `io.write_err` | `write_err(...)` | The same on stderr |
 
 ### Buffered file I/O
 

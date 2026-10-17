@@ -2,6 +2,8 @@
 #include "sea_string.h"
 #include "sea_table.h"
 #include "sea_memory.h"
+#include "sea_rope.h"
+#include "sea_vm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -298,6 +300,29 @@ static SeaValue io_scan_text(SeaVM *vm, int argc, SeaValue *args) {
     return sea_obj_val(&sea_string_new(sc->buf, sc->len)->obj);
 }
 
+/* ---- io.write(...) / io.write_err(...) → nil ------------------------------
+ * The values (strings as they are, bytes and all; others as tostring shows
+ * them) on stdout / stderr, with no separator and no line break. */
+static void write_values(SeaVM *vm, FILE *fp, int argc, SeaValue *args) {
+    for (int i = 0; i < argc; i++) {
+        SeaString *s = sea_is_string(args[i]) || sea_is_rope(args[i])
+                       ? sea_value_get_flat_string(args[i]) : sea_vm_tostring(vm, args[i]);
+        fwrite(s->data, 1, s->len, fp);
+        sea_obj_release(&s->obj);
+    }
+    fflush(fp);
+}
+
+static SeaValue io_write(SeaVM *vm, int argc, SeaValue *args) {
+    write_values(vm, stdout, argc, args);
+    return SEA_NIL_VAL;
+}
+
+static SeaValue io_write_err(SeaVM *vm, int argc, SeaValue *args) {
+    write_values(vm, stderr, argc, args);
+    return SEA_NIL_VAL;
+}
+
 /* ---- Registration -------------------------------------------------------- */
 
 void sea_lib_io_register(SeaVM *vm) {
@@ -305,6 +330,8 @@ void sea_lib_io_register(SeaVM *vm) {
 
     /* stdin helpers */
     mod_set(vm, mod, "read",         io_read);
+    mod_set(vm, mod, "write",        io_write);
+    mod_set(vm, mod, "write_err",    io_write_err);
 
     /* buffered file I/O */
     mod_set(vm, mod, "open",         io_open);
