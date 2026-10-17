@@ -207,3 +207,17 @@ true	true	true
 [1]  | sea get: nothing is not a dependency in sea.toml
 [1]  | sea get: no sea.toml here or above (create one with `sea new`, or write [package] name = "...")
 0	[    HI]	2
+-- sea lsp
+true	true
+true	true	true
+true	true	true
+true	true
+true	true
+true	true
+true	true
+true	true
+true
+true
+true
+{"jsonrpc":"2.0","id":10,"result":null}
+0

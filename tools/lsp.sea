@@ -1,0 +1,915 @@
+-- sea lsp — a Language Server Protocol server for Sea (over stdin/stdout)
+--
+--   sea lsp
+--
+-- Editors start it and talk JSON-RPC to it. It offers: diagnostics (the
+-- checks of `sea check`, as you type), formatting (`sea fmt`), hover (the
+-- declaration and its doc comment), go to definition (also into required
+-- modules), completion (names in scope, built-in modules and their
+-- functions, the functions of required modules) and document symbols.
+
+local parser = require("sea/parser")
+local check = require("sea/check")
+
+if os.args[1] == "-h" or os.args[1] == "--help" then
+    print("usage: sea lsp")
+    print("")
+    print("A Language Server Protocol server on stdin/stdout, for editors: diagnostics,")
+    print("formatting, hover, go to definition, completion and document symbols.")
+    os.exit(0)
+end
+
+-- The built-in globals (never require a name that is not one: that could
+-- run a file of the project)
+local BUILTIN = {}
+for _, g in parser.globals() do BUILTIN[g] = true end
+local function builtin(name)
+    if BUILTIN[name] then return require(name) end
+    return nil
+end
+
+-- ---- JSON ----
+
+local json_decode = nil
+
+local function decode_string(s, i)
+    -- s[i] is the opening quote; → value, index after the closing quote
+    local parts = []
+    local j = i + 1
+    while true do
+        local q = string.find(s, "\"", j)
+        local b = string.find(s, "\\", j)
+        if q == nil then panic("json: unterminated string") end
+        if b == nil or q < b then
+            parts[] = string.sub(s, j, q - 1)
+            return string.join(parts, ""), q + 1
+        end
+        parts[] = string.sub(s, j, b - 1)
+        local e = string.sub(s, b + 1, b + 1)
+        if e == "n" then
+            parts[] = "\n"
+        elseif e == "t" then
+            parts[] = "\t"
+        elseif e == "r" then
+            parts[] = "\r"
+        elseif e == "b" then
+            parts[] = "\b"
+        elseif e == "f" then
+            parts[] = "\f"
+        elseif e == "u" then
+            local cp = tonumber(string.sub(s, b + 2, b + 5), 16)
+            j = b + 6
+            if cp >= 0xD800 and cp <= 0xDBFF and string.sub(s, j, j + 1) == "\\u" then
+                local lo = tonumber(string.sub(s, j + 2, j + 5), 16)
+                cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+                j = j + 6
+            end
+            parts[] = utf8.char(cp)
+            b = j - 2
+        else
+            parts[] = e
+        end
+        j = b + 2
+    end
+end
+
+local function skip_ws(s, i)
+    while true do
+        local c = string.byte(s, i)
+        if c ~= 32 and c ~= 9 and c ~= 10 and c ~= 13 then return i end
+        i = i + 1
+    end
+end
+
+-- → value, next index
+local function decode_value(s, i)
+    i = skip_ws(s, i)
+    local c = string.sub(s, i, i)
+    if c == "{" then
+        local t = {}
+        i = skip_ws(s, i + 1)
+        if string.sub(s, i, i) == "}" then return t, i + 1 end
+        while true do
+            i = skip_ws(s, i)
+            local k = nil
+            k, i = decode_string(s, i)
+            i = skip_ws(s, i)
+            i = i + 1 -- :
+            local v = nil
+            v, i = decode_value(s, i)
+            t[k] = v
+            i = skip_ws(s, i)
+            local d = string.sub(s, i, i)
+            i = i + 1
+            if d == "}" then return t, i end
+        end
+    elseif c == "[" then
+        local a = []
+        i = skip_ws(s, i + 1)
+        if string.sub(s, i, i) == "]" then return a, i + 1 end
+        while true do
+            local v = nil
+            v, i = decode_value(s, i)
+            a[] = v
+            i = skip_ws(s, i)
+            local d = string.sub(s, i, i)
+            i = i + 1
+            if d == "]" then return a, i end
+        end
+    elseif c == "\"" then
+        -- (a call in a return list gives one value: unpack it first)
+        local str, j = decode_string(s, i)
+        return str, j
+    elseif c == "t" then
+        return true, i + 4
+    elseif c == "f" then
+        return false, i + 5
+    elseif c == "n" then
+        return nil, i + 4
+    else
+        local m = re.match("-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?", s, i)
+        if m == nil or m.start ~= i then panic("json: unexpected " .. c) end
+        return tonumber(m.text), i + len(m.text)
+    end
+end
+
+json_decode = function(s)
+    local v, _ = decode_value(s, 1)
+    return v
+end
+
+local function json_str(s)
+    s = string.replace(s, "\\", "\\\\")
+    s = string.replace(s, "\"", "\\\"")
+    s = string.replace(s, "\n", "\\n")
+    s = string.replace(s, "\r", "\\r")
+    s = string.replace(s, "\t", "\\t")
+    s = re.gsub("[\\x00-\\x1f]", s, function(m) return string.format("\\u%04x", string.byte(m.text)) end)
+    return "\"" .. s .. "\""
+end
+
+local function json_encode(v)
+    local t = type(v)
+    if v == nil then return "null" end
+    if t == "string" then return json_str(v) end
+    if t == "bool" or t == "boolean" then return v and "true" or "false" end
+    if t == "int" or t == "number" or t == "float" then return tostring(v) end
+    if t == "array" then
+        local parts = []
+        for _, x in v do parts[] = json_encode(x) end
+        return "[" .. string.join(parts, ",") .. "]"
+    end
+    local parts = []
+    for k, x in v do
+        if x ~= nil then parts[] = json_str(tostring(k)) .. ":" .. json_encode(x) end
+    end
+    return "{" .. string.join(parts, ",") .. "}"
+end
+
+-- ---- transport ----
+
+local stdin = io.open("/dev/stdin", "rb")
+if stdin == nil then
+    io.write_err("sea lsp: cannot read stdin\n")
+    os.exit(1)
+end
+
+local function read_message()
+    local length = nil
+    while true do
+        local line = io.read_line(stdin)
+        if line == nil then return nil end
+        line = string.trim(line)
+        if line == "" then break end
+        local m = re.match("^(?i:content-length):\\s*([0-9]+)$", line)
+        if m ~= nil then length = tonumber(m.groups[1]) end
+    end
+    if length == nil then return nil end
+    local parts = []
+    local got = 0
+    while got < length do
+        local chunk = io.read_bytes(stdin, length - got)
+        if chunk == nil then return nil end
+        parts[] = chunk
+        got = got + len(chunk)
+    end
+    return string.join(parts, "")
+end
+
+local function send(body)
+    io.write("Content-Length: " .. tostring(len(body)) .. "\r\n\r\n" .. body)
+end
+
+local function respond(id, result)
+    send("{\"jsonrpc\":\"2.0\",\"id\":" .. json_encode(id) .. ",\"result\":" .. json_encode(result) .. "}")
+end
+
+local function respond_error(id, code, msg)
+    send("{\"jsonrpc\":\"2.0\",\"id\":" .. json_encode(id) .. ",\"error\":{\"code\":" .. tostring(code) .. ",\"message\":" .. json_str(msg) .. "}}")
+end
+
+local function notify(method, params)
+    send("{\"jsonrpc\":\"2.0\",\"method\":" .. json_str(method) .. ",\"params\":" .. json_encode(params) .. "}")
+end
+
+-- ---- documents ----
+
+local docs = {} -- uri → {text, lines, version, path, ast (cached)}
+local root = nil
+local workspace_globals = {} -- name → true
+local file_globals = {}      -- path → table of names
+
+local function uri_to_path(uri)
+    if not string.starts_with(uri, "file://") then return uri end
+    local p = string.sub(uri, 8)
+    return re.gsub("%([0-9A-Fa-f]{2})", p, function(m) return string.char(tonumber(string.sub(m.text, 2), 16)) end)
+end
+
+local function path_to_uri(p)
+    return "file://" .. re.gsub("[^A-Za-z0-9/._~-]", p, function(m) return string.format("%%%02X", string.byte(m.text)) end)
+end
+
+local function refresh_globals()
+    workspace_globals = {}
+    for _, names in file_globals do
+        for g, _ in names do workspace_globals[g] = true end
+    end
+end
+
+local function scan_workspace()
+    if root == nil or not fs.isdir(root) then return end
+    local all = fs.walk(root, {files = true})
+    if is_error(all) then return end
+    local n = 0
+    for _, f in all do
+        if path.ext(f) == ".sea" and not re.test("/(\\.[^/]*|sea_modules)/", f) and n < 2000 then
+            n = n + 1
+            local src = fs.read(f)
+            if not is_error(src) then file_globals[f] = check.defined_globals(src) end
+        end
+    end
+    refresh_globals()
+end
+
+local function set_doc(uri, text, version)
+    local d = {}
+    d.text = text
+    d.lines = string.split(text, "\n")
+    d.version = version
+    d.path = uri_to_path(uri)
+    d.ast = nil
+    docs[uri] = d
+    return d
+end
+
+local function doc_ast(d)
+    if d.ast == nil then
+        local opts = {}
+        opts.name = d.path
+        opts.comments = true
+        local ast = parser.parse(d.text, opts)
+        d.ast = is_error(ast) and false or ast
+    end
+    return d.ast ~= false and d.ast or nil
+end
+
+-- byte column (1-based) ↔ UTF-16 character (0-based), as LSP counts
+local function to_utf16(text, col)
+    local prefix = string.sub(text or "", 1, col - 1)
+    if utf8.len(prefix) == len(prefix) then return len(prefix) end
+    local n = 0
+    for _, cp in utf8.codepoints(prefix) do n = n + (cp > 0xFFFF and 2 or 1) end
+    return n
+end
+
+local function from_utf16(text, ch)
+    text = text or ""
+    if utf8.len(text) == len(text) then return ch + 1 end
+    local units = 0
+    local byte = 1
+    for _, c in utf8.chars(text) do
+        if units >= ch then break end
+        units = units + (len(c) == 4 and 2 or 1)
+        byte = byte + len(c)
+    end
+    return byte
+end
+
+local function lsp_pos(lines, line, col)
+    local p = {}
+    p.line = line - 1
+    p.character = to_utf16(lines[line - 1], col)
+    return p
+end
+
+local function lsp_range(lines, line, col, end_line, end_col)
+    local r = {}
+    r.start = lsp_pos(lines, line, col)
+    r["end"] = lsp_pos(lines, end_line, end_col)
+    return r
+end
+
+-- ---- diagnostics ----
+
+local function publish(uri)
+    local d = docs[uri]
+    if d == nil then return end
+    local others = {}
+    for g, _ in workspace_globals do others[g] = true end
+    local opts = {}
+    opts.name = d.path
+    opts.dir = path.dirname(d.path)
+    opts.globals = others
+    local diags = []
+    for _, x in check.source(d.text, opts) do
+        local text = d.lines[x.line - 1] or ""
+        -- underline the word at the column (or one character)
+        local m = re.match("[A-Za-z_][A-Za-z0-9_]*|\\S", text, x.col)
+        local endc = (m ~= nil and m.start == x.col) and (x.col + len(m.text)) or (x.col + 1)
+        local item = {}
+        item.range = lsp_range(d.lines, x.line, x.col, x.line, endc)
+        item.severity = x.severity == "error" and 1 or 2
+        item.code = x.code
+        item.source = "sea"
+        item.message = x.message
+        diags[] = item
+    end
+    local params = {}
+    params.uri = uri
+    params.diagnostics = diags
+    notify("textDocument/publishDiagnostics", params)
+end
+
+-- ---- declarations ----
+
+-- The comment block right above line (doc comment), or nil
+local function doc_comment(ast, line)
+    if ast == nil or ast.comments == nil then return nil end
+    local by_line = {}
+    for _, c in ast.comments do
+        if not c.inline then by_line[c.line] = c.text end
+    end
+    local out = []
+    local l = line - 1
+    while by_line[l] ~= nil do
+        out[] = by_line[l]
+        l = l - 1
+    end
+    if len(out) == 0 then return nil end
+    local lines = []
+    for k = len(out) - 1, 0, -1 do
+        local t = out[k]
+        if string.starts_with(t, "--[[") then
+            t = string.sub(t, 5)
+            if string.ends_with(t, "]]") then t = string.sub(t, 1, len(t) - 2) end
+        else
+            t = re.gsub("^-+ ?", t, "")
+        end
+        lines[] = t
+    end
+    return string.trim(string.join(lines, "\n"))
+end
+
+-- Every declaration of a tree: {name, owner, kind, line, col, end_line,
+-- params, value} (owner: the table of a field, "M" in function M.f)
+local function declarations(ast, src_lines)
+    local out = []
+    local function col_of(line, name, from)
+        local text = src_lines[line - 1] or ""
+        local c = from or 1
+        while true do
+            local p = string.find(text, name, c)
+            if p == nil then return from or 1 end
+            local before = p > 1 and string.sub(text, p - 1, p - 1) or " "
+            local after = string.sub(text, p + len(name), p + len(name))
+            if not re.test("[A-Za-z0-9_]", before) and not re.test("[A-Za-z0-9_]", after) then return p end
+            c = p + 1
+        end
+    end
+    local function params_of(f)
+        local ps = []
+        for _, p in f.params do
+            if p.is_vararg then ps[] = "..." else ps[] = p.name end
+        end
+        return ps
+    end
+    local function add(name, owner, kind, line, col, end_line, value)
+        local d = {}
+        d.name = name
+        d.owner = owner
+        d.kind = kind
+        d.line = line
+        d.col = col
+        d.end_line = end_line or line
+        d.value = value
+        if value ~= nil and value.type == "func" then d.params = params_of(value) end
+        out[] = d
+    end
+    parser.walk(ast, function(n)
+        local t = n.type
+        if t == "local" then
+            for i, nm in n.names do
+                local v = n.values[i]
+                local kind = (v ~= nil and v.type == "func") and "function" or "local"
+                add(nm, nil, kind, n.line, col_of(n.line, nm, n.col), v ~= nil and v.type == "func" and v.body.end_line or n.line, v)
+            end
+        elseif t == "assign" then
+            for i, tg in n.targets do
+                local v = n.values[i]
+                local fn = v ~= nil and v.type == "func"
+                local endl = fn and v.body.end_line or n.line
+                if tg.type == "ident" then
+                    add(tg.name, nil, fn and "function" or "global", n.line, col_of(n.line, tg.name, n.col), endl, v)
+                elseif tg.type == "field" and tg.object.type == "ident" then
+                    local kind = fn and ((v.is_method or (len(v.params) > 0 and v.params[0].name == "self")) and "method" or "function") or "field"
+                    add(tg.field, tg.object.name, kind, n.line, col_of(n.line, tg.field, n.col), endl, v)
+                end
+            end
+        elseif t == "func" then
+            for _, p in n.params do
+                if not p.is_vararg then add(p.name, nil, "param", n.line, col_of(n.line, p.name, n.col), n.line, nil) end
+            end
+        elseif t == "for_num" then
+            add(n.var, nil, "local", n.line, col_of(n.line, n.var, n.col), n.line, nil)
+        elseif t == "for_in" then
+            for _, nm in n.vars do add(nm, nil, "local", n.line, col_of(n.line, nm, n.col), n.line, nil) end
+        end
+    end)
+    return out
+end
+
+-- The table a module returns (return M at the top level), or nil
+local function returned_table(ast)
+    for _, s in ast.stmts do
+        if s.type == "return" and len(s.values) == 1 and s.values[0].type == "ident" then return s.values[0].name end
+    end
+    return nil
+end
+
+-- A required module's file, as require would find it from dir (Sea files only)
+local function module_file(name, dir)
+    local function try(base)
+        for _, ext in {".sea", "/init.sea"} do
+            if fs.isfile(base .. ext) then return path.normalize(path.abs(base .. ext)) end
+        end
+        return nil
+    end
+    if path.isabs(name) then return try(name) end
+    local found = try(path.join(dir, name))
+    if found == nil and root ~= nil then found = try(path.join(root, name)) end
+    if found == nil and not string.starts_with(name, ".") then
+        local d = path.normalize(path.abs(dir))
+        while found == nil do
+            local mods = path.join(d, "sea_modules")
+            if fs.isdir(mods) then
+                found = try(path.join(mods, name))
+                local own = path.join(mods, name, path.basename(name) .. ".sea")
+                if found == nil and fs.isfile(own) then found = own end
+            end
+            if d == "/" then break end
+            d = path.dirname(d)
+        end
+    end
+    return found
+end
+
+-- A file's parsed tree, lines and declarations (open documents first)
+local file_cache = {}
+local function file_info(p)
+    for _, d in docs do
+        if d.path == p then
+            local ast = doc_ast(d)
+            if ast == nil then return nil end
+            local info = {}
+            info.ast = ast
+            info.lines = d.lines
+            info.decls = declarations(ast, d.lines)
+            info.path = p
+            return info
+        end
+    end
+    local src = fs.read(p)
+    if is_error(src) then return nil end
+    local cached = file_cache[p]
+    if cached ~= nil and cached.src == src then return cached end
+    local opts = {}
+    opts.name = p
+    opts.comments = true
+    local ast = parser.parse(src, opts)
+    if is_error(ast) then return nil end
+    local info = {}
+    info.src = src
+    info.ast = ast
+    info.lines = string.split(src, "\n")
+    info.decls = declarations(ast, info.lines)
+    info.path = p
+    file_cache[p] = info
+    return info
+end
+
+-- The word at a position: {name, object (for obj.name / obj:name), col}
+local function word_at(text, col)
+    if text == nil then return nil end
+    local s = col
+    while s > 1 and re.test("[A-Za-z0-9_]", string.sub(text, s - 1, s - 1)) do s = s - 1 end
+    local e = col
+    while e <= len(text) and re.test("[A-Za-z0-9_]", string.sub(text, e, e)) do e = e + 1 end
+    if e == s then return nil end
+    local w = {}
+    w.name = string.sub(text, s, e - 1)
+    w.col = s
+    local before = string.sub(text, 1, s - 1)
+    local m = re.match("([A-Za-z_][A-Za-z0-9_]*)\\s*[.:]\\s*$", before)
+    if m ~= nil then w.object = m.groups[1] end
+    return w
+end
+
+-- The declaration of name visible at line: the nearest one above it
+local function nearest(decls, name, line)
+    local best = nil
+    for _, d in decls do
+        if d.name == name and d.owner == nil and d.line <= line and (best == nil or d.line >= best.line) then best = d end
+    end
+    if best == nil then
+        for _, d in decls do
+            if d.name == name and d.owner == nil and (d.kind == "function" or d.kind == "global") then best = d end
+        end
+    end
+    return best
+end
+
+-- If the local obj holds require("..."), the module's file info
+local function required_module(info, obj, line, dir)
+    local d = nearest(info.decls, obj, line)
+    if d == nil or d.value == nil then return nil end
+    local v = d.value
+    if v.type == "call" and v.callee.type == "ident" and v.callee.name == "require" and len(v.args) == 1 and v.args[0].type == "string" then
+        local f = module_file(v.args[0].value, dir)
+        if f ~= nil then return file_info(f), v.args[0].value end
+    end
+    return nil
+end
+
+-- Resolve the word at a position → {info, decl} or {builtin = "math.floor"}
+local function resolve(uri, line, col)
+    local d = docs[uri]
+    if d == nil then return nil end
+    local ast = doc_ast(d)
+    if ast == nil then return nil end
+    local w = word_at(d.lines[line - 1], col)
+    if w == nil then return nil end
+    local info = file_info(d.path)
+    if info == nil then return nil end
+    local dir = path.dirname(d.path)
+    local r = {}
+    if w.object ~= nil then
+        local own = nearest(info.decls, w.object, line)
+        if own == nil then
+            local m = builtin(w.object)
+            local tm = type(m)
+            if tm == "table" or tm == "map" then
+                r.builtin = w.object .. "." .. w.name
+                r.value = m[w.name]
+                return r
+            end
+            return nil
+        end
+        local mod, modname = required_module(info, w.object, line, dir)
+        if mod ~= nil then
+            local owner = returned_table(mod.ast)
+            for _, x in mod.decls do
+                if x.owner == owner and x.name == w.name then
+                    r.info = mod
+                    r.decl = x
+                    r.display = path.stem(modname) .. "." .. w.name
+                    return r
+                end
+            end
+            return nil
+        end
+        for _, x in info.decls do
+            if x.owner == w.object and x.name == w.name then
+                r.info = info
+                r.decl = x
+                r.display = w.object .. "." .. w.name
+                return r
+            end
+        end
+        return nil
+    end
+    local x = nearest(info.decls, w.name, line)
+    if x ~= nil then
+        r.info = info
+        r.decl = x
+        r.display = w.name
+        return r
+    end
+    -- a global function of another file of the workspace
+    for p, names in file_globals do
+        if names[w.name] and p ~= d.path then
+            local other = file_info(p)
+            if other ~= nil then
+                local y = nearest(other.decls, w.name, 1000000000)
+                if y ~= nil then
+                    r.info = other
+                    r.decl = y
+                    r.display = w.name
+                    return r
+                end
+            end
+        end
+    end
+    local g = builtin(w.name)
+    if g ~= nil then
+        r.builtin = w.name
+        r.value = g
+        return r
+    end
+    return nil
+end
+
+-- ---- requests ----
+
+local KEYWORDS = {
+    "and", "break", "case", "const", "continue", "default", "defer", "del", "do", "else", "elseif", "end", "false", "for",
+    "function", "go", "if", "in", "local", "nil", "not", "or", "panic", "return", "select", "then", "true", "while",
+}
+
+local function hover(params)
+    local d = docs[params.textDocument.uri]
+    if d == nil then return nil end
+    local line = params.position.line + 1
+    local col = from_utf16(d.lines[line - 1], params.position.character)
+    local r = resolve(params.textDocument.uri, line, col)
+    if r == nil then return nil end
+    local text = nil
+    if r.builtin ~= nil then
+        local t = type(r.value)
+        if t == "table" or t == "map" then
+            local keys = []
+            for k, _ in r.value do keys[] = k end
+            sort.sort(keys)
+            text = "```sea\n" .. r.builtin .. "\n```\nbuilt-in module: " .. string.join(keys, ", ")
+        else
+            text = "```sea\n" .. r.builtin .. "\n```\nbuilt-in " .. (t == "function" and "function" or t)
+        end
+    else
+        local x = r.decl
+        local sig = nil
+        if x.params ~= nil then
+            local sep = x.kind == "method" and ":" or "."
+            local name = r.display
+            local ps = x.params
+            if x.kind == "method" and len(ps) > 0 and ps[0] == "self" then
+                local rest = []
+                for k = 1, len(ps) - 1 do rest[] = ps[k] end
+                ps = rest
+                name = string.replace(name, ".", sep)
+            end
+            sig = "function " .. name .. "(" .. string.join(ps, ", ") .. ")"
+        else
+            sig = (x.kind == "param" and "parameter " or (x.kind == "global" and "global " or (x.kind == "field" and "field " or "local "))) ..
+                r.display
+        end
+        text = "```sea\n" .. sig .. "\n```"
+        local doc = doc_comment(r.info.ast, x.line)
+        if doc ~= nil then text = text .. "\n" .. doc end
+        if r.info.path ~= d.path then text = text .. "\n\n*" .. path.basename(r.info.path) .. ":" .. tostring(x.line) .. "*" end
+    end
+    local res = {}
+    local contents = {}
+    contents.kind = "markdown"
+    contents.value = text
+    res.contents = contents
+    return res
+end
+
+local function definition(params)
+    local d = docs[params.textDocument.uri]
+    if d == nil then return nil end
+    local line = params.position.line + 1
+    local col = from_utf16(d.lines[line - 1], params.position.character)
+    local r = resolve(params.textDocument.uri, line, col)
+    if r == nil or r.decl == nil then return nil end
+    local x = r.decl
+    local loc = {}
+    loc.uri = path_to_uri(r.info.path)
+    loc.range = lsp_range(r.info.lines, x.line, x.col, x.line, x.col + len(x.name))
+    return loc
+end
+
+local function completion(params)
+    local d = docs[params.textDocument.uri]
+    if d == nil then return [] end
+    local line = params.position.line + 1
+    local text = d.lines[line - 1] or ""
+    local col = from_utf16(text, params.position.character)
+    local before = string.sub(text, 1, col - 1)
+    local items = []
+    local seen = {}
+    local function item(label, kind, detail)
+        if seen[label] then return end
+        seen[label] = true
+        local it = {}
+        it.label = label
+        it.kind = kind
+        it.detail = detail
+        items[] = it
+    end
+    local info = file_info(d.path)
+    local m = re.match("([A-Za-z_][A-Za-z0-9_]*)\\s*[.:]\\s*[A-Za-z0-9_]*$", before)
+    if m ~= nil then
+        local obj = m.groups[1]
+        local own = info ~= nil and nearest(info.decls, obj, line) or nil
+        if own == nil then
+            local mod = builtin(obj)
+            local tm = type(mod)
+            if tm == "table" or tm == "map" then
+                for k, v in mod do item(k, type(v) == "function" and 3 or 5, obj .. "." .. k) end
+            end
+        elseif info ~= nil then
+            local req, modname = required_module(info, obj, line, path.dirname(d.path))
+            if req ~= nil then
+                local owner = returned_table(req.ast)
+                for _, x in req.decls do
+                    if x.owner == owner then
+                        item(x.name, x.params ~= nil and 3 or 5, path.stem(modname) .. "." .. x.name .. (x.params ~= nil and ("(" .. string.join(x.params, ", ") .. ")") or ""))
+                    end
+                end
+            end
+            for _, x in info.decls do
+                if x.owner == obj then item(x.name, x.params ~= nil and 3 or 5, obj .. "." .. x.name) end
+            end
+        end
+        return items
+    end
+    if info ~= nil then
+        for _, x in info.decls do
+            if x.owner == nil and x.line <= line then
+                local detail = x.params ~= nil and (x.name .. "(" .. string.join(x.params, ", ") .. ")") or x.kind
+                item(x.name, x.params ~= nil and 3 or 6, detail)
+            end
+        end
+    end
+    for g, _ in workspace_globals do item(g, 3, "global") end
+    for _, g in parser.globals() do
+        local v = builtin(g)
+        local tv = type(v)
+        item(g, (tv == "table" or tv == "map") and 9 or 3, "built-in")
+    end
+    for _, k in KEYWORDS do item(k, 14, "keyword") end
+    return items
+end
+
+local function symbols(params)
+    local d = docs[params.textDocument.uri]
+    if d == nil then return [] end
+    local ast = doc_ast(d)
+    if ast == nil then return [] end
+    local out = []
+    for _, s in ast.stmts do
+        local decls = declarations(s, d.lines)
+        for _, x in decls do
+            if x.line == s.line and x.kind ~= "param" then
+                local sym = {}
+                sym.name = x.owner ~= nil and (x.owner .. (x.kind == "method" and ":" or ".") .. x.name) or x.name
+                sym.kind = x.kind == "method" and 6 or (x.params ~= nil and 12 or (x.kind == "field" and 8 or 13))
+                local last = d.lines[x.end_line - 1] or ""
+                sym.range = lsp_range(d.lines, s.line, 1, x.end_line, len(last) + 1)
+                sym.selectionRange = lsp_range(d.lines, x.line, x.col, x.line, x.col + len(x.name))
+                if x.params ~= nil then sym.detail = "(" .. string.join(x.params, ", ") .. ")" end
+                out[] = sym
+            end
+        end
+    end
+    return out
+end
+
+local function formatting(params)
+    local d = docs[params.textDocument.uri]
+    if d == nil then return nil end
+    local opts = {}
+    opts.name = d.path
+    if params.options ~= nil and params.options.tabSize ~= nil and params.options.insertSpaces ~= false then opts.indent = params.options.tabSize end
+    local out = parser.format(d.text, opts)
+    if is_error(out) or out == d.text then return [] end
+    local edit = {}
+    local n = len(d.lines)
+    local r = {}
+    local s = {}
+    s.line = 0
+    s.character = 0
+    local e = {}
+    e.line = n
+    e.character = 0
+    r.start = s
+    r["end"] = e
+    edit.range = r
+    edit.newText = out
+    local edits = []
+    edits[] = edit
+    return edits
+end
+
+-- ---- the loop ----
+
+local shutting_down = false
+local handlers = {}
+
+handlers["initialize"] = function(params)
+    if params.rootUri ~= nil then
+        root = uri_to_path(params.rootUri)
+    elseif params.rootPath ~= nil then
+        root = params.rootPath
+    end
+    scan_workspace()
+    local caps = {}
+    caps.textDocumentSync = 1
+    caps.hoverProvider = true
+    caps.definitionProvider = true
+    caps.documentSymbolProvider = true
+    caps.documentFormattingProvider = true
+    local comp = {}
+    local triggers = []
+    triggers[] = "."
+    triggers[] = ":"
+    comp.triggerCharacters = triggers
+    caps.completionProvider = comp
+    local res = {}
+    res.capabilities = caps
+    local si = {}
+    si.name = "sea lsp"
+    si.version = "1"
+    res.serverInfo = si
+    return res
+end
+handlers["shutdown"] = function()
+    shutting_down = true
+    return nil
+end
+handlers["textDocument/hover"] = hover
+handlers["textDocument/definition"] = definition
+handlers["textDocument/completion"] = completion
+handlers["textDocument/documentSymbol"] = symbols
+handlers["textDocument/formatting"] = formatting
+
+local function on_notification(method, params)
+    if method == "textDocument/didOpen" then
+        local td = params.textDocument
+        set_doc(td.uri, td.text, td.version)
+        publish(td.uri)
+    elseif method == "textDocument/didChange" then
+        local changes = params.contentChanges
+        if changes ~= nil and len(changes) > 0 then
+            set_doc(params.textDocument.uri, changes[len(changes) - 1].text, params.textDocument.version)
+            publish(params.textDocument.uri)
+        end
+    elseif method == "textDocument/didSave" then
+        local d = docs[params.textDocument.uri]
+        if d ~= nil then
+            file_globals[d.path] = check.defined_globals(d.text)
+            refresh_globals()
+            file_cache[d.path] = nil
+        end
+    elseif method == "textDocument/didClose" then
+        local uri = params.textDocument.uri
+        docs[uri] = nil
+        local p = {}
+        p.uri = uri
+        p.diagnostics = []
+        notify("textDocument/publishDiagnostics", p)
+    elseif method == "exit" then
+        os.exit(shutting_down and 0 or 1)
+    end
+end
+
+while true do
+    local body = read_message()
+    if body == nil then os.exit(shutting_down and 0 or 1) end
+    local msg = json_decode(body)
+    local method = msg.method
+    if msg.id ~= nil and method ~= nil then
+        local h = handlers[method]
+        if h == nil then
+            respond_error(msg.id, -32601, "method not found: " .. method)
+        else
+            local ok = true
+            local result = nil
+            local err = nil
+            local function call()
+                defer (function()
+                    local p = recover()
+                    if p ~= nil then
+                        ok = false
+                        err = tostring(p)
+                    end
+                end)()
+                result = h(msg.params or {})
+            end
+            call()
+            if ok then respond(msg.id, result) else respond_error(msg.id, -32603, err) end
+        end
+    elseif method ~= nil then
+        on_notification(method, msg.params or {})
+    end
+end

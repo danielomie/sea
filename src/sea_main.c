@@ -350,6 +350,7 @@ static void usage(void) {
         "  sea prof [flags] <file> ...  Run with the CPU profiler (sea prof -h)\n"
         "  sea new [--lib] <name>       Start a project (sea new -h)\n"
         "  sea get [URL[@ref]]          Install / add dependencies (sea get -h)\n"
+        "  sea lsp                      Language server for editors (stdin/stdout)\n"
         "  sea version                  Print version\n"
     );
 }

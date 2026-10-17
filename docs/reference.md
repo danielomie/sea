@@ -32,6 +32,7 @@ sea build [-o out] file.sea      # a standalone executable
 sea prof [flags] file.sea [args] # run with the CPU profiler
 sea new [--lib] name             # start a project
 sea get [URL[@ref]]              # dependencies (sea.toml, sea.lock, sea_modules/)
+sea lsp                          # language server for editors (stdin/stdout)
 sea version
 ```
 
@@ -313,9 +314,53 @@ every git package (`name url ref commit` per line): commit it with the
 project so that `sea get` installs the same code everywhere. `sea get`
 needs `git`. `sea build` and `sea check` find packages the same way.
 
+### `sea lsp`
+
+A [Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
+server on stdin/stdout, for editors. It provides:
+
+- **diagnostics** as you type: the checks of `sea check` (globals assigned
+  in other files of the workspace count as defined);
+- **formatting**: `sea fmt` (the editor's tab size is the indent);
+- **hover**: a function's signature and doc comment (also of functions in
+  required modules and other files), or the functions of a built-in module;
+- **go to definition**: locals, functions, globals of other files, and
+  `mod.f` where `local mod = require("...")` (into the module's file);
+- **completion**: names in scope, built-in modules and their functions after
+  `math.`, the functions a required module exports after `mod.`, keywords;
+- **document symbols**: the file's functions, methods, fields and top-level
+  locals.
+
+Neovim (0.11+):
+
+```lua
+vim.lsp.config("sea", { cmd = { "sea", "lsp" }, filetypes = { "sea" }, root_markers = { "sea.toml", ".git" } })
+vim.lsp.enable("sea")
+vim.filetype.add({ extension = { sea = "sea" } })
+```
+
+Helix (`languages.toml`):
+
+```toml
+[language-server.sea]
+command = "sea"
+args = ["lsp"]
+
+[[language]]
+name = "sea"
+scope = "source.sea"
+file-types = ["sea"]
+roots = ["sea.toml"]
+comment-token = "--"
+language-servers = ["sea"]
+```
+
+VS Code needs a small extension that starts `sea lsp` (any generic LSP
+client extension that takes a command works).
+
 These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
 `tools/test.sea`, `tools/check.sea`, `tools/build.sea`, `tools/new.sea`,
-`tools/get.sea`) built into the binary.
+`tools/get.sea`, `tools/lsp.sea`) built into the binary.
 
 ---
 

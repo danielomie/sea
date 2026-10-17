@@ -74,6 +74,7 @@ bin/sea prof app.sea                  # CPU profile: hot functions and lines (-f
 bin/sea test -cover                   # line coverage of the code under test (-coverprofile out.lcov)
 bin/sea new myapp                     # start a project (sea.toml, main.sea, a test)
 bin/sea get https://host/repo@v1.0    # add a dependency: sea_modules/, sea.lock; require("repo")
+bin/sea lsp                           # language server: diagnostics, format, hover, definition, completion
 ```
 
 Native libraries are built per library, e.g. `make -C libs/json`.

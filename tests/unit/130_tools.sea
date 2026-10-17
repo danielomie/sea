@@ -278,4 +278,66 @@ print(run_in("proj", {"get", "-rm", "nothing"}))
 print(run({"get"}))
 local app = process.run({dir .. "/proj/app"}, {cwd = "/"})
 print(app.code, string.trim(app.stdout))
+
+print("-- sea lsp")
+fs.mkdir(dir .. "/ls")
+fs.write(dir .. "/ls/util.sea", "local M = {}\n\n-- util.add(a, b) → the sum\nfunction M.add(a, b)\n    return a + b\nend\n\nM.VERSION = \"1.0\"\n\nreturn M\n")
+local app_src = "local util = require(\"./util\")\n\n-- greet someone\nlocal function greet(name)\n    return \"hi \" .. name\nend\n\nprint(util.add(1, 2), greet(\"é\"), string.upper(\"x\"))\npritn(1)\n"
+fs.write(dir .. "/ls/app.sea", app_src)
+local lsp = process.spawn({SEA, "lsp"}, {cwd = dir .. "/ls"})
+local inbuf = ""
+local function lsend(body) lsp:write("Content-Length: " .. tostring(len(body)) .. "\r\n\r\n" .. body) end
+local function lrecv()
+    while true do
+        local h = string.find(inbuf, "\r\n\r\n")
+        if h ~= nil then
+            local n = tonumber(re.match("Content-Length: ([0-9]+)", inbuf).groups[1])
+            if len(inbuf) >= h + 3 + n then
+                local body = string.sub(inbuf, h + 4, h + 3 + n)
+                inbuf = string.sub(inbuf, h + 4 + n)
+                return body
+            end
+        end
+        local chunk = lsp:read(65536, 10000)
+        if is_error(chunk) or chunk == "" then return "" end
+        inbuf = inbuf .. chunk
+    end
+end
+local function jq(str) return "\"" .. string.replace(string.replace(string.replace(str, "\\", "\\\\"), "\"", "\\\""), "\n", "\\n") .. "\"" end
+local uri = "file://" .. dir .. "/ls/app.sea"
+lsend("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":" .. jq("file://" .. dir .. "/ls") .. "}}")
+local r = lrecv()
+print(string.contains(r, "\"hoverProvider\":true"), string.contains(r, "\"triggerCharacters\":[\".\",\":\"]"))
+lsend("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":" .. jq(uri) .. ",\"version\":1,\"text\":" .. jq(app_src) .. "}}}")
+r = lrecv()
+print(string.contains(r, "publishDiagnostics"), string.contains(r, "did you mean 'print'?"), string.contains(r, "\"line\":8"))
+local function at(id, method, line, ch)
+    lsend("{\"jsonrpc\":\"2.0\",\"id\":" .. tostring(id) .. ",\"method\":\"textDocument/" .. method .. "\",\"params\":{\"textDocument\":{\"uri\":" .. jq(uri) ..
+        "},\"position\":{\"line\":" .. tostring(line) .. ",\"character\":" .. tostring(ch) .. "}}}")
+    return lrecv()
+end
+r = at(2, "hover", 7, 12)
+print(string.contains(r, "function util.add(a, b)"), string.contains(r, "the sum"), string.contains(r, "util.sea:4"))
+r = at(3, "definition", 7, 12)
+print(string.contains(r, "/ls/util.sea"), string.contains(r, "\"line\":3"))
+r = at(4, "hover", 7, 24)
+print(string.contains(r, "function greet(name)"), string.contains(r, "greet someone"))
+r = at(5, "hover", 7, 44)
+print(string.contains(r, "string.upper"), string.contains(r, "built-in function"))
+r = at(6, "completion", 7, 11)
+print(string.contains(r, "\"label\":\"add\""), string.contains(r, "\"label\":\"VERSION\""))
+r = at(7, "documentSymbol", 0, 0)
+print(string.contains(r, "\"name\":\"greet\""), string.contains(r, "\"name\":\"util\""))
+lsend("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":" .. jq(uri) ..
+    ",\"version\":2},\"contentChanges\":[{\"text\":\"local   x=1\\nprint(x)\\n\"}]}}")
+r = lrecv()
+print(string.contains(r, "\"diagnostics\":[]"))
+r = at(8, "formatting", 0, 0)
+print(string.contains(r, "\"newText\":\"local x = 1\\nprint(x)\\n\""))
+lsend("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"nope\"}")
+print(string.contains(lrecv(), "-32601"))
+lsend("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"shutdown\"}")
+print(lrecv())
+lsend("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}")
+print(lsp:wait().code)
 fs.remove(dir, {recursive = true})
