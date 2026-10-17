@@ -25,6 +25,7 @@
 #include "sea_array.h"
 #include "sea_struct.h"
 #include "sea_map.h"
+#include "sea_sched.h"
 #include "sea_memory.h"
 #include <errno.h>
 #include <math.h>
@@ -1972,6 +1973,49 @@ static SeaValue fn_format(SeaVM *vm, int argc, SeaValue *args) {
     return result;
 }
 
+/* ---- globals ---- */
+
+static int cmp_str_ptr(const void *a, const void *b) {
+    const SeaString *x = *(SeaString *const *)a, *y = *(SeaString *const *)b;
+    return strcmp(x->data, y->data);
+}
+
+/* globals() → the names of the global variables defined now (the built-in
+ * functions and modules, and any the program set), sorted. For linters. */
+static SeaValue fn_globals(SeaVM *vm, int argc, SeaValue *args) {
+    (void)argc; (void)args;
+    SeaTableSync *ts = &vm->shared->globals_sync;
+    pthread_mutex_lock(&ts->mu);
+    SeaTable *g = vm_globals(vm);
+    uint32_t n = 0, cap = sea_table_count(g) + 1;
+    SeaString **names = malloc(cap * sizeof *names);
+    uint32_t it = 0;
+    SeaValue k, v;
+    while (names && sea_table_next(g, &it, &k, &v)) {
+        if (!sea_is_string(k) || sea_is_nil(v) || n >= cap) continue;
+        SeaString *s = SEA_AS_STRING(k);
+        bool ident = s->len > 0 && !(s->data[0] >= '0' && s->data[0] <= '9');
+        for (uint32_t i = 0; ident && i < s->len; i++) {
+            unsigned char c = (unsigned char)s->data[i];
+            ident = c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        }
+        if (!ident) continue;
+        sea_obj_retain(&s->obj);
+        names[n++] = s;
+    }
+    pthread_mutex_unlock(&ts->mu);
+    SeaArray *out = sea_array_new(n);
+    if (names) {
+        qsort(names, n, sizeof *names, cmp_str_ptr);
+        for (uint32_t i = 0; i < n; i++) {
+            sea_array_push(out, sea_obj_val(&names[i]->obj));
+            sea_obj_release(&names[i]->obj);
+        }
+        free(names);
+    }
+    return sea_obj_val(&out->obj);
+}
+
 /* ---- registration ---- */
 
 void sea_lib_parser_register(SeaVM *vm) {
@@ -1984,6 +2028,7 @@ void sea_lib_parser_register(SeaVM *vm) {
         {"children",   fn_children},
         {"walk",       fn_walk},
         {"format",     fn_format},
+        {"globals",    fn_globals},
     };
     for (size_t i = 0; i < sizeof F / sizeof F[0]; i++) {
         SeaClosure *cl = sea_native_closure(F[i].name, F[i].fn);

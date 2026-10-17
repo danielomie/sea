@@ -27,6 +27,7 @@ sea --jit file.sea               # with the JIT (bin/sea-jit)
 sea fmt [flags] [path...]        # format source code
 sea doc [flags] [path...] [name] # documentation from comments
 sea test [flags] [path...]       # run the *_test.sea files
+sea check [flags] [path...]      # find likely mistakes without running
 sea version
 ```
 
@@ -130,8 +131,57 @@ test or is killed fails. The exit status is 1 when anything failed.
 | `-j N` | Files run at the same time (default: the number of CPUs) |
 | `-timeout S` | Seconds a file may take before it is killed (default 600) |
 
+### `sea check`
+
+Finds likely mistakes without running the code: each problem is printed as
+`file:line:col: message [code]`, and the exit status is 1 when there is any
+(2 for a bad flag or path). Paths are files or directories (searched for
+`*.sea`, hidden directories skipped; default: the current directory). A
+global assigned in one of the checked files (`function helper()`, `x = 1`)
+counts as defined in all of them.
+
+```
+$ sea check
+app.sea:4:1: undefined variable 'pritn' (did you mean 'print'?) [undefined]
+app.sea:9:10: 'add' takes 2 arguments, called with 3 [args]
+app.sea:12:7: variable 'tmp' is never used [unused]
+```
+
+| Code | Severity | Reports |
+|------|----------|---------|
+| `syntax` | error | The file does not parse or compile |
+| `undefined` | error | A variable that is not local, not built in and not assigned as a global in any checked file; suggests a close name, and the Sea way for names from other languages (`array`, `push`, `pairs`, ...) |
+| `require` | error | `require("literal")` of a module that cannot be found (searched like `require`: the file's directory, the working directory, `SEA_PATH`) |
+| `args` | error | A call to a local function with more arguments than it takes |
+| `format` | error | `string.format` / `printf` with a literal format whose `%` directives do not match the number of arguments |
+| `unused` | warning | A local variable or function that is never read (names starting with `_` are exempt) |
+| `redeclared` | warning | `local x` twice in the same block |
+| `shadow` | warning | A local that hides a local of an enclosing block or function |
+| `unreachable` | warning | Code after `break`, `continue`, `panic`, `os.exit` or an `if` whose branches all leave |
+| `dupkey` | warning | The same key twice in a table literal |
+| `selfassign` | warning | `x = x` |
+
+A line ending with the comment `-- check:ignore` is not checked; with
+`-- check:ignore unused shadow` only those codes are skipped on it.
+
+| Flag | |
+|------|--|
+| `-disable CODES` | Skip these checks (comma separated) |
+| `-only CODES` | Run only these checks |
+| `-g NAMES` | Globals defined elsewhere (comma separated) |
+| `-all` | Also report unused parameters and loop variables |
+| `-f text\|json` | Output format; `json` is an array of `{file, line, col, code, severity, message}` |
+| `-w` | Exit with status 0 when there are only warnings |
+
+The checks are the built-in module `sea/check`:
+`check.file(path [, opts])` and `check.source(src [, opts])` return the
+diagnostics as an array of `{file, line, col, code, severity, message}`
+(opts: `name`, `dir` for `require`, `globals` (table of names), `disable`
+(table of codes), `all_unused`); `check.defined_globals(src)` gives the
+globals a source assigns; `check.CODES` lists the codes.
+
 These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
-`tools/test.sea`) built into the binary.
+`tools/test.sea`, `tools/check.sea`) built into the binary.
 
 ---
 
@@ -713,6 +763,7 @@ print(parser.format("local   t={a=1}"))   -- local t = {a = 1}
 | `children` | `children(node) → array` | The child nodes, in source order |
 | `walk` | `walk(node, fn)` | Calls `fn(node, parent)` on every node, parents first; returning `false` skips that node's children. The children are read after `fn` returns, so `fn` may change them. A panic in `fn` propagates |
 | `format` | `format(src_or_node [, opts]) → string \| error` | Source code printed in the canonical layout (below) |
+| `globals` | `globals() → array` | The names of the global variables defined now (built-in functions and modules, and any the program set), sorted |
 
 Options: `name` (used in error messages, default `"<input>"`); for `parse` and
 `parse_file`, `comments = true` adds the comments to the root as

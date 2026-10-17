@@ -94,8 +94,7 @@ end
 safe_call("divisao-zero", function()
     print("  antes do panic")
     panic("divisão por zero detectada")
-    -- Em Sea, recover() restaura a execução aqui (diferente de Go)
-    print("  (continuação após recover)")
+    -- como em Go: o resto desta função não roda; safe_call retorna normalmente
 end)
 print("  safe_call retorna normalmente após panic capturado")
 print("")

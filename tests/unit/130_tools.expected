@@ -96,3 +96,38 @@ FAIL  t/z_test.sea  (T)
 
 2 files, 1 failed; 2 passed (T)
 [0] no test files
+-- sea check
+[1] c.sea:1:7: variable 'json' is never used [unused]
+c.sea:1:22: module './nope' not found [require]
+c.sea:2:7: variable 'x' is never used [unused]
+c.sea:3:7: 'x' is already declared in this block (line 2) [redeclared]
+c.sea:4:1: undefined variable 'pritn' (did you mean 'print'?) [undefined]
+c.sea:6:10: 'add' takes 2 arguments, called with 3 [args]
+c.sea:7:20: the format takes 2 arguments, got 1 [format]
+c.sea:8:19: key 'a' is set twice in this table [dupkey]
+c.sea:9:1: 't' is assigned to itself [selfassign]
+c.sea:12:5: unreachable code [unreachable]
+c.sea:14:13: undefined variable 'array' (arrays are written [], append with arr[] = v) [undefined]
+c.sea:16:11: 'x' hides the local declared at line 3 [shadow]
+c.sea:20:7: variable 'w' is never used [unused]
+[1] c.sea:4:1: undefined variable 'pritn' (did you mean 'print'?) [undefined]
+c.sea:6:10: 'add' takes 2 arguments, called with 3 [args]
+c.sea:14:13: undefined variable 'array' (arrays are written [], append with arr[] = v) [undefined]
+c.sea:22:15: undefined variable 'helper' [undefined]
+[1] c.sea:1:7: variable 'json' is never used [unused]
+c.sea:2:7: variable 'x' is never used [unused]
+c.sea:4:1: undefined variable 'pritn' (did you mean 'print'?) [undefined]
+c.sea:6:10: 'add' takes 2 arguments, called with 3 [args]
+c.sea:7:20: the format takes 2 arguments, got 1 [format]
+c.sea:8:19: key 'a' is set twice in this table [dupkey]
+c.sea:9:1: 't' is assigned to itself [selfassign]
+c.sea:12:5: unreachable code [unreachable]
+c.sea:14:13: undefined variable 'array' (arrays are written [], append with arr[] = v) [undefined]
+c.sea:20:7: variable 'w' is never used [unused]
+c.sea:21:5: variable 'k' is never used [unused]
+[1] [
+  {"file": "c.sea", "line": 7, "col": 20, "code": "format", "severity": "error", "message": "the format takes 2 arguments, got 1"}
+]
+[0] 
+[2]  | sea check: unknown check bogus
+[0] w.sea:1:7: variable 'unused' is never used [unused]

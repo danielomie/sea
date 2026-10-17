@@ -1,0 +1,171 @@
+-- sea check — find likely mistakes in Sea code without running it
+--
+--   sea check [flags] [path ...]
+--
+-- Paths are files or directories (searched for *.sea, skipping hidden
+-- directories); the default is the current directory. Prints one line per
+-- problem, file:line:col: message [code], and exits with status 1 when it
+-- found any. The checks are listed in `sea check -h`; the rules come from the
+-- built-in module sea/check.
+--
+--   -disable CODES   skip these checks (comma separated)
+--   -only CODES      run only these checks
+--   -g NAMES         names of globals defined elsewhere (comma separated)
+--   -all             also report unused parameters and loop variables
+--   -f text|json     output format (default text)
+--   -w               exit with status 0 when there are only warnings
+
+local check = require("sea/check")
+
+local function usage()
+    print("usage: sea check [-disable CODES] [-only CODES] [-g NAMES] [-all] [-f text|json] [-w] [path ...]")
+    print("")
+    print("Checks (errors fail at run time, warnings are probable mistakes):")
+    print("  syntax       error    the file does not parse or compile")
+    print("  undefined    error    a variable that is not local, built in or set as a global anywhere")
+    print("  require      error    require() of a module that cannot be found")
+    print("  args         error    more arguments than a local function takes")
+    print("  format       error    string.format / printf arguments that do not match the format")
+    print("  unused       warning  a local variable or function that is never read")
+    print("  redeclared   warning  a local declared twice in the same block")
+    print("  shadow       warning  a local that hides a local of an enclosing block")
+    print("  unreachable  warning  code after return, break, continue or panic")
+    print("  dupkey       warning  a key written twice in a table literal")
+    print("  selfassign   warning  x = x")
+    print("")
+    print("A line ending with `-- check:ignore [codes]` is not checked.")
+end
+
+local function code_set(s)
+    local set = {}
+    for _, c in string.split(s or "", ",") do
+        c = string.trim(c)
+        if c ~= "" then
+            local okc = false
+            for _, k in check.CODES do
+                if k == c then okc = true end
+            end
+            if not okc then
+                io.write_err("sea check: unknown check " .. c .. "\n")
+                os.exit(2)
+            end
+            set[c] = true
+        end
+    end
+    return set
+end
+
+local disable = {}
+local only = nil
+local extra = {}
+local all = false
+local format = "text"
+local warn_ok = false
+local paths = []
+
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-disable" then
+        i = i + 1
+        disable = code_set(os.args[i])
+    elseif a == "-only" then
+        i = i + 1
+        only = code_set(os.args[i])
+    elseif a == "-g" then
+        i = i + 1
+        for _, g in string.split(os.args[i] or "", ",") do
+            if string.trim(g) ~= "" then extra[string.trim(g)] = true end
+        end
+    elseif a == "-all" then
+        all = true
+    elseif a == "-w" then
+        warn_ok = true
+    elseif a == "-f" then
+        i = i + 1
+        format = os.args[i]
+        if format ~= "text" and format ~= "json" then
+            io.write_err("sea check: -f takes text or json\n")
+            os.exit(2)
+        end
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        io.write_err("sea check: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    else
+        paths[] = a
+    end
+    i = i + 1
+end
+if len(paths) == 0 then paths[] = "." end
+if only ~= nil then
+    for _, c in check.CODES do
+        if not only[c] then disable[c] = true end
+    end
+end
+
+local files = []
+for _, p in paths do
+    if fs.isdir(p) then
+        for _, f in fs.walk(p, {files = true}) do
+            local hidden = false
+            for _, part in path.parts(path.relative(p, f)) do
+                if string.starts_with(part, ".") and part ~= "." and part ~= ".." then hidden = true end
+            end
+            if not hidden and path.ext(f) == ".sea" then files[] = path.normalize(f) end
+        end
+    elseif fs.exists(p) then
+        files[] = p
+    else
+        io.write_err("sea check: " .. p .. ": no such file or directory\n")
+        os.exit(2)
+    end
+end
+
+-- Globals set in one file count as defined in the others
+local sources = {}
+local globals = {}
+for _, f in files do
+    local src = fs.read(f)
+    sources[f] = src
+    if not is_error(src) then
+        for g, _ in check.defined_globals(src) do globals[g] = true end
+    end
+end
+for g, _ in extra do globals[g] = true end
+
+local opts = {}
+opts.globals = globals
+opts.disable = disable
+opts.all_unused = all
+
+local function json_str(s)
+    s = string.replace(s, "\\", "\\\\")
+    s = string.replace(s, "\"", "\\\"")
+    s = string.replace(s, "\n", "\\n")
+    s = string.replace(s, "\t", "\\t")
+    return "\"" .. s .. "\""
+end
+
+local errors = 0
+local warnings = 0
+local json = []
+for _, f in files do
+    local diags = check.file(f, opts)
+    for _, d in diags do
+        if d.severity == "error" then errors = errors + 1 else warnings = warnings + 1 end
+        if format == "json" then
+            json[] = string.format("{\"file\": %s, \"line\": %d, \"col\": %d, \"code\": %s, \"severity\": %s, \"message\": %s}",
+                json_str(d.file), d.line, d.col, json_str(d.code), json_str(d.severity), json_str(d.message))
+        else
+            print(string.format("%s:%d:%d: %s [%s]", d.file, d.line, d.col, d.message, d.code))
+        end
+    end
+end
+if format == "json" then
+    if len(json) == 0 then print("[]") else print("[\n  " .. string.join(json, ",\n  ") .. "\n]") end
+end
+if errors > 0 or (warnings > 0 and not warn_ok) then os.exit(1) end

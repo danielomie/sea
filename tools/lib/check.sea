@@ -1,0 +1,640 @@
+-- sea/check — static checks for Sea source code (used by `sea check` and `sea lsp`)
+--
+--   local check = require("sea/check")
+--   for _, d in check.file("app.sea") do
+--       print(d.file .. ":" .. d.line .. ":" .. d.col .. ": " .. d.message)
+--   end
+--
+-- A diagnostic is {file, line, col, code, severity, message}; severity is
+-- "error" (the code fails when it runs that line) or "warning" (probably a
+-- mistake). The codes:
+--
+--   syntax       the file does not parse or compile
+--   undefined    a variable that is neither local, a built-in nor a global set somewhere
+--   unused       a local variable or function that is never read
+--   redeclared   a local declared twice in the same block
+--   shadow       a local that hides another local of an enclosing block
+--   unreachable  code after return, break, continue or panic
+--   args         more arguments than a local function takes
+--   format       string.format / printf arguments that do not match the format
+--   require      require() of a module that cannot be found
+--   dupkey       a key written twice in a table literal
+--   selfassign   x = x
+--
+-- A line ending with the comment `-- check:ignore` gets no diagnostics; with
+-- `-- check:ignore code1 code2` only those codes are skipped there.
+
+local parser = require("sea/parser")
+
+local M = {}
+
+M.CODES = {
+    "syntax", "undefined", "unused", "redeclared", "shadow", "unreachable", "args", "format", "require",
+    "dupkey", "selfassign",
+}
+
+local ERRORS = {}
+ERRORS.syntax = true
+ERRORS.undefined = true
+ERRORS.require = true
+ERRORS.args = true
+ERRORS.format = true
+
+-- what to say about names from other languages
+local HINTS = {}
+HINTS.array = "arrays are written [], append with arr[] = v"
+HINTS.push = "append to an array with arr[] = v"
+HINTS.table = "append to an array with arr[] = v; there is no table library"
+HINTS.pairs = "iterate with `for k, v in t do`"
+HINTS.ipairs = "iterate with `for i, v in arr do` (0-based)"
+HINTS.unpack = "there is no unpack; index the array"
+HINTS.null = "nil is Sea's null"
+HINTS.None = "nil is Sea's null"
+HINTS.self = "self exists only in functions declared with `:` (function T:m())"
+
+local builtin_globals = nil
+
+local function builtins()
+    if builtin_globals == nil then
+        builtin_globals = {}
+        for _, g in parser.globals() do builtin_globals[g] = true end
+    end
+    return builtin_globals
+end
+
+-- Edit distance (a swap of two neighbours counts as one edit), stopping
+-- early above max
+local function distance(a, b, max)
+    local la = len(a)
+    local lb = len(b)
+    if math.abs(la - lb) > max then return max + 1 end
+    local before = nil
+    local prev = []
+    for j = 0, lb do prev[] = j end
+    for i = 1, la do
+        local cur = []
+        cur[] = i
+        local best = i
+        local ca = string.byte(a, i)
+        for j = 1, lb do
+            local cb = string.byte(b, j)
+            local cost = ca == cb and 0 or 1
+            local v = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if before ~= nil and i > 1 and j > 1 and ca == string.byte(b, j - 1) and string.byte(a, i - 1) == cb then
+                v = math.min(v, before[j - 2] + 1)
+            end
+            cur[] = v
+            if v < best then best = v end
+        end
+        if best > max then return max + 1 end
+        before = prev
+        prev = cur
+    end
+    return prev[lb]
+end
+
+-- Names assigned as globals anywhere in a tree (x = ..., function x() ...)
+local function collect_globals(ast, out)
+    parser.walk(ast, function(n)
+        if n.type == "assign" then
+            for _, t in n.targets do
+                if t.type == "ident" then out[t.name] = true end
+            end
+        end
+    end)
+    return out
+end
+
+-- check.defined_globals(src) → table of the global names a source assigns
+function M.defined_globals(src)
+    local ast = parser.parse(src)
+    if is_error(ast) then return {} end
+    return collect_globals(ast, {})
+end
+
+-- Count the arguments a format string takes (nil if it cannot tell)
+local function format_args(fmt)
+    local n = 0
+    local i = 1
+    local l = len(fmt)
+    while i <= l do
+        local c = string.sub(fmt, i, i)
+        if c == "%" then
+            i = i + 1
+            if string.sub(fmt, i, i) == "%" then
+                i = i + 1
+            else
+                while i <= l and string.contains("-+ #0", string.sub(fmt, i, i)) do i = i + 1 end
+                while i <= l and string.contains("0123456789*", string.sub(fmt, i, i)) do
+                    if string.sub(fmt, i, i) == "*" then n = n + 1 end
+                    i = i + 1
+                end
+                if string.sub(fmt, i, i) == "." then
+                    i = i + 1
+                    while i <= l and string.contains("0123456789*", string.sub(fmt, i, i)) do
+                        if string.sub(fmt, i, i) == "*" then n = n + 1 end
+                        i = i + 1
+                    end
+                end
+                if i > l then return nil end
+                n = n + 1
+                i = i + 1
+            end
+        else
+            i = i + 1
+        end
+    end
+    return n
+end
+
+-- Can the module be found from dir (as require would)?
+local function module_exists(name, dir)
+    if builtins()[name] then return true end
+    if name == "sea/test" or name == "sea/check" or name == "sea/parser" then return true end
+    local function try(base)
+        return fs.exists(base .. ".sea") or fs.exists(base .. "/init.sea") or fs.exists(base .. ".so")
+    end
+    if path.isabs(name) then return try(name) end
+    if try(path.join(dir, name)) or try(name) then return true end
+    local sp = os.getenv("SEA_PATH")
+    if sp ~= nil then
+        for _, d in string.split(sp, ":") do
+            if d ~= "" and try(path.join(d, name)) then return true end
+        end
+    end
+    return false
+end
+
+-- A call whose last argument may expand to several values
+local function expands(args)
+    if len(args) == 0 then return false end
+    local last = args[len(args) - 1]
+    return last.type == "call" or last.type == "method_call" or last.type == "vararg"
+end
+
+local function is_call_to(n, obj, field)
+    local c = n.callee
+    if c == nil then return false end
+    if obj == nil then return c.type == "ident" and c.name == field end
+    return c.type == "field" and c.field == field and c.object.type == "ident" and c.object.name == obj
+end
+
+-- Does a statement always leave its block?
+local function terminates(s)
+    local t = s.type
+    if t == "return" or t == "break" or t == "continue" or t == "panic" then return true end
+    if t == "expr_stmt" and s.expr.type == "call" and is_call_to(s.expr, "os", "exit") then return true end
+    if t == "do" then
+        local n = len(s.stmts)
+        return n > 0 and terminates(s.stmts[n - 1])
+    end
+    if t == "if" then
+        if s.else_body == nil then return false end
+        local function body_ends(b)
+            if b.type == "if" then return terminates(b) end
+            local n = len(b.stmts)
+            return n > 0 and terminates(b.stmts[n - 1])
+        end
+        return body_ends(s.then_body) and body_ends(s.else_body)
+    end
+    return false
+end
+
+-- check.source(src [, opts]) → array of diagnostics
+-- opts: name (for messages), dir (where require looks; default "."),
+-- globals (table name → true of globals set elsewhere), disable (table code
+-- → true), all_unused (also report unused parameters and loop variables)
+function M.source(src, opts)
+    opts = opts or {}
+    local name = opts.name or "<input>"
+    local dir = opts.dir or "."
+    local disable = opts.disable or {}
+    local out = []
+
+    local popts = {}
+    popts.name = name
+    local bad = parser.check(src, popts)
+    if bad ~= nil then
+        local d = {}
+        d.file = name
+        d.line = bad.line or 1
+        d.col = bad.col or 1
+        d.code = "syntax"
+        d.severity = "error"
+        d.message = bad.message
+        out[] = d
+        return out
+    end
+    popts.comments = true
+    local ast = parser.parse(src, popts)
+
+    -- lines with -- check:ignore
+    local ignore = {}
+    for _, c in ast.comments do
+        local p = string.find(c.text, "check:ignore")
+        if p ~= nil then
+            local rest = string.trim(string.sub(c.text, p + 12))
+            local set = {}
+            local any = true
+            for _, code in string.split(rest, " ") do
+                if code ~= "" then
+                    set[code] = true
+                    any = false
+                end
+            end
+            set["*"] = any
+            ignore[c.line] = set
+        end
+    end
+
+    local lines = string.split(src, "\n")
+
+    -- where a declared name is written: the first match from the node's column
+    local function name_at(node, n)
+        local p = {}
+        p.line = node.line
+        p.col = node.col
+        local text = lines[(node.line or 1) - 1]
+        if text ~= nil then
+            local from = node.col or 1
+            while true do
+                local c = string.find(text, n, from)
+                if c == nil then break end
+                local before = c > 1 and string.sub(text, c - 1, c - 1) or " "
+                local after = string.sub(text, c + len(n), c + len(n))
+                if not re.test("[A-Za-z0-9_]", before) and not re.test("[A-Za-z0-9_]", after) then
+                    p.col = c
+                    break
+                end
+                from = c + 1
+            end
+        end
+        return p
+    end
+
+    local function report(code, node, msg)
+        if disable[code] then return end
+        local line = node.line or 1
+        local ig = ignore[line]
+        if ig ~= nil and (ig["*"] or ig[code]) then return end
+        local d = {}
+        d.file = name
+        d.line = line
+        d.col = node.col or 1
+        d.code = code
+        d.severity = ERRORS[code] and "error" or "warning"
+        d.message = msg
+        out[] = d
+    end
+
+    local globals = collect_globals(ast, {})
+    if opts.globals ~= nil then
+        for g, _ in opts.globals do globals[g] = true end
+    end
+    local known = builtins()
+
+    -- ---- scopes ----
+    local scope = nil
+
+    local function open_scope(is_func)
+        local s = {}
+        s.vars = {}
+        s.order = []
+        s.parent = scope
+        s.is_func = is_func
+        scope = s
+    end
+
+    local function lookup(n)
+        local s = scope
+        while s ~= nil do
+            local v = s.vars[n]
+            if v ~= nil then return v end
+            s = s.parent
+        end
+        return nil
+    end
+
+    local function close_scope()
+        for _, v in scope.order do
+            if not v.used and not string.starts_with(v.name, "_") and v.report_unused then
+                local what = v.kind == "func" and "function" or (v.kind == "param" and "parameter" or "variable")
+                local how = v.written and " is assigned but never used" or " is never used"
+                report("unused", v, what .. " '" .. v.name .. "'" .. how)
+            end
+        end
+        scope = scope.parent
+    end
+
+    local function declare(n, at, kind)
+        if n == "_" then return nil end
+        local node = name_at(at, n)
+        local prev = scope.vars[n]
+        if prev ~= nil then
+            if kind == "local" or kind == "func" then
+                report("redeclared", node, "'" .. n .. "' is already declared in this block (line " .. tostring(prev.line) .. ")")
+            end
+        elseif kind == "local" or kind == "func" then
+            local outer = lookup(n)
+            if outer ~= nil and (outer.kind == "local" or outer.kind == "func") then
+                report("shadow", node, "'" .. n .. "' hides the local declared at line " .. tostring(outer.line))
+            end
+        end
+        local v = {}
+        v.name = n
+        v.line = node.line
+        v.col = node.col
+        v.kind = kind
+        v.used = false
+        v.written = false
+        v.report_unused = kind == "local" or kind == "func" or opts.all_unused
+        scope.vars[n] = v
+        scope.order[] = v
+        return v
+    end
+
+    local function suggest(n)
+        if len(n) < 3 then return nil end
+        local best = nil
+        local best_d = 3
+        local function consider(c)
+            if c == n then return end
+            local d = distance(n, c, 2)
+            if d < best_d then
+                best_d = d
+                best = c
+            end
+        end
+        local s = scope
+        while s ~= nil do
+            for c, _ in s.vars do consider(c) end
+            s = s.parent
+        end
+        for c, _ in known do consider(c) end
+        for c, _ in globals do consider(c) end
+        if best ~= nil and best_d <= (len(n) >= 6 and 2 or 1) then return best end
+        return nil
+    end
+
+    local expr = nil
+    local block = nil
+    local stmt = nil
+
+    local function read_name(node)
+        local v = lookup(node.name)
+        if v ~= nil then
+            v.used = true
+            return v
+        end
+        if known[node.name] or globals[node.name] then return nil end
+        local msg = "undefined variable '" .. node.name .. "'"
+        local hint = HINTS[node.name]
+        local s = suggest(node.name)
+        if s ~= nil then
+            msg = msg .. " (did you mean '" .. s .. "'?)"
+        elseif hint ~= nil then
+            msg = msg .. " (" .. hint .. ")"
+        end
+        report("undefined", node, msg)
+        return nil
+    end
+
+    local function func(n)
+        open_scope(true)
+        if n.params ~= nil then
+            for _, p in n.params do
+                if not p.is_vararg then declare(p.name, n, "param") end
+            end
+        end
+        block(n.body, true)
+        close_scope()
+    end
+
+    local function args_of(n)
+        for _, a in n.args do expr(a) end
+    end
+
+    expr = function(n)
+        if n == nil then return end
+        local t = n.type
+        if t == "ident" then
+            read_name(n)
+        elseif t == "func" then
+            func(n)
+        elseif t == "call" then
+            local v = nil
+            if n.callee.type == "ident" then
+                v = read_name(n.callee)
+            else
+                expr(n.callee)
+            end
+            args_of(n)
+            local fixed = len(n.args) - (expands(n.args) and 1 or 0)
+            if v ~= nil and v.params ~= nil and not v.vararg and fixed > v.params then
+                report("args", n, "'" .. v.name .. "' takes " .. tostring(v.params) .. " argument" .. (v.params == 1 and "" or "s") ..
+                    ", called with " .. tostring(len(n.args)))
+            end
+            -- string.format / printf
+            local fi = nil
+            if is_call_to(n, "string", "format") or is_call_to(n, nil, "printf") then fi = 0 end
+            if fi ~= nil and len(n.args) > 0 and n.args[0].type == "string" and not expands(n.args) then
+                local want = format_args(n.args[0].value)
+                local got = len(n.args) - 1
+                if want ~= nil and want ~= got then
+                    report("format", n, "the format takes " .. tostring(want) .. " argument" .. (want == 1 and "" or "s") ..
+                        ", got " .. tostring(got))
+                end
+            end
+            -- require("literal")
+            if is_call_to(n, nil, "require") and len(n.args) == 1 and n.args[0].type == "string" then
+                local m = n.args[0].value
+                if not module_exists(m, dir) then report("require", n.args[0], "module '" .. m .. "' not found") end
+            end
+        elseif t == "method_call" then
+            expr(n.object)
+            args_of(n)
+        elseif t == "table" then
+            local seen = {}
+            for _, f in n.fields do
+                if f.key ~= nil then
+                    expr(f.key)
+                    if f.key.type == "string" or f.key.type == "number" then
+                        local k = f.key.type .. ":" .. tostring(f.key.value)
+                        if seen[k] then
+                            report("dupkey", f.key, "key " .. (f.key.type == "string" and ("'" .. f.key.value .. "'") or tostring(f.key.value)) ..
+                                " is set twice in this table")
+                        end
+                        seen[k] = true
+                    end
+                end
+                expr(f.value)
+            end
+        else
+            for _, c in parser.children(n) do expr(c) end
+        end
+    end
+
+    -- an assignment target
+    local function target(n)
+        if n.type == "ident" then
+            local v = lookup(n.name)
+            if v ~= nil then
+                v.written = true
+                v.params = nil -- no longer known to be that function
+            end
+        elseif n.type == "index" then
+            expr(n.object)
+            expr(n.index)
+        elseif n.type == "field" then
+            expr(n.object)
+        else
+            expr(n)
+        end
+    end
+
+    stmt = function(s)
+        local t = s.type
+        if t == "local" then
+            local is_local_func = len(s.names) == 1 and len(s.values) == 1 and s.values[0].type == "func" and s.values[0].name == s.names[0]
+            if is_local_func then
+                local v = declare(s.names[0], s, "func")
+                if v ~= nil then
+                    local p = 0
+                    local va = false
+                    for _, prm in s.values[0].params do
+                        if prm.is_vararg then va = true else p = p + 1 end
+                    end
+                    v.params = p
+                    v.vararg = va
+                end
+                func(s.values[0])
+            else
+                for _, v in s.values do expr(v) end
+                for i, nm in s.names do
+                    local v = declare(nm, s, "local")
+                    if v ~= nil and i < len(s.values) and s.values[i].type == "func" then
+                        local p = 0
+                        local va = false
+                        for _, prm in s.values[i].params do
+                            if prm.is_vararg then va = true else p = p + 1 end
+                        end
+                        v.params = p
+                        v.vararg = va
+                    end
+                end
+            end
+        elseif t == "assign" then
+            for _, v in s.values do expr(v) end
+            for _, tg in s.targets do target(tg) end
+            if len(s.targets) == 1 and len(s.values) == 1 and s.targets[0].type == "ident" and s.values[0].type == "ident" and
+                s.targets[0].name == s.values[0].name then
+                report("selfassign", s, "'" .. s.targets[0].name .. "' is assigned to itself")
+            end
+        elseif t == "if" then
+            expr(s.cond)
+            block(s.then_body, false)
+            if s.else_body ~= nil then
+                if s.else_body.type == "if" then stmt(s.else_body) else block(s.else_body, false) end
+            end
+        elseif t == "while" then
+            expr(s.cond)
+            block(s.body, false)
+        elseif t == "for_num" then
+            expr(s.start)
+            expr(s.limit)
+            expr(s.step)
+            open_scope(false)
+            declare(s.var, s, "for")
+            block(s.body, true)
+            close_scope()
+        elseif t == "for_in" then
+            expr(s.iter)
+            open_scope(false)
+            for _, nm in s.vars do declare(nm, s, "for") end
+            block(s.body, true)
+            close_scope()
+        elseif t == "do" then
+            block(s, false)
+        elseif t == "select" then
+            for _, c in s.cases do
+                open_scope(false)
+                if c.stmt ~= nil then
+                    local cs = c.stmt
+                    if cs.type == "assign" and len(cs.targets) == 1 and cs.targets[0].type == "ident" then
+                        for _, v in cs.values do expr(v) end
+                        local nm = cs.targets[0].name
+                        local v = lookup(nm)
+                        if v ~= nil then
+                            v.written = true
+                        else
+                            local nv = declare(nm, cs.targets[0], "for")
+                            if nv ~= nil then nv.report_unused = false end
+                        end
+                    else
+                        stmt(cs)
+                    end
+                end
+                block(c.body, true)
+                close_scope()
+            end
+        else
+            for _, c in parser.children(s) do expr(c) end
+        end
+    end
+
+    -- same_scope: the block's names go in the scope already open (a function
+    -- or loop body), else it opens its own
+    block = function(b, same_scope)
+        if b == nil then return end
+        if not same_scope then open_scope(false) end
+        local dead = false
+        local told = false
+        for _, s in b.stmts do
+            -- only the first unreachable statement is reported
+            if dead and not told then
+                report("unreachable", s, "unreachable code")
+                told = true
+            end
+            stmt(s)
+            if terminates(s) then dead = true end
+        end
+        if not same_scope then close_scope() end
+    end
+
+    open_scope(true)
+    block(ast, true)
+    close_scope()
+
+    sort.sort(out, function(a, b)
+        if a.line ~= b.line then return a.line < b.line end
+        return a.col < b.col
+    end)
+    return out
+end
+
+-- check.file(path [, opts]) → array of diagnostics (opts as in check.source;
+-- name and dir default to the file's)
+function M.file(p, opts)
+    local src = fs.read(p)
+    if is_error(src) then
+        local d = {}
+        d.file = p
+        d.line = 1
+        d.col = 1
+        d.code = "syntax"
+        d.severity = "error"
+        d.message = src.message
+        local r = []
+        r[] = d
+        return r
+    end
+    local o = {}
+    if opts ~= nil then
+        for k, v in opts do o[k] = v end
+    end
+    o.name = o.name or p
+    o.dir = o.dir or path.dirname(p)
+    return M.source(src, o)
+end
+
+return M

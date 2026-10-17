@@ -53,7 +53,7 @@ $(JIT_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(JIT_OBJ_DIR)
 # that `require("sea/...")` finds without a file: gen/sea_modules.h, included
 # by sea_stdlib.c (name=file).
 TOOLS = $(wildcard tools/*.sea)
-MODULES = sea/test=libs/test/test.sea
+MODULES = sea/test=libs/test/test.sea sea/check=tools/lib/check.sea
 GEN_DIR = gen
 CFLAGS += -I$(GEN_DIR)
 

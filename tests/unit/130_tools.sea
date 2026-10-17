@@ -105,4 +105,39 @@ fs.write(dir .. "/t/z_test.sea", "local x = = 1\n")
 print(untimed(run({"test", "t"})))
 fs.mkdir(dir .. "/empty")
 print(run({"test", "empty"}))
+
+print("-- sea check")
+fs.write(dir .. "/c.sea", [==[
+local json = require("./nope")
+local x = 1
+local x = 2
+pritn(x)
+local function add(a, b) return a + b end
+print(add(1, 2, 3))
+print(string.format("%d %s", 1))
+local t = {a = 1, a = 2}
+t = t
+local function f()
+    panic("x")
+    print("dead")
+end
+local arr = array()
+do
+    local x = 5
+    print(x)
+end
+local z = 1 -- check:ignore
+local w = 2 -- check:ignore shadow
+for k, v in t do print(v) end
+print(f, arr, helper)
+]==])
+fs.write(dir .. "/d.sea", "function helper() return 1 end\n")
+print(run({"check", "c.sea", "d.sea"}))
+print(run({"check", "-only", "undefined,args", "c.sea"}))
+print(run({"check", "-disable", "shadow,redeclared,require", "-all", "-g", "helper", "c.sea"}))
+print(run({"check", "-f", "json", "-only", "format", "c.sea"}))
+print(run({"check", "d.sea"}))
+print(run({"check", "-only", "bogus", "d.sea"}))
+fs.write(dir .. "/w.sea", "local unused = 1\n")
+print(run({"check", "-w", "w.sea"}))
 fs.remove(dir, {recursive = true})

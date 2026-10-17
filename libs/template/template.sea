@@ -100,7 +100,6 @@ local function tokenize(src, otag, ctag)
 
     local function end_line()
         local tags = 0
-        local tagi = -1
         local ok = true
         for i = line_start, len(toks) - 1 do
             local t = toks[i]
@@ -108,7 +107,6 @@ local function tokenize(src, otag, ctag)
                 if not is_blank(t.text) then ok = false end
             else
                 tags = tags + 1
-                tagi = i
                 if not STANDALONE[t.kind] then ok = false end
             end
         end

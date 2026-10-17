@@ -909,7 +909,7 @@ local function read_response(c, method, timeout, max_body)
     if method == "HEAD" or status == 204 or status == 304 then
         body = ""
     elseif head.chunked or head.content_length >= 0 then
-        local b, after, emsg = read_body(c, head, rest, max_body, timeout)
+        local b, _, emsg = read_body(c, head, rest, max_body, timeout)
         if b == nil then return nil, emsg, true end
         body = b
     else

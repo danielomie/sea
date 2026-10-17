@@ -23,7 +23,7 @@ end
 -- ─── Dicionário de irregulares ───────────────────────────────────────────────
 -- Formas conjugadas que não seguem padrão regular → infinitivo
 
-local irreg = map()
+local irreg = {}
 
 -- ser
 irreg["sou"]    = "ser"
@@ -215,11 +215,11 @@ irreg["surgido"] = "surgir"
 -- Cada regra: { sufixo, terminação_do_infinitivo, descrição }
 -- Ordenadas do sufixo mais longo para o mais curto (prioridade correta).
 
-local regras = array()
+local regras = []
 
 local function regra(suf, term, desc)
     local r = {sufixo=suf, terminacao=term, descricao=desc}
-    push(regras, r)
+    regras[] = r
 end
 
 -- gerúndio (alta confiança)
@@ -317,10 +317,10 @@ end
 
 -- ─── Testes ──────────────────────────────────────────────────────────────────
 
-local testes = array()
+local testes = []
 
 local function t(forma, esperado)
-    push(testes, {forma=forma, esperado=esperado})
+    testes[] = {forma=forma, esperado=esperado}
 end
 
 -- irregulares
@@ -445,25 +445,25 @@ print("────────────────────────�
 print("  Exemplos:")
 print("───────────────────────────────────────────")
 
-local demos = array()
-push(demos, "cantando")
-push(demos, "comeram")
-push(demos, "partirão")
-push(demos, "estando")
-push(demos, "foram")
-push(demos, "fazendo")
-push(demos, "correndo")
-push(demos, "dormiam")
-push(demos, "bebeu")
-push(demos, "cantarei")
-push(demos, "partimos")
-push(demos, "trazendo")
-push(demos, "vendo")
-push(demos, "podendo")
-push(demos, "disseram")
-push(demos, "trouxeram")
-push(demos, "querendo")
-push(demos, "souberam")
+local demos = []
+demos[] = "cantando"
+demos[] = "comeram"
+demos[] = "partirão"
+demos[] = "estando"
+demos[] = "foram"
+demos[] = "fazendo"
+demos[] = "correndo"
+demos[] = "dormiam"
+demos[] = "bebeu"
+demos[] = "cantarei"
+demos[] = "partimos"
+demos[] = "trazendo"
+demos[] = "vendo"
+demos[] = "podendo"
+demos[] = "disseram"
+demos[] = "trouxeram"
+demos[] = "querendo"
+demos[] = "souberam"
 
 for i = 0, len(demos)-1 do
     local forma = demos[i]

@@ -460,7 +460,6 @@ function T.run(opts)
     res.skipped = 0
     res.todo = 0
     res.failures = []
-    local out = []
     local n = 0
     local t_start = time.now()
 
@@ -601,7 +600,7 @@ function T.run(opts)
         for _, b in benches do
             local name = full_name(b)
             if bench == "." or string.contains(name, bench) then
-                local ns, problem, n = run_bench(b, budget)
+                local ns, problem, iters = run_bench(b, budget)
                 if ns == nil then
                     res.failed = res.failed + 1
                     local f = {}
@@ -613,13 +612,13 @@ function T.run(opts)
                 else
                     local r = {}
                     r.name = name
-                    r.n = n
+                    r.n = iters
                     r.ns_per_op = ns
                     res.benches[] = r
                     if format == "pretty" then
-                        say(string.format("%-" .. tostring(width) .. "s  %10d  %14.1f ns/op", name, n, ns))
+                        say(string.format("%-" .. tostring(width) .. "s  %10d  %14.1f ns/op", name, iters, ns))
                     elseif format == "tap" then
-                        say(string.format("# bench %s %d %.1f ns/op", name, n, ns))
+                        say(string.format("# bench %s %d %.1f ns/op", name, iters, ns))
                     end
                 end
             end
