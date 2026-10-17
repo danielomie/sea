@@ -1855,6 +1855,7 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
             memset(&child, 0, sizeof(child));
             child.parent = c;
             child.chunk = sea_chunk_new(node->func.name);
+            child.chunk->line_defined = node->line;
             child.chunk->arity = (uint8_t)node->func.paramc;
 
             // Add parameters as locals
@@ -2257,9 +2258,30 @@ static int emit_cond_jump_false(SeaCompiler *c, int cond_reg, int line) {
 
 // ---- Statement compiler ----
 
+bool sea_cover_enabled = false;
+
+/* Coverage: mark the statement's line in the chunk's table and emit an
+ * OP_COVER that records it ran (once per line in a row). */
+static void cover_stmt(SeaCompiler *c, int line) {
+    SeaChunk *ch = c->chunk;
+    if (line <= 0 || line > 0xFFFF) return;
+    if (ch->code_len > 0 && SEA_INSTR_OP(ch->code[ch->code_len - 1]) == OP_COVER &&
+        (int)SEA_INSTR_Bx(ch->code[ch->code_len - 1]) == line) return;
+    if (line >= ch->cover_len) {
+        int n = ch->cover_len ? ch->cover_len : 64;
+        while (n <= line) n *= 2;
+        ch->cover = realloc(ch->cover, (size_t)n);
+        memset(ch->cover + ch->cover_len, 0, (size_t)(n - ch->cover_len));
+        ch->cover_len = n;
+    }
+    if (ch->cover[line] == 0) ch->cover[line] = 1;
+    emit_abx(c, OP_COVER, 0, line, line);
+}
+
 static void compile_stmt(SeaCompiler *c, SeaNode *node) {
     if (!node || c->had_error) return;
     int line = node->line;
+    if (sea_cover_enabled) cover_stmt(c, line);
 
     switch (node->type) {
         case NODE_EXPR_STMT: {

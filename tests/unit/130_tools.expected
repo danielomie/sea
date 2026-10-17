@@ -146,3 +146,17 @@ sea panic: kaboom
 
 Makes a standalone executable: this sea binary with the program and the
 modules it requires (followed from require("...") calls) appended.
+-- sea test -cover
+[0] ok    cv/mathx_test.sea  2 passed (T)
+
+1 file; 2 passed (T)
+
+coverage:
+  cv/mathx.sea   66.7%  6/9  not run: 6-9
+  total          66.7%  6/9
+true	true	true
+-- sea prof
+0	6
+6	true	true	true
+0	true
+2	usage: sea prof

@@ -183,6 +183,8 @@ typedef enum {
                       // naming itself, without a self-capturing upvalue cycle
     OP_SET_FIELD_MOVE,  // R[A].K[B] = R[C], consuming R[C]'s reference (an owned temporary)
     OP_ARRAY_PUSH_MOVE, // R[A].push(R[B]), consuming R[B]'s reference
+    OP_COVER,         // source line Bx ran (coverage; emitted only when
+                      // sea_cover_enabled, see sea_cover.c)
 
     OP_COUNT
 } SeaOpcode;

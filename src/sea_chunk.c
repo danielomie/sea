@@ -47,6 +47,7 @@ void sea_chunk_free(SeaChunk *c) {
         c->ics = NULL;
     }
     if (c->name) sea_free(c->name, strlen(c->name)+1);
+    free(c->cover);
 
     if (c->code)  sea_free(c->code, sizeof(uint32_t) * (size_t)c->code_cap);
     if (c->lines) sea_free(c->lines, sizeof(int) * (size_t)c->code_cap);
@@ -412,7 +413,7 @@ void sea_op_reads(uint32_t in, SeaRegRanges *r) {
     case OP_RELEASE: case OP_FOR_IN_INIT: case OP_MARK_CAPTURED:
     case OP_RETAIN: case OP_JMP_NOT_ERR:
         rr_add(r, a, a); break;
-    case OP_LOAD_SELF:
+    case OP_LOAD_SELF: case OP_COVER:
         break;
 
     /* R[A], R[B] */
@@ -471,6 +472,7 @@ const char* sea_opcode_name(SeaOpcode op) {
         [OP_LOAD_SELF]   = "LOAD_SELF",
         [OP_SET_FIELD_MOVE]  = "SET_FIELD_MOVE",
         [OP_ARRAY_PUSH_MOVE] = "ARRAY_PUSH_MOVE",
+        [OP_COVER]       = "COVER",
         [OP_LOAD_TRUE]   = "LOAD_TRUE",
         [OP_LOAD_FALSE]  = "LOAD_FALSE",
         [OP_LOAD_INT]    = "LOAD_INT",
@@ -640,6 +642,9 @@ void sea_chunk_disasm_instr(SeaChunk *c, int idx, FILE *f) {
             break;
         case OP_LOAD_SELF:
             fprintf(f, "R[%d] = self\n", a);
+            break;
+        case OP_COVER:
+            fprintf(f, "line %d ran\n", bx);
             break;
         case OP_JMP:
             fprintf(f, "PC += %d  (-> %d)\n", sbx, idx+1+sbx);

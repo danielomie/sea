@@ -10,6 +10,8 @@
 #include "sea_sched.h"
 #include "sea_tools.h"     /* gen/: the scripts in tools/, embedded */
 #include "sea_bundle.h"
+#include "sea_prof.h"
+#include "sea_cover.h"
 #include <unistd.h>
 
 #ifndef SEA_NO_READLINE
@@ -66,10 +68,14 @@ static int run_source(SeaVM *vm, const char *source, const char *name) {
         return SEA_ERR;
     }
 
+    if (sea_prof_enabled) sea_prof_set_root(vm, chunk);
+    sea_cover_set_root(vm, chunk);
     int result = sea_vm_exec(vm, chunk);
     /* Goroutines spawned by this chunk run its bytecode: wait for them before
      * freeing it (freeing first was a use-after-free on worker threads). */
     if (sea_global_sched) sea_sched_drain(sea_global_sched);
+    sea_prof_finish();
+    sea_cover_finish();
     sea_chunk_free(chunk);
     return result;
 }
@@ -89,9 +95,13 @@ static int run_compiled(SeaVM *vm, const char *path) {
                         "(recompile it with `sea compile`)\n", path);
         return SEA_ERR;
     }
+    if (sea_prof_enabled) sea_prof_set_root(vm, chunk);
+    sea_cover_set_root(vm, chunk);
     int result = sea_vm_exec(vm, chunk);
     /* as in run_source: goroutines run this chunk's bytecode */
     if (sea_global_sched) sea_sched_drain(sea_global_sched);
+    sea_prof_finish();
+    sea_cover_finish();
     sea_chunk_free(chunk);
     return result;
 }
@@ -337,11 +347,15 @@ static void usage(void) {
         "  sea test [flags] [path...]   Run the *_test.sea files (sea test -h)\n"
         "  sea check [flags] [path...]  Find likely mistakes (sea check -h)\n"
         "  sea build [-o out] <file>    A standalone executable (sea build -h)\n"
+        "  sea prof [flags] <file> ...  Run with the CPU profiler (sea prof -h)\n"
         "  sea version                  Print version\n"
     );
 }
 
 int main(int argc, char *argv[]) {
+    const char *cover = getenv("SEA_COVER");
+    if (cover && *cover) sea_cover_start(cover);
+
     /* A program bundled by `sea build`: every argument is the program's */
     if (sea_bundle_open()) {
         const SeaBundleEntry *m = sea_bundle_main();
@@ -395,6 +409,41 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         cmd_run(argv[2]);
+        return 0;
+    }
+
+    if (strcmp(cmd, "prof") == 0) {
+        SeaProfOptions po = { 100, NULL, false, 20 };
+        int i = 2;
+        for (; i < argc && argv[i][0] == '-'; i++) {
+            const char *a = argv[i];
+            bool has_val = i + 1 < argc;
+            if (strcmp(a, "-o") == 0 && has_val) po.out = argv[++i];
+            else if (strcmp(a, "-hz") == 0 && has_val) po.hz = atoi(argv[++i]);
+            else if (strcmp(a, "-top") == 0 && has_val) po.top = atoi(argv[++i]);
+            else if (strcmp(a, "-folded") == 0) po.folded = true;
+            else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { i = argc; break; }
+            else { fprintf(stderr, "sea prof: unknown flag %s\n", a); i = argc; break; }
+        }
+        if (i >= argc || po.hz <= 0 || po.hz > 10000) {
+            fprintf(stderr,
+                "usage: sea prof [-o file] [-folded] [-hz N] [-top N] <file.sea|file.seac> [args...]\n"
+                "\n"
+                "Runs the program and reports where its CPU time goes: functions by their own\n"
+                "time and by the time of what they call, and the hottest lines (on stderr, or\n"
+                "in -o file). -folded writes folded stacks for flame graphs (also when the -o\n"
+                "file ends in .folded). -hz: samples per second of CPU (default 100).\n");
+            return 2;
+        }
+        if (po.out) {
+            size_t n = strlen(po.out);
+            if (n > 7 && strcmp(po.out + n - 7, ".folded") == 0) po.folded = true;
+        }
+        if (g_jit_enabled) fprintf(stderr, "sea prof: JIT-compiled code is not sampled precisely; run without --jit\n");
+        g_script_argc = argc - i - 1;
+        g_script_argv = argv + i + 1;
+        sea_prof_start(&po);
+        cmd_run(argv[i]);
         return 0;
     }
 

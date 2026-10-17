@@ -14,11 +14,14 @@
 --   -benchtime S    seconds per benchmark (default 1)
 --   -j N            files run at the same time (default: the number of CPUs)
 --   -timeout S      seconds a file may take before it is killed (default 600)
+--   -cover          report which lines of the code under test ran (not the
+--                   _test.sea files themselves)
+--   -coverprofile F also write the coverage as an lcov file (implies -cover)
 --
 -- The exit status is 1 when a test fails, 0 otherwise.
 
 local function usage()
-    print("usage: sea test [-v] [-run TEXT] [-bench TEXT] [-benchtime S] [-j N] [-timeout S] [path ...]")
+    print("usage: sea test [-v] [-run TEXT] [-bench TEXT] [-benchtime S] [-j N] [-timeout S] [-cover] [-coverprofile F] [path ...]")
     print("")
     print("Runs the *_test.sea files under the paths (default: the current directory),")
     print("each in its own process, and prints a summary.")
@@ -56,6 +59,8 @@ local bench = nil
 local benchtime = nil
 local jobs = nil
 local timeout = 600
+local cover = false
+local coverprofile = nil
 local paths = []
 
 local function number_arg(i, flag)
@@ -92,6 +97,16 @@ while i <= len(os.args) - 1 do
     elseif a == "-j" then
         i = i + 1
         jobs = math.floor(number_arg(i, "-j"))
+    elseif a == "-cover" then
+        cover = true
+    elseif a == "-coverprofile" then
+        i = i + 1
+        coverprofile = os.args[i]
+        if coverprofile == nil then
+            io.write_err("sea test: -coverprofile takes a file name\n")
+            os.exit(2)
+        end
+        cover = true
     elseif a == "-timeout" then
         i = i + 1
         timeout = number_arg(i, "-timeout")
@@ -153,6 +168,7 @@ local function run_file(idx, file, results)
     env.SEA_TEST = run or false
     env.SEA_BENCH = bench or false
     env.SEA_BENCHTIME = benchtime and tostring(benchtime) or false
+    env.SEA_COVER = cover and path.join(tmp, tostring(idx) .. ".lcov") or false
     local opts = {}
     opts.cwd = path.dirname(abs)
     opts.env = env
@@ -247,6 +263,33 @@ for _ = 1, len(files) do
         next_idx = next_idx + 1
     end
 end
+
+-- Coverage: merge the lcov records of every file run
+local cover_lines = {} -- path → {line → ran}
+if cover then
+    for idx = 0, len(files) - 1 do
+        local data = fs.read(path.join(tmp, tostring(idx) .. ".lcov"))
+        if not is_error(data) then
+            local cur = nil
+            for _, l in string.split(data, "\n") do
+                if string.starts_with(l, "SF:") then
+                    local f = string.sub(l, 4)
+                    if fs.isfile(f) and not string.ends_with(f, "_test.sea") then
+                        f = path.normalize(path.abs(f))
+                        if cover_lines[f] == nil then cover_lines[f] = {} end
+                        cur = cover_lines[f]
+                    else
+                        cur = nil
+                    end
+                elseif cur ~= nil and string.starts_with(l, "DA:") then
+                    local parts = string.split(string.sub(l, 4), ",")
+                    local ln = tonumber(parts[0])
+                    cur[ln] = cur[ln] == true or parts[1] == "1"
+                end
+            end
+        end
+    end
+end
 fs.remove(tmp, {recursive = true})
 
 local parts = []
@@ -258,4 +301,74 @@ local nfiles = len(files) == 1 and "1 file" or (tostring(len(files)) .. " files"
 if failed_files > 0 then nfiles = nfiles .. ", " .. tostring(failed_files) .. " failed" end
 print("")
 print(string.format("%s; %s (%.2f s)", nfiles, string.join(parts, ", "), time.since(t_start) / time.Second))
+
+if cover then
+    local cwd = path.abs(".")
+    local names = []
+    for f, _ in cover_lines do names[] = f end
+    sort.sort(names)
+    local function show(f)
+        local r = path.relative(cwd, f)
+        return is_error(r) and f or r
+    end
+    local width = 5
+    for _, f in names do
+        if len(show(f)) > width then width = len(show(f)) end
+    end
+    local all_n = 0
+    local all_ran = 0
+    local lcov = []
+    print("")
+    print("coverage:")
+    for _, f in names do
+        local lines = cover_lines[f]
+        local nums = []
+        for ln, _ in lines do nums[] = ln end
+        sort.sort(nums)
+        local ran = 0
+        local missed = [] -- ranges of statement lines not run: {first, last}
+        local prev_missed = false
+        lcov[] = "SF:" .. f
+        for _, ln in nums do
+            lcov[] = "DA:" .. tostring(ln) .. "," .. (lines[ln] and "1" or "0")
+            if lines[ln] then
+                ran = ran + 1
+                prev_missed = false
+            else
+                if prev_missed then
+                    missed[len(missed) - 1][1] = ln
+                else
+                    local r = []
+                    r[] = ln
+                    r[] = ln
+                    missed[] = r
+                end
+                prev_missed = true
+            end
+        end
+        lcov[] = "LF:" .. tostring(len(nums))
+        lcov[] = "LH:" .. tostring(ran)
+        lcov[] = "end_of_record"
+        all_n = all_n + len(nums)
+        all_ran = all_ran + ran
+        local ranges = []
+        for k, r in missed do
+            if k < 8 then ranges[] = r[0] == r[1] and tostring(r[0]) or (tostring(r[0]) .. "-" .. tostring(r[1])) end
+        end
+        if len(missed) > 8 then ranges[] = "..." end
+        local pct = len(nums) > 0 and 100 * ran / len(nums) or 100
+        local miss = len(ranges) > 0 and ("  not run: " .. string.join(ranges, ", ")) or ""
+        print(string.format("  %-" .. tostring(width) .. "s  %5.1f%%  %d/%d%s", show(f), pct, ran, len(nums), miss))
+    end
+    if len(names) == 0 then
+        print("  (no code outside the test files ran)")
+    else
+        print(string.format("  %-" .. tostring(width) .. "s  %5.1f%%  %d/%d", "total", all_n > 0 and 100 * all_ran / all_n or 100, all_ran,
+            all_n))
+    end
+    if coverprofile ~= nil then
+        local w = fs.write(coverprofile, string.join(lcov, "\n") .. "\n")
+        if is_error(w) then io.write_err("sea test: " .. w.message .. "\n") end
+    end
+end
 os.exit(failed_files > 0 and 1 or 0)

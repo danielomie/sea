@@ -67,6 +67,15 @@ struct SeaChunk {
     /* Source file of a function prototype: the root chunk's name (borrowed;
      * the root outlives its protos). Set by sea_chunk_set_source. */
     const char *source;
+
+    /* Coverage (sea_cover.c), only when compiled with sea_cover_enabled:
+     * cover[line] is 1 for a line with a statement, 2 once it ran. */
+    uint8_t *cover;
+    int      cover_len;
+
+    /* Line of the `function` keyword (0 for a root chunk or one read from a
+     * .seac file); runtime-only, for `sea prof`. */
+    int      line_defined;
 };
 
 /* Point every prototype under root (and root itself) at root's name. */

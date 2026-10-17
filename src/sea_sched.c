@@ -1,3 +1,4 @@
+#include "sea_prof.h"
 #include "sea_sched.h"
 #include "sea_gc.h"
 #include "sea_goroutine.h"
@@ -202,6 +203,7 @@ static void* worker_thread(void *arg) {
     SeaWorker *w = (SeaWorker*)arg;
     SeaScheduler *s = w->sched;
     tl_worker = w;
+    sea_prof_thread_start();       /* `sea prof`: this thread's CPU timer */
 
     while (!atomic_load(&s->shutdown)) {
         SeaGoroutine *g = worker_dequeue(w);

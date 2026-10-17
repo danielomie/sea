@@ -126,6 +126,9 @@ SeaChunk* sea_compile(SeaNode *program, const char *source_name);
 // Compile the program's main script (see sea_compile_main in sea_compiler.c)
 SeaChunk* sea_compile_main(SeaNode *program, const char *source_name);
 
+/* Emit OP_COVER at each statement (coverage; set from SEA_COVER by main) */
+extern bool sea_cover_enabled;
+
 // The first error of the last failed compilation on this thread (message
 // without position; NULL if none) and its line
 const char* sea_compile_error(void);

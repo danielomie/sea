@@ -1374,6 +1374,7 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         [OP_LOAD_SELF]           = &&lbl_LOAD_SELF,
         [OP_SET_FIELD_MOVE]      = &&lbl_SET_FIELD_MOVE,
         [OP_ARRAY_PUSH_MOVE]     = &&lbl_ARRAY_PUSH_MOVE,
+        [OP_COVER]               = &&lbl_COVER,
     };
     if (SEA_UNLIKELY(g_type_check)) {   /* diagnostic mode: verify int inference */
         dispatch_table[OP_IIADD] = &&lbl_IIADD_CHECKED;
@@ -3109,6 +3110,12 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
     lbl_ARRAY_PUSH_MOVE: {
         uint32_t i = ip[-1];
         vm_array_push_move(base, SEA_INSTR_A(i), SEA_INSTR_B(i));
+        DISPATCH();
+    }
+    lbl_COVER: {
+        SeaChunk *cc = frame->closure->chunk;
+        uint32_t l = SEA_INSTR_Bx(ip[-1]);
+        if (l < (uint32_t)cc->cover_len) cc->cover[l] = 2;
         DISPATCH();
     }
     lbl_LOAD_SELF: {

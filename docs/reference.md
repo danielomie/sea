@@ -29,6 +29,7 @@ sea doc [flags] [path...] [name] # documentation from comments
 sea test [flags] [path...]       # run the *_test.sea files
 sea check [flags] [path...]      # find likely mistakes without running
 sea build [-o out] file.sea      # a standalone executable
+sea prof [flags] file.sea [args] # run with the CPU profiler
 sea version
 ```
 
@@ -131,6 +132,20 @@ test or is killed fails. The exit status is 1 when anything failed.
 | `-benchtime S` | Seconds per benchmark (default 1) |
 | `-j N` | Files run at the same time (default: the number of CPUs) |
 | `-timeout S` | Seconds a file may take before it is killed (default 600) |
+| `-cover` | Report which lines of the code under test ran: per file, the share of statement lines run and the ranges not run (the `_test.sea` files and built-in modules are left out) |
+| `-coverprofile FILE` | Also write the coverage as an lcov file (for `genhtml` and editor plugins); implies `-cover` |
+
+```
+coverage:
+  stack.sea   91.7%  11/12  not run: 30
+  total       91.7%  11/12
+```
+
+Coverage works for any run: with `SEA_COVER=FILE` in the environment, the
+compiler adds a marker at each statement and the program appends an lcov
+record per source file to `FILE` when it ends (also through `os.exit`).
+Without the variable nothing is added, so there is no cost. (JIT-compiled
+code does not record coverage; the markers keep loops in the interpreter.)
 
 ### `sea check`
 
@@ -208,6 +223,45 @@ that holds them all (`main.sea`, `lib/util.sea`; tracebacks show these), and
 `require` looks in the bundle first, then on disk as usual. Files the
 program reads at run time (templates, data) are not included. A module that
 cannot be found fails the build.
+
+### `sea prof`
+
+Runs a program under a sampling CPU profiler and prints where its time goes
+(on stderr when it ends, or through `os.exit`): functions by their own time
+(`self`) and by the time of everything they call (`total`), and the hottest
+lines.
+
+```
+$ sea prof app.sea
+sea prof: 157 samples, 1.57 s of CPU at 100 Hz
+
+   self%  total%   self s  function
+   98.7%   98.7%     1.55  sum_squares  app.sea:12
+    1.3%    1.3%     0.02  fib  app.sea:1
+
+  total%  total s  function (including what it calls)
+  100.0%     1.57  main chunk  app.sea:1
+   98.7%     1.55  sum_squares  app.sea:12
+   ...
+
+   self%  line
+   98.7%  app.sea:14  (sum_squares)
+```
+
+| Flag | |
+|------|--|
+| `-o FILE` | Write the report to a file |
+| `-folded` | Folded stacks instead (`main chunk (app.sea:1);f (app.sea:3) 42` per line), for flame graphs (`flamegraph.pl`, speedscope); also when the `-o` file ends in `.folded` |
+| `-hz N` | Samples per second of CPU time (default 100) |
+| `-top N` | Rows per table (default 20) |
+
+Every thread that runs Sea code is sampled (goroutines show up with their
+own stacks), on CPU time: a program waiting on the network or a timer
+costs nothing. Time inside a native function counts for the Sea line that
+called it. The innermost line is approximate (the interpreter saves its
+position before calls and operations that may fail, not at every
+instruction); the functions are exact. Run it on `bin/sea`, without
+`--jit`.
 
 These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
 `tools/test.sea`, `tools/check.sea`, `tools/build.sea`) built into the

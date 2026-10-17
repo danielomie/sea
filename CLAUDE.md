@@ -30,6 +30,7 @@ make test                        # Build + run all unit tests
 make test-dwe                    # Unit tests with dead-write-elimination checks
 make test-seac                   # Unit tests run as compiled .seac bytecode
 make test-build                  # Unit tests run as `sea build` executables (src/sea_bundle.c)
+SEA_COVER=/tmp/c.lcov bash tests/run_tests.sh  # with OP_COVER at each statement (src/sea_cover.c)
 make test-jit                    # Unit tests with every chunk JIT-compiled (bin/sea-jit)
 make test-asan                   # Run under AddressSanitizer
 make test-format                 # sea/parser format round trip over every .sea file
