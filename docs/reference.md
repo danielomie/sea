@@ -28,6 +28,7 @@ sea fmt [flags] [path...]        # format source code
 sea doc [flags] [path...] [name] # documentation from comments
 sea test [flags] [path...]       # run the *_test.sea files
 sea check [flags] [path...]      # find likely mistakes without running
+sea build [-o out] file.sea      # a standalone executable
 sea version
 ```
 
@@ -180,8 +181,37 @@ diagnostics as an array of `{file, line, col, code, severity, message}`
 (table of codes), `all_unused`); `check.defined_globals(src)` gives the
 globals a source assigns; `check.CODES` lists the codes.
 
+### `sea build`
+
+Makes a standalone executable of a program: a copy of the `sea` binary with
+the program appended. It holds the main file and every module it requires
+with a literal name, followed recursively — Sea sources and native `.so`
+libraries (loaded from memory when required). Built-in modules need nothing.
+The executable runs anywhere the same `sea` binary would (same
+architecture; the system libraries a native library links to, such as
+libssl, must be installed), from any directory, without the sources.
+
+```
+$ sea build -o hello app/main.sea
+hello: 4 files (1 native), 0.8 MB
+$ ./hello world          # os.args[1] is "world"; every argument is the program's
+```
+
+| Flag | |
+|------|--|
+| `-o FILE` | The executable (default: the main file's name without `.sea`) |
+| `-i PATH` | Also include this module (`.sea` or `.so`; may repeat): for `require` with a computed name, which cannot be followed (they are reported) |
+| `-v` | List the files included |
+
+Inside the executable, modules keep their paths relative to the directory
+that holds them all (`main.sea`, `lib/util.sea`; tracebacks show these), and
+`require` looks in the bundle first, then on disk as usual. Files the
+program reads at run time (templates, data) are not included. A module that
+cannot be found fails the build.
+
 These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
-`tools/test.sea`, `tools/check.sea`) built into the binary.
+`tools/test.sea`, `tools/check.sea`, `tools/build.sea`) built into the
+binary.
 
 ---
 

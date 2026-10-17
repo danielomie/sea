@@ -6,7 +6,9 @@
 #      e.g. SEA=bin/sea-jit SEA_FLAGS=--jit (see `make test-jit`);
 #      TEST_TIMEOUT=<seconds> per test (default 60; a hang counts as a failure);
 #      SEAC=1 compiles each test to a .seac next to it, runs that, and deletes it
-#      (see `make test-seac`).
+#      (see `make test-seac`);
+#      BUNDLE=1 makes each test a standalone executable with `sea build` and
+#      runs that (see `make test-build`).
 #
 # Each test is a .sea file in tests/unit/ with a companion .expected file.
 # The test passes if the output of running the .sea file matches the .expected file.
@@ -20,6 +22,12 @@ SEA="${SEA:-$REPO_DIR/bin/sea}"
 SEA_FLAGS="${SEA_FLAGS:-}"
 TEST_TIMEOUT="${TEST_TIMEOUT:-60}"
 SEAC="${SEAC:-0}"
+BUNDLE="${BUNDLE:-0}"
+BUNDLE_DIR=""
+if [ "$BUNDLE" = "1" ]; then
+    BUNDLE_DIR="$(mktemp -d)"
+    trap 'rm -rf "$BUNDLE_DIR"' EXIT
+fi
 UNIT_DIR="$SCRIPT_DIR/unit"
 
 if [ ! -x "$SEA" ]; then
@@ -63,7 +71,18 @@ run_test() {
             return
         fi
     fi
-    actual=$(timeout "$TEST_TIMEOUT" "$SEA" $SEA_FLAGS "$target" 2>&1) || exit_code=$?
+    if [ "$BUNDLE" = "1" ]; then
+        target="$BUNDLE_DIR/$name"
+        if ! "$SEA" build -o "$target" "$file" >/dev/null 2>&1; then
+            echo -e "${RED}FAIL${NC} $name (sea build failed)"
+            FAIL=$((FAIL + 1))
+            return
+        fi
+        actual=$(timeout "$TEST_TIMEOUT" "$target" 2>&1) || exit_code=$?
+        rm -f "$target"
+    else
+        actual=$(timeout "$TEST_TIMEOUT" "$SEA" $SEA_FLAGS "$target" 2>&1) || exit_code=$?
+    fi
     if [ "$SEAC" = "1" ]; then rm -f "$target"; fi
 
     if [ "$exit_code" -ne 0 ]; then

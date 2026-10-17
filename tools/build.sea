@@ -1,0 +1,209 @@
+-- sea build — make a standalone executable of a Sea program
+--
+--   sea build [-o out] [-i path ...] file.sea
+--
+-- The executable is a copy of this sea binary with the program appended: the
+-- main file and every module it requires with a literal name, followed
+-- recursively (.sea sources and native .so libraries). Built-in modules need
+-- nothing. A require with a computed name cannot be followed: add those files
+-- with -i. Files the program reads at run time (templates, data) are not
+-- included.
+--
+--   -o out    the executable (default: the main file's name without .sea)
+--   -i path   also include this module (.sea or .so; may repeat)
+--   -v        list the files included
+
+local parser = require("sea/parser")
+
+local function usage()
+    print("usage: sea build [-o out] [-i path ...] [-v] file.sea")
+    print("")
+    print("Makes a standalone executable: this sea binary with the program and the")
+    print("modules it requires (followed from require(\"...\") calls) appended.")
+end
+
+local out = nil
+local main = nil
+local includes = []
+local verbose = false
+
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    if a == "-o" then
+        i = i + 1
+        out = os.args[i]
+        if out == nil then
+            io.write_err("sea build: -o takes a file name\n")
+            os.exit(2)
+        end
+    elseif a == "-i" then
+        i = i + 1
+        if os.args[i] == nil then
+            io.write_err("sea build: -i takes a path\n")
+            os.exit(2)
+        end
+        includes[] = os.args[i]
+    elseif a == "-v" then
+        verbose = true
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        io.write_err("sea build: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    elseif main == nil then
+        main = a
+    else
+        io.write_err("sea build: one main file expected (got " .. main .. " and " .. a .. ")\n")
+        os.exit(2)
+    end
+    i = i + 1
+end
+if main == nil then
+    usage()
+    os.exit(2)
+end
+if not fs.isfile(main) then
+    io.write_err("sea build: " .. main .. ": no such file\n")
+    os.exit(2)
+end
+if out == nil then out = path.basename(main, ".sea") end
+
+local builtin = {}
+for _, g in parser.globals() do builtin[g] = true end
+builtin["sea/parser"] = true
+builtin["sea/test"] = true
+builtin["sea/check"] = true
+
+-- Where require(name) from a file in dir finds its module (as the VM looks)
+local function resolve(name, dir)
+    local function try(base)
+        for _, ext in {".sea", "/init.sea", ".so"} do
+            if fs.isfile(base .. ext) then return path.normalize(path.abs(base .. ext)) end
+        end
+        return nil
+    end
+    if path.isabs(name) then return try(name) end
+    local found = try(path.join(dir, name)) or try(name)
+    if found == nil then
+        local sp = os.getenv("SEA_PATH")
+        if sp ~= nil then
+            for _, d in string.split(sp, ":") do
+                if found == nil and d ~= "" then found = try(path.join(d, name)) end
+            end
+        end
+    end
+    return found
+end
+
+local cwd = path.abs(".")
+
+-- a path for messages: relative to the working directory
+local function show(abs)
+    local r = path.relative(cwd, abs)
+    return is_error(r) and abs or r
+end
+
+local files = [] -- absolute paths, main first
+local seen = {}
+local problems = 0
+
+local function add(abs)
+    if seen[abs] then return false end
+    seen[abs] = true
+    files[] = abs
+    return true
+end
+
+-- Follow the literal requires of a source file
+local function follow(abs)
+    local ast = parser.parse_file(abs)
+    if is_error(ast) then
+        io.write_err(ast.message .. "\n")
+        problems = problems + 1
+        return
+    end
+    local dir = path.dirname(abs)
+    parser.walk(ast, function(n)
+        if n.type == "call" and n.callee.type == "ident" and n.callee.name == "require" then
+            local arg = n.args[0]
+            if arg ~= nil and arg.type == "string" then
+                local name = arg.value
+                if not builtin[name] then
+                    local found = resolve(name, dir)
+                    if found == nil then
+                        io.write_err(string.format("sea build: %s:%d: module '%s' not found\n", show(abs), n.line, name))
+                        problems = problems + 1
+                    elseif add(found) and path.ext(found) == ".sea" then
+                        follow(found)
+                    end
+                end
+            else
+                io.write_err(string.format("sea build: note: %s:%d: require with a computed name is not followed (add the files with -i)\n",
+                    show(abs), n.line))
+            end
+        end
+    end)
+end
+
+local main_abs = path.normalize(path.abs(main))
+add(main_abs)
+follow(main_abs)
+for _, inc in includes do
+    if not fs.isfile(inc) then
+        io.write_err("sea build: " .. inc .. ": no such file\n")
+        os.exit(2)
+    end
+    local abs = path.normalize(path.abs(inc))
+    if add(abs) and path.ext(abs) == ".sea" then follow(abs) end
+end
+if problems > 0 then os.exit(1) end
+
+-- Paths in the bundle are relative to the deepest directory holding them all
+local root = path.dirname(main_abs)
+for _, f in files do
+    while not string.starts_with(f, root == "/" and "/" or (root .. "/")) do root = path.dirname(root) end
+end
+
+local payload = []
+local n_native = 0
+for _, f in files do
+    local data = fs.read(f)
+    if is_error(data) then
+        io.write_err("sea build: " .. data.message .. "\n")
+        os.exit(1)
+    end
+    local rel = path.relative(root, f)
+    local kind = path.ext(f) == ".so" and "N" or "S"
+    if kind == "N" then n_native = n_native + 1 end
+    if verbose then print(string.format("  %s  %s", kind == "N" and "native" or "source", rel)) end
+    payload[] = string.format("%s %d %s\n", kind, len(data), rel)
+    payload[] = data
+end
+payload[] = "E\n"
+
+-- This binary, without a bundle of its own
+local exe = fs.read(fs.realpath("/proc/self/exe"))
+if is_error(exe) then
+    io.write_err("sea build: cannot read the sea binary: " .. exe.message .. "\n")
+    os.exit(1)
+end
+local tail = string.sub(exe, len(exe) - 27)
+if string.sub(tail, 21) == "SEABNDL1" then exe = string.sub(exe, 1, tonumber(string.sub(tail, 1, 20))) end
+
+local body = string.join(payload, "")
+local trailer = string.format("%020d", len(exe)) .. "SEABNDL1"
+if fs.exists(out) then fs.remove(out) end
+local opts = {}
+opts.mode = 493 -- 0755
+local w = fs.write(out, exe .. body .. trailer, opts)
+if is_error(w) then
+    io.write_err("sea build: " .. w.message .. "\n")
+    os.exit(1)
+end
+local what = tostring(len(files)) .. (len(files) == 1 and " file" or " files")
+if n_native > 0 then what = what .. " (" .. tostring(n_native) .. " native)" end
+local size = len(exe) + len(body) + len(trailer)
+print(string.format("%s: %s, %.1f MB", out, what, size / 1048576))

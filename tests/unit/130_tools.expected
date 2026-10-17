@@ -131,3 +131,18 @@ c.sea:21:5: variable 'k' is never used [unused]
 [0] 
 [2]  | sea check: unknown check bogus
 [0] w.sea:1:7: variable 'unused' is never used [unused]
+-- sea build
+[0] source  main.sea
+  source  lib/util.sea
+  source  lib/plugin.sea
+hello: 3 files, N MB | sea build: note: app/main.sea:3: require with a computed name is not followed (add the files with -i)
+[0] hello, world	0	true
+[0] hello, there	3	true
+[1] hello, boom	1	true | stack traceback:
+	main.sea:5: in main chunk
+sea panic: kaboom
+[1]  | sea build: bad.sea:1: module './missing' not found
+[2] usage: sea build [-o out] [-i path ...] [-v] file.sea
+
+Makes a standalone executable: this sea binary with the program and the
+modules it requires (followed from require("...") calls) appended.

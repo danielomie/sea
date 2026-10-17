@@ -25,7 +25,7 @@ JIT_OBJ_DIR = obj-jit
 JIT_OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(JIT_OBJ_DIR)/%.o)
 JIT_TARGET  = $(BIN_DIR)/sea-jit
 
-.PHONY: all clean test test-jit test-seac test-dwe test-format asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
+.PHONY: all clean test test-jit test-seac test-build test-dwe test-format asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
 
 all: $(TARGET)
 
@@ -94,6 +94,10 @@ test-dwe: $(TARGET)
 # that file is executed (catches serialization bugs in sea_chunk_write/read).
 test-seac: $(TARGET)
 	SEAC=1 bash tests/run_tests.sh
+
+# Unit tests run as standalone executables made by `sea build`
+test-build: $(TARGET)
+	BUNDLE=1 bash tests/run_tests.sh
 
 # Unit tests on bin/sea-jit with every chunk JIT-compiled at its first call /
 # loop back-edge, synchronously (deterministic), then asynchronously, then with

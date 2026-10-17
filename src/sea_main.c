@@ -9,6 +9,7 @@
 #include "sea_memory.h"
 #include "sea_sched.h"
 #include "sea_tools.h"     /* gen/: the scripts in tools/, embedded */
+#include "sea_bundle.h"
 #include <unistd.h>
 
 #ifndef SEA_NO_READLINE
@@ -335,11 +336,21 @@ static void usage(void) {
         "  sea doc [flags] [path...]    Documentation from comments (sea doc -h)\n"
         "  sea test [flags] [path...]   Run the *_test.sea files (sea test -h)\n"
         "  sea check [flags] [path...]  Find likely mistakes (sea check -h)\n"
+        "  sea build [-o out] <file>    A standalone executable (sea build -h)\n"
         "  sea version                  Print version\n"
     );
 }
 
 int main(int argc, char *argv[]) {
+    /* A program bundled by `sea build`: every argument is the program's */
+    if (sea_bundle_open()) {
+        const SeaBundleEntry *m = sea_bundle_main();
+        g_script_argc = argc - 1;
+        g_script_argv = argv + 1;
+        cmd_run_ex(m->name, m->data);
+        return 0;
+    }
+
     /* Global flags consumed before the subcommand. Only leading `--`-flags are
      * scanned (so flags after a script name stay in os.args). Currently: --jit.
      * Accepts e.g. `sea --jit run x.sea` and `sea --jit x.sea`. */

@@ -69,6 +69,7 @@ bin/sea fmt src/                      # format .sea files in place (-l, -d, --ch
 bin/sea doc libs/http/http.sea        # documentation from comments (-f markdown|html|json)
 bin/sea test                          # run the *_test.sea files (-run, -bench, -v)
 bin/sea check                         # undefined/unused variables, bad calls, ... without running
+bin/sea build -o app main.sea         # standalone executable (program + modules + natives)
 ```
 
 Native libraries are built per library, e.g. `make -C libs/json`.

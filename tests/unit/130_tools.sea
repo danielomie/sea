@@ -140,4 +140,32 @@ print(run({"check", "d.sea"}))
 print(run({"check", "-only", "bogus", "d.sea"}))
 fs.write(dir .. "/w.sea", "local unused = 1\n")
 print(run({"check", "-w", "w.sea"}))
+
+print("-- sea build")
+fs.mkdir(dir .. "/app")
+fs.mkdir(dir .. "/app/lib")
+fs.write(dir .. "/app/main.sea", [==[
+local util = require("./lib/util")
+local name = "plug" .. "in"
+local plugin = require("./lib/" .. name)
+print(util.greet(os.args[1] or "world"), len(os.args) - 1, plugin.ok)
+if os.args[1] == "boom" then panic("kaboom") end
+]==])
+fs.write(dir .. "/app/lib/util.sea", "local M = {}\nfunction M.greet(n) return \"hello, \" .. n end\nreturn M\n")
+fs.write(dir .. "/app/lib/plugin.sea", "return {ok = true}\n")
+print(re.gsub("[0-9.]+ MB", run({"build", "-v", "-o", "hello", "-i", "app/lib/plugin.sea", "app/main.sea"}), "N MB"))
+fs.rename(dir .. "/app", dir .. "/moved")
+local function run_exe(args)
+    local cmd = []
+    cmd[] = dir .. "/hello"
+    for i = 0, len(args) - 1 do cmd[] = args[i] end
+    local r = process.run(cmd, {cwd = "/"})
+    return "[" .. tostring(r.code) .. "] " .. string.trim(r.stdout) .. (r.stderr != "" and (" | " .. string.trim(r.stderr)) or "")
+end
+print(run_exe({}))
+print(run_exe({"there", "--jit", "x"}))
+print(run_exe({"boom"}))
+fs.write(dir .. "/bad.sea", "local m = require(\"./missing\")\n")
+print(run({"build", "bad.sea"}))
+print(run({"build"}))
 fs.remove(dir, {recursive = true})

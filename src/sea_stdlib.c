@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <limits.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
+#include "sea_bundle.h"
 
 // ---- Module helpers ----
 
@@ -275,6 +277,67 @@ static SeaValue require_run_source(SeaVM *vm, SeaString *key, const char *src,
     return result;
 }
 
+/* dlopen a native library and call its sea_open; cache the module under key
+ * (consumed). */
+static SeaValue require_load_native(SeaVM *vm, SeaString *key, const char *abspath) {
+    SeaValue key_val = sea_obj_val(&key->obj);
+    void *handle = dlopen(abspath, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        fprintf(stderr, "sea: dlopen '%s': %s\n", abspath, dlerror());
+        sea_obj_release(&key->obj);
+        return SEA_NIL_VAL;
+    }
+
+    typedef SeaValue (*SeaOpenFn)(SeaVM *vm);
+    SeaOpenFn open_fn = (SeaOpenFn)(uintptr_t)dlsym(handle, "sea_open");
+    if (!open_fn) {
+        fprintf(stderr, "sea: '%s' does not export 'sea_open'\n", abspath);
+        dlclose(handle);
+        sea_obj_release(&key->obj);
+        return SEA_NIL_VAL;
+    }
+
+    SeaValue result = open_fn(vm);
+
+    /* Cache the module (sea_map_set retains); sea_open's reference goes
+     * to the caller. */
+    sea_map_set(vm_loaded(vm), key_val, result);
+    sea_obj_release(&key->obj);
+    return result;
+}
+
+/* A module of a program bundled by `sea build`: source is run, a native
+ * library is written to a memory file and loaded from there. */
+static SeaValue require_bundled(SeaVM *vm, const SeaBundleEntry *e) {
+    SeaString *key = sea_string_intern(e->name, strlen(e->name));
+    SeaValue cached = SEA_NIL_VAL;
+    if (sea_map_get(vm_loaded(vm), sea_obj_val(&key->obj), &cached)) {
+        sea_obj_release(&key->obj);
+        return sea_val_ref(cached);
+    }
+    sea_map_set(vm_loaded(vm), sea_obj_val(&key->obj), SEA_NIL_VAL);
+    if (e->kind == 'S') return require_run_source(vm, key, e->data, e->name);
+    const char *base = strrchr(e->name, '/');
+    int fd = memfd_create(base ? base + 1 : e->name, MFD_CLOEXEC);
+    size_t done = 0;
+    while (fd >= 0 && done < e->size) {
+        ssize_t w = write(fd, e->data + done, e->size - done);
+        if (w <= 0) break;
+        done += (size_t)w;
+    }
+    if (fd < 0 || done != e->size) {
+        fprintf(stderr, "sea: cannot load the bundled library '%s'\n", e->name);
+        if (fd >= 0) close(fd);
+        sea_obj_release(&key->obj);
+        return SEA_NIL_VAL;
+    }
+    char path[64];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+    /* fd stays open: closed, its number (so the path) would be reused by the
+     * next library, and dlopen would return this one for it */
+    return require_load_native(vm, key, path);
+}
+
 // require(name)
 static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !sea_is_string(args[0])) return SEA_NIL_VAL;
@@ -297,6 +360,10 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
         sea_map_set(vm_loaded(vm), sea_obj_val(&key->obj), SEA_NIL_VAL);
         return require_run_source(vm, key, SEA_MODULES[i].src, SEA_MODULES[i].name);
     }
+
+    /* 1c. The modules of a program bundled by `sea build` */
+    const SeaBundleEntry *be = sea_bundle_find(vm->source_name, name);
+    if (be) return require_bundled(vm, be);
 
     /* 2. Resolve file path
      *    For each search directory, try .sea source first, then .so native.
@@ -365,32 +432,7 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     /* 5. Guard against circular require: cache NIL before executing */
     sea_map_set(vm_loaded(vm), key_val, SEA_NIL_VAL);
 
-    /* ---- Native shared library path ---- */
-    if (found == REQUIRE_NATIVE) {
-        void *handle = dlopen(abspath, RTLD_NOW | RTLD_LOCAL);
-        if (!handle) {
-            fprintf(stderr, "sea: dlopen '%s': %s\n", abspath, dlerror());
-            sea_obj_release(&key->obj);
-            return SEA_NIL_VAL;
-        }
-
-        typedef SeaValue (*SeaOpenFn)(SeaVM *vm);
-        SeaOpenFn open_fn = (SeaOpenFn)(uintptr_t)dlsym(handle, "sea_open");
-        if (!open_fn) {
-            fprintf(stderr, "sea: '%s' does not export 'sea_open'\n", abspath);
-            dlclose(handle);
-            sea_obj_release(&key->obj);
-            return SEA_NIL_VAL;
-        }
-
-        SeaValue result = open_fn(vm);
-
-        /* Cache the module (sea_map_set retains); sea_open's reference goes
-         * to the caller. */
-        sea_map_set(vm_loaded(vm), key_val, result);
-        sea_obj_release(&key->obj);
-        return result;
-    }
+    if (found == REQUIRE_NATIVE) return require_load_native(vm, key, abspath);
 
     /* 6. Read source file */
     FILE *f = fopen(abspath, "rb");
