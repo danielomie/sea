@@ -11,6 +11,7 @@ pure-Sea libraries work out of the box.
 |---------|------|------|-------|
 | `json` | `libs/json/json` | native `.so` | `make -C libs/json` |
 | `yaml` | `libs/yaml/yaml` | native `.so` | `make -C libs/yaml` |
+| `toml` | `libs/toml/toml` | native `.so` | `make -C libs/toml` |
 | `csv` | `libs/csv/csv` | native `.so` | `make -C libs/csv` |
 | `compress` | `libs/compress/compress` | native `.so` (zlib) | `make -C libs/compress` (needs `zlib1g-dev`) |
 | `xml` | `libs/xml/xml` | native `.so` | `make -C libs/xml` |
@@ -236,6 +237,61 @@ for _, e in evs do
 end
 print(yaml.emit(evs))
 ```
+
+---
+
+## `toml`
+
+TOML 1.0 in C: decode and encode. Conformance: every case of the official
+[toml-test](https://github.com/toml-lang/toml-test) suite for TOML 1.0 passes
+(708 of 709 compare exactly; the other differs only in how its reference
+writes `.6` seconds as `.600`). Build: `make -C libs/toml`.
+
+```sea
+local toml = require("../libs/toml/toml")   -- relative to the requiring file
+
+local cfg = toml.decode(fs.read("config.toml")?)?
+print(cfg.database.port, cfg.servers.alpha.ip)
+fs.write("out.toml", toml.encode(cfg, {sort_keys = true})?)
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `toml.decode` | `decode(s [, opts]) → table\|error` | Parse a document |
+| `toml.encode` | `encode(t [, opts]) → string\|error` | Write a table as a document |
+| `toml.valid` | `valid(s) → bool` | Whether `s` is valid TOML |
+| `toml.datetime` | `datetime(s) → value\|error` | A date/time value (written bare by `encode`) from its RFC 3339 text |
+
+Failures are error values with the position: `toml.decode: duplicate key
+'port' at line 7, column 1`, `toml.decode: table 'a' defined twice at line 9,
+column 2`. Every rule of the spec is checked: keys and tables defined once,
+tables made by dotted keys or inline tables closed to later additions, `[[ ]]`
+only on arrays of tables, valid UTF-8, no control characters, integers within
+64 bits, real calendar dates.
+
+**Decode** (`opts`: `bigint`, `datetimes`):
+
+| TOML | Sea value |
+|------|-----------|
+| table, inline table | table |
+| array, array of tables | array (**0-indexed**) |
+| string (all four kinds) | `string` |
+| integer (decimal, `0x`, `0o`, `0b`, `_`) | `int` within ±2^47; beyond, `number` (exact `bigint` with `bigint = true`) |
+| float, `inf`, `nan` | `number` |
+| boolean | `bool` |
+| offset/local date-time, local date, local time | `string`, normalized to RFC 3339 (`T` separator, uppercase `Z`; fractions as written): `"1979-05-27T07:32:00Z"`, `"1979-05-27"`, `"07:32:00"`. With `datetimes = "values"`: a table `{__toml_datetime = text, kind = "datetime" \| "datetime-local" \| "date-local" \| "time-local"}` |
+
+**Encode** (`opts.sort_keys`): the top level must be a table (or map or
+struct). Plain keys come first, then each sub-table as a `[section]` and each
+list of tables as `[[section]]` entries, nested sections with dotted names.
+Keys are bare when they can be (`A-Za-z0-9_-`), quoted otherwise; strings
+are basic strings with escapes; integral floats keep `.0`; `nan`, `inf`;
+bigints within 64 bits; lists of other values (or mixed) are inline arrays,
+records inside them inline tables; datetime values (from `toml.datetime` or
+`datetimes = "values"`) are written bare. TOML has no null: `nil` fields are
+left out and a `nil` inside an array is an error, as are functions and other
+values with no TOML form. Decoding what `encode` writes gives the same data
+back, and Python's `tomllib` reads it the same way.
 
 ---
 

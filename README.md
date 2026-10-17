@@ -36,7 +36,7 @@ for i = 1, 6 do print(<-results) end
   and an optional JIT (libgccjit) that speeds hot numeric code up 2–4×.
 - **Batteries** — `math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`, `os`, `fs`, `path`, `process`, `sync`, `time`, `net`, `sort`, `bigint`, and
   `sea/parser` (Sea's own parser: AST, tokens, checks, a formatter); external
-  libraries for JSON, YAML, CSV, XML, HTTP, TLS, JWT, CLI flags, a terminal UI,
+  libraries for JSON, YAML, TOML, CSV, XML, HTTP, TLS, JWT, CLI flags, a terminal UI,
   SQLite and DuckDB (embedded SQL) and numeric kernels for training models.
 
 ## Quick start
@@ -74,7 +74,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 |----------|----------|
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
-| [Libraries](docs/libs.md) | `json`, `yaml`, `csv`, `compress`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `test` |
+| [Libraries](docs/libs.md) | `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `test` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |

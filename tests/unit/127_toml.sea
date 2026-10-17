@@ -1,0 +1,107 @@
+-- Test: libs/toml (needs make -C libs/toml)
+local toml = require("./libs/toml/toml")
+local json = require("./libs/json/json")
+local function show(v)
+    if is_error(v) then return "error: " .. v.message end
+    return json.encode(v, {sort_keys = true})
+end
+
+print("-- decode")
+local doc = [==[
+# a config file
+title = "TOML example"
+version = 2
+ratio = 0.75
+enabled = true
+dotted.key.here = "x"
+
+[owner]
+name = "Tom"
+dob = 1979-05-27T07:32:00-08:00
+
+[database]
+ports = [ 8000, 8001, 8002 ]
+data = [ ["delta", "phi"], [3.14] ]
+temp_targets = { cpu = 79.5, case = 72.0 }
+
+[servers.alpha]
+ip = "10.0.0.1"
+
+[[products]]
+name = "Hammer"
+sku = 738594937
+
+[[products]]
+
+[[products]]
+name = "Nail"
+color = "gray"
+]==]
+local t = toml.decode(doc)
+print(show(t))
+print(t.owner.dob, t.servers.alpha.ip, len(t.products), t.products[2].name, type(t.version), type(t.ratio))
+
+print("-- strings")
+print(show(toml.decode([==[
+basic = "tab\tquote\" é \u00E9 \U0001F600"
+literal = 'C:\path\no\escapes'
+multi = """
+Roses are red
+Violets are blue"""
+folded = """\
+    The quick \
+    brown fox."""
+lit_multi = '''
+first line
+  second'''
+quotes = """She said "hi"."""""
+]==])))
+
+print("-- numbers")
+print(show(toml.decode("a = +99\nb = -17\nc = 1_000_000\nd = 0xDEAD_beef\ne = 0o755\nf = 0b1101\ng = 6.626e-34\nh = -inf\ni = 5e+22\nj = 9223372036854775807\nk = -0.0")))
+print(toml.decode("x = nan").x != toml.decode("x = nan").x, type(toml.decode("j = 9223372036854775807", {bigint = true}).j))
+
+print("-- dates and times")
+print(show(toml.decode("a = 1979-05-27T07:32:00Z\nb = 1979-05-27 00:32:00.999999-07:00\nc = 1979-05-27T07:32:00\nd = 1979-05-27\ne = 07:32:00\nf = 1979-05-27t07:32:00z")))
+local dv = toml.decode("d = 1979-05-27\ne = 07:32:00.5", {datetimes = "values"})
+print(dv.d.kind, dv.d.__toml_datetime, dv.e.kind)
+print(show(toml.datetime("2026-10-17T10:00:00+03:00")), show(toml.datetime("2026-02-30")), show(toml.datetime("tomorrow")))
+
+print("-- errors")
+local bad = {"a = 1\na = 2", "a = ", "[t]\n[t]", "a.b = 1\n[a]", "[a]\nb.c = 1\n[a.b]", "x = {a = 1}\n[x]",
+             "x = [1]\n[[x]]", "a = 01", "a = 1__0", "a = \"open", "a = 'x\ny'", "a = { b = 1, }",
+             "a = 1 b = 2", "a = 1979-13-01", "a = 24:00:00", "k = \"\\q\"", "= 1", "a = 9223372036854775808",
+             "[[a]]\n[a]", "[a.b.c]\nz = 9\n[a]\nb.c.t = 1"}
+for i = 0, len(bad) - 1 do print(toml.decode(bad[i]).message) end
+print(toml.valid("a = 1"), toml.valid("a = "), show(toml.decode(42)))
+
+print("-- encode")
+local cfg = {}
+cfg.name = "sea"
+cfg.version = 1.0
+cfg.n = 3
+cfg.ok = true
+cfg.tags = {"a", "b"}
+cfg.weird_key = "x"
+cfg["needs quotes"] = "y"
+local db = {}
+db.host = "localhost"
+db.ports = {8000, 8001}
+db.limits = {cpu = 1.5}
+cfg.database = db
+local p1 = {}
+p1.name = "Hammer"
+local p2 = {}
+p2.name = "Nail"
+p2.size = 3
+cfg.products = {p1, p2}
+cfg.when = toml.datetime("1979-05-27T07:32:00Z")
+cfg.text = "line\n\"two\""
+local out = toml.encode(cfg, {sort_keys = true})
+print(out)
+print(show(toml.decode(out, {datetimes = "values"})) == show(cfg))
+print(show(toml.encode(5)), show(toml.encode({x = {1, nil, 3}})), show(toml.encode({f = print})))
+local mixed = {}
+mixed.list = {1, {a = 2}, "s"}
+mixed.empty = {}
+print(toml.encode(mixed, {sort_keys = true}))

@@ -1,0 +1,65 @@
+-- decode
+{"database":{"data":[["delta","phi"],[3.14]],"ports":[8000,8001,8002],"temp_targets":{"case":72.0,"cpu":79.5}},"dotted":{"key":{"here":"x"}},"enabled":true,"owner":{"dob":"1979-05-27T07:32:00-08:00","name":"Tom"},"products":[{"name":"Hammer","sku":738594937},{},{"color":"gray","name":"Nail"}],"ratio":0.75,"servers":{"alpha":{"ip":"10.0.0.1"}},"title":"TOML example","version":2}
+1979-05-27T07:32:00-08:00	10.0.0.1	3	Nail	int	number
+-- strings
+{"basic":"tab\tquote\" é é 😀","folded":"The quick brown fox.","lit_multi":"first line\n  second","literal":"C:\\path\\no\\escapes","multi":"Roses are red\nViolets are blue","quotes":"She said \"hi\".\"\""}
+-- numbers
+{"a":99,"b":-17,"c":1000000,"d":3735928559,"e":493,"f":13,"g":6.626e-34,"h":null,"i":5e+22,"j":9.223372036854776e+18,"k":-0.0}
+true	bigint
+-- dates and times
+{"a":"1979-05-27T07:32:00Z","b":"1979-05-27T00:32:00.999999-07:00","c":"1979-05-27T07:32:00","d":"1979-05-27","e":"07:32:00","f":"1979-05-27T07:32:00Z"}
+date-local	1979-05-27	time-local
+{"__toml_datetime":"2026-10-17T10:00:00+03:00","kind":"datetime"}	error: toml.datetime: not a TOML date or time: "2026-02-30" — invalid date (no such day)	error: toml.datetime: not a TOML date or time: "tomorrow"
+-- errors
+toml.decode: duplicate key 'a' at line 2, column 1
+toml.decode: expected a value at line 1, column 5
+toml.decode: table 't' defined twice at line 2, column 2
+toml.decode: table 'a' is already defined by dotted keys at line 2, column 2
+toml.decode: table 'b' is already defined by dotted keys at line 3, column 4
+toml.decode: cannot redefine inline table 'x' at line 2, column 2
+toml.decode: cannot append to static array 'x' with [[ ]] at line 2, column 3
+toml.decode: leading zeros are not allowed at line 1, column 5
+toml.decode: invalid number at line 1, column 5
+toml.decode: unterminated string at line 1, column 5
+toml.decode: line break in a single-line string at line 1, column 7
+toml.decode: trailing comma in an inline table at line 1, column 14
+toml.decode: expected a line break after the value at line 1, column 7
+toml.decode: invalid date (no such day) at line 1, column 5
+toml.decode: invalid time at line 1, column 5
+toml.decode: invalid escape in a string at line 1, column 6
+toml.decode: invalid character in a key at line 1, column 1
+toml.decode: integer out of range (64 bits) at line 1, column 5
+toml.decode: table 'a' is already an array at line 2, column 2
+toml.decode: cannot add keys to table 'b' with dotted keys: it is defined elsewhere at line 4, column 1
+true	false	error: toml.decode: string expected
+-- encode
+n = 3
+name = "sea"
+"needs quotes" = "y"
+ok = true
+tags = ["a", "b"]
+text = "line\n\"two\""
+version = 1.0
+weird_key = "x"
+when = 1979-05-27T07:32:00Z
+
+[database]
+host = "localhost"
+ports = [8000, 8001]
+
+[database.limits]
+cpu = 1.5
+
+[[products]]
+name = "Hammer"
+
+[[products]]
+name = "Nail"
+size = 3
+
+true
+error: toml.encode: a table expected (a TOML document is a table)	error: toml.encode: TOML has no null (a nil in an array)	error: toml.encode: cannot encode a value of type function
+list = [1, { a = 2 }, "s"]
+
+[empty]
+
