@@ -29,7 +29,8 @@ make -C libs/sqlite test  # sqlite: first build downloads the SQLite amalgamatio
 
 ```sh
 # Core VM tests (tests/unit/*.sea vs *.expected)
-make test                        # Build + run all unit tests
+make test                        # Build + run all unit tests, then the license header check
+make test-license                # Only the MIT header check (util/license.sea -check)
 make test-dwe                    # Unit tests with dead-write-elimination checks
 make test-seac                   # Unit tests run as compiled .seac bytecode
 make test-build                  # Unit tests run as `sea build` executables (src/sea_bundle.c)

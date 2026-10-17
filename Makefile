@@ -28,7 +28,7 @@ JIT_OBJ_DIR = obj-jit
 JIT_OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(JIT_OBJ_DIR)/%.o)
 JIT_TARGET  = $(BIN_DIR)/sea-jit
 
-.PHONY: all clean test test-jit test-seac test-build test-dwe test-format asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
+.PHONY: all clean test test-jit test-seac test-build test-dwe test-format test-license asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
 
 all: $(TARGET)
 
@@ -144,6 +144,11 @@ endif
 
 test: all
 	@$(TARGET) tests/run_tests.sea
+	@$(TARGET) util/license.sea -l MIT -check
+
+# every source file has the MIT header (fix with: bin/sea util/license.sea -l MIT)
+test-license: $(TARGET)
+	@$(TARGET) util/license.sea -l MIT -check
 
 # sea/parser's format round trip over every .sea file (see the script)
 test-format: $(TARGET)
