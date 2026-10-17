@@ -1,0 +1,418 @@
+-- util/license.sea — put a license header in the project's source files
+--
+--   bin/sea util/license.sea -l MIT [flags] [path ...]
+--
+-- Each file gets a short header in its own comment style, after a #! line
+-- if it has one:
+--
+--   /*                                  -- Copyright (c) 2026 Daniel
+--    * Copyright (c) 2026 Daniel        -- SPDX-License-Identifier: MIT
+--    * SPDX-License-Identifier: MIT
+--    */
+--
+-- C (.c, .h) gets the block form; Sea (.sea) `--` lines; shell (.sh) and
+-- Makefiles `#` lines. Paths are files or directories (default: the current
+-- directory). Hidden directories and bin, obj, obj-jit, gen, sea_modules and
+-- vendor (third-party code) are skipped, and so is a file whose first comment
+-- already names another copyright holder (unless -force).
+--
+-- A file that already has a header (a top comment with
+-- SPDX-License-Identifier) is left alone; -update rewrites it when the
+-- license, holder or year differ, and -remove takes it out.
+--
+--   -l ID          the license, an SPDX identifier (MIT, Apache-2.0, BSD-3-Clause,
+--                  GPL-3.0-or-later, MPL-2.0, ...); required except with -remove
+--                  and -check (which then only asks for some SPDX header)
+--   -c NAME        the copyright holder (default: git config user.name)
+--   -y YEAR        the year, or a range like 2025-2026 (default: this year)
+--   -check         list the files without a (matching) header; exit 1 if any
+--   -n             show what would change, change nothing
+--   -update        rewrite headers that differ
+--   -remove        remove the headers
+--   -force         also files with another copyright notice
+--   -x TEXT        skip paths containing TEXT (may repeat)
+--   -license-file  also write LICENSE with the full text (MIT, ISC, BSD-2-Clause,
+--                  BSD-3-Clause, 0BSD, Unlicense; for others, where to get it)
+
+local function usage()
+    print("usage: bin/sea util/license.sea -l ID [-c NAME] [-y YEAR] [-check | -n | -update | -remove] [-force] [-x TEXT] [-license-file] [path ...]")
+    print("")
+    print("Puts a copyright + SPDX license header in .c, .h, .sea, .sh files and Makefiles.")
+end
+
+local function fail(msg)
+    io.write_err("license: " .. msg .. "\n")
+    os.exit(2)
+end
+
+-- ---- arguments ----
+
+local license = nil
+local holder = nil
+local year = tostring(time.now():year())
+local mode = "add"
+local dry = false
+local force = false
+local write_file = false
+local excludes = []
+local paths = []
+
+local i = 1
+while i <= len(os.args) - 1 do
+    local a = os.args[i]
+    local function value()
+        i = i + 1
+        if os.args[i] == nil then fail(a .. " needs a value") end
+        return os.args[i]
+    end
+    if a == "-l" then
+        license = value()
+    elseif a == "-c" then
+        holder = value()
+    elseif a == "-y" then
+        year = value()
+    elseif a == "-x" then
+        excludes[] = value()
+    elseif a == "-check" then
+        mode = "check"
+    elseif a == "-update" then
+        mode = "update"
+    elseif a == "-remove" then
+        mode = "remove"
+    elseif a == "-n" then
+        dry = true
+    elseif a == "-force" then
+        force = true
+    elseif a == "-license-file" then
+        write_file = true
+    elseif a == "-h" or a == "--help" then
+        usage()
+        os.exit(0)
+    elseif string.starts_with(a, "-") then
+        io.write_err("license: unknown flag " .. a .. "\n")
+        usage()
+        os.exit(2)
+    else
+        paths[] = a
+    end
+    i = i + 1
+end
+if len(paths) == 0 then paths[] = "." end
+
+local any_header = mode == "check" and license == nil
+if mode ~= "remove" and not any_header then
+    if license == nil then fail("which license? -l MIT, -l Apache-2.0, -l BSD-3-Clause, ... (an SPDX identifier)") end
+    if not re.test("^[A-Za-z0-9.+-]+( (AND|OR|WITH) [A-Za-z0-9.+-]+)*$", license) then fail("'" .. license .. "' is not an SPDX license expression") end
+    if not re.test("^[0-9]{4}(-[0-9]{4})?$", year) then fail("-y takes a year or a range (2025-2026)") end
+    if holder == nil then
+        local r = process.run({"git", "config", "user.name"})
+        if not is_error(r) and r.ok and string.trim(r.stdout) ~= "" then holder = string.trim(r.stdout) end
+    end
+    if holder == nil then fail("who holds the copyright? -c NAME (git config user.name is not set)") end
+end
+
+-- ---- comment styles ----
+
+-- style of a file: "block" (/* */), "dash" (--), "hash" (#), or nil
+local function style_of(f)
+    local base = path.basename(f)
+    local ext = path.ext(f)
+    if ext == ".c" or ext == ".h" then return "block" end
+    if ext == ".sea" then return "dash" end
+    if ext == ".sh" or base == "Makefile" or base == "GNUmakefile" or ext == ".mk" then return "hash" end
+    return nil
+end
+
+local function header_lines()
+    local l = []
+    l[] = "Copyright (c) " .. year .. " " .. holder
+    l[] = "SPDX-License-Identifier: " .. license
+    return l
+end
+
+local function render(style)
+    local out = []
+    if style == "block" then
+        out[] = "/*"
+        for _, l in header_lines() do out[] = " * " .. l end
+        out[] = " */"
+    else
+        local mark = style == "dash" and "-- " or "# "
+        for _, l in header_lines() do out[] = mark .. l end
+    end
+    return string.join(out, "\n") .. "\n"
+end
+
+-- The first comment of the file (after a #! line): {start, stop (byte
+-- positions of the comment, stop after its last newline), text} or nil
+local function top_comment(src, style)
+    local pos = 1
+    if string.starts_with(src, "#!") then
+        local nl = string.find(src, "\n")
+        if nl == nil then return nil, len(src) + 1 end
+        pos = nl + 1
+    end
+    local body_start = pos
+    if style == "block" then
+        local m = re.match("^[ \\t]*/\\*", src, pos)
+        if m == nil or m.start ~= pos then return nil, body_start end
+        local close = string.find(src, "*/", m.start + len(m.text))
+        if close == nil then return nil, body_start end
+        local stop = close + 2
+        if string.sub(src, stop, stop) == "\n" then stop = stop + 1 end
+        local c = {}
+        c.start = pos
+        c.stop = stop
+        c.text = string.sub(src, pos, stop - 1)
+        return c, body_start
+    end
+    local mark = style == "dash" and "--" or "#"
+    local p = pos
+    while p <= len(src) do
+        local nl = string.find(src, "\n", p) or (len(src) + 1)
+        local line = string.sub(src, p, nl - 1)
+        local t = string.trim(line)
+        if not string.starts_with(t, mark) or (style == "hash" and string.starts_with(t, "#!")) then break end
+        if style == "dash" and string.starts_with(t, "--[[") then break end
+        p = nl + 1
+    end
+    if p == pos then return nil, body_start end
+    local c = {}
+    c.start = pos
+    c.stop = math.min(p, len(src) + 1)
+    c.text = string.sub(src, pos, c.stop - 1)
+    return c, body_start
+end
+
+local function is_ours(c)
+    return c ~= nil and string.contains(c.text, "SPDX-License-Identifier:")
+end
+
+-- ---- the files ----
+
+local SKIP_DIRS = {}
+for _, d in {"bin", "obj", "obj-jit", "gen", "sea_modules", "vendor", "node_modules"} do SKIP_DIRS[d] = true end
+
+local function excluded(f)
+    for _, x in excludes do
+        if string.contains(f, x) then return true end
+    end
+    return false
+end
+
+local files = []
+for _, p in paths do
+    if fs.isdir(p) then
+        for _, f in fs.walk(p, {files = true}) do
+            local skip = false
+            local parts = path.parts(path.relative(p, f))
+            for k = 0, len(parts) - 2 do
+                local part = parts[k]
+                if (string.starts_with(part, ".") and part ~= "." and part ~= "..") or SKIP_DIRS[part] then skip = true end
+            end
+            if not skip and style_of(f) ~= nil and not excluded(f) then files[] = path.normalize(f) end
+        end
+    elseif fs.isfile(p) then
+        if style_of(p) == nil then fail(p .. ": unknown file type (C, Sea, shell or Makefile)") end
+        files[] = p
+    else
+        fail(p .. ": no such file or directory")
+    end
+end
+
+local changed = 0
+local missing = 0
+local skipped = []
+
+for _, f in files do
+    local src = fs.read(f)
+    if is_error(src) then fail(src.message) end
+    local style = style_of(f)
+    local c, body_start = top_comment(src, style)
+    local want = (mode ~= "remove" and not any_header) and render(style) or nil
+    local out = nil
+    if is_ours(c) then
+        local current = c.text
+        if not string.ends_with(current, "\n") then current = current .. "\n" end
+        if mode == "remove" then
+            local rest = string.sub(src, c.stop)
+            if string.starts_with(rest, "\n") then rest = string.sub(rest, 2) end
+            out = string.sub(src, 1, c.start - 1) .. rest
+        elseif not any_header and current ~= want then
+            if mode == "update" then
+                out = string.sub(src, 1, c.start - 1) .. want .. string.sub(src, c.stop)
+            elseif mode == "check" then
+                print(f .. ": header differs")
+                missing = missing + 1
+            end
+        end
+    elseif mode ~= "remove" then
+        if c ~= nil and string.contains(string.lower(c.text), "copyright") and not force then
+            skipped[] = f
+        elseif mode == "check" then
+            print(f .. ": no license header")
+            missing = missing + 1
+        else
+            local rest = string.sub(src, body_start)
+            local sep = (rest == "" or string.starts_with(rest, "\n")) and "" or "\n"
+            out = string.sub(src, 1, body_start - 1) .. want .. sep .. rest
+        end
+    end
+    if out ~= nil and out ~= src then
+        changed = changed + 1
+        if dry then
+            print("would change " .. f)
+        else
+            local opts = {}
+            opts.atomic = true
+            local st = fs.stat(f)
+            if not is_error(st) then opts.mode = st.mode end
+            local w = fs.write(f, out, opts)
+            if is_error(w) then fail(w.message) end
+            print(f)
+        end
+    end
+end
+
+for _, f in skipped do io.write_err("license: skipped " .. f .. " (it has another copyright notice; -force to add anyway)\n") end
+
+-- ---- LICENSE ----
+
+local TEXTS = {}
+TEXTS["MIT"] = [==[MIT License
+
+Copyright (c) YEAR HOLDER
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+]==]
+TEXTS["ISC"] = [==[ISC License
+
+Copyright (c) YEAR HOLDER
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+]==]
+TEXTS["0BSD"] = [==[Zero-Clause BSD
+
+Copyright (C) YEAR HOLDER
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+]==]
+local BSD_BODY = [==[Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+]==]
+local BSD3_CLAUSE = [==[
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+]==]
+local BSD_DISCLAIMER = [==[
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+]==]
+TEXTS["BSD-2-Clause"] = "BSD 2-Clause License\n\nCopyright (c) YEAR, HOLDER\n\n" .. BSD_BODY .. BSD_DISCLAIMER
+TEXTS["BSD-3-Clause"] = "BSD 3-Clause License\n\nCopyright (c) YEAR, HOLDER\n\n" .. BSD_BODY .. BSD3_CLAUSE .. BSD_DISCLAIMER
+TEXTS["Unlicense"] = [==[This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <https://unlicense.org>
+]==]
+
+if write_file and mode ~= "remove" and mode ~= "check" then
+    local text = TEXTS[license]
+    if text == nil then
+        io.write_err("license: no built-in text for " .. license .. "; get it from https://spdx.org/licenses/" .. license .. ".txt and save it as LICENSE\n")
+    else
+        text = string.replace(string.replace(text, "YEAR", year), "HOLDER", holder)
+        local target = fs.isdir(paths[0]) and path.join(paths[0], "LICENSE") or "LICENSE"
+        if dry then
+            print("would write " .. target)
+        else
+            local w = fs.write(target, text)
+            if is_error(w) then fail(w.message) end
+            print(target)
+        end
+    end
+end
+
+if mode == "check" then
+    local n = len(files) - len(skipped)
+    local note = len(skipped) > 0 and (" (" .. tostring(len(skipped)) .. " skipped)") or ""
+    if missing > 0 then
+        print(tostring(missing) .. " of " .. tostring(n) .. " files without a matching header" .. note)
+        os.exit(1)
+    end
+    print("all " .. tostring(n) .. " files have the header" .. note)
+else
+    local verb = dry and "would change" or "changed"
+    print(string.format("%s %d of %d files", verb, changed, len(files)))
+end

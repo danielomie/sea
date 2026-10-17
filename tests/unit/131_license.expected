@@ -1,0 +1,73 @@
+[1] Makefile: no license header
+m.sea: no license header
+run.sh: no license header
+src/a.c: no license header
+src/a.h: no license header
+5 of 5 files without a matching header (1 skipped) | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+[0] would change Makefile
+would change m.sea
+would change run.sh
+would change src/a.c
+would change src/a.h
+would change 5 of 6 files | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+[0] Makefile
+m.sea
+run.sh
+src/a.c
+src/a.h
+LICENSE
+changed 5 of 6 files | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+/*
+ * Copyright (c) 2026 Ana Silva
+ * SPDX-License-Identifier: MIT
+ */
+
+/* a.c — something */
+int a;
+
+#!/bin/sh
+# Copyright (c) 2026 Ana Silva
+# SPDX-License-Identifier: MIT
+
+echo hi
+
+-- Copyright (c) 2026 Ana Silva
+-- SPDX-License-Identifier: MIT
+
+-- m — a module
+
+return {}
+
+true	MIT License
+
+Copyright (c) 2026 Ana Silva
+[0] all 5 files have the header (1 skipped) | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+[0] changed 0 of 6 files | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+[1] Makefile: header differs
+m.sea: header differs
+run.sh: header differs
+src/a.c: header differs
+src/a.h: header differs
+5 of 5 files without a matching header (1 skipped) | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+[0] Makefile
+m.sea
+run.sh
+src/a.c
+src/a.h
+changed 5 of 6 files | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
+-- Copyright (c) 2025-2026 Ana Silva
+-- SPDX-License-Identifier: Apach
+true	false
+[0] Makefile
+m.sea
+run.sh
+src/a.c
+src/a.h
+changed 5 of 6 files
+restored:	true
+[0] src/other.c
+changed 1 of 1 files
+[2]  | license: 'bad id!' is not an SPDX license expression
+[2]  | license: notes.txt: unknown file type (C, Sea, shell or Makefile)
+[0] would change m.sea
+would change 1 of 1 files | license: no built-in text for GPL-3.0-or-later; get it from https://spdx.org/licenses/GPL-3.0-or-later.txt and save it as LICENSE

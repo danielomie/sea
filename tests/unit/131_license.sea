@@ -1,0 +1,52 @@
+-- Test: util/license.sea (license headers), run as ./bin/sea from the repo root
+local SEA = fs.realpath("./bin/sea")
+local TOOL = fs.realpath("./util/license.sea")
+local dir = fs.tempdir("sealic-")
+
+local function run(args)
+    local cmd = []
+    cmd[] = SEA
+    cmd[] = TOOL
+    for i = 0, len(args) - 1 do cmd[] = args[i] end
+    local r = process.run(cmd, {cwd = dir})
+    return "[" .. tostring(r.code) .. "] " .. string.trim(r.stdout) .. (r.stderr ~= "" and (" | " .. string.trim(r.stderr)) or "")
+end
+
+fs.mkdir(dir .. "/src")
+fs.mkdir(dir .. "/vendor")
+fs.write(dir .. "/src/a.c", "/* a.c — something */\nint a;\n")
+fs.write(dir .. "/src/a.h", "#pragma once\n")
+fs.write(dir .. "/m.sea", "-- m — a module\n\nreturn {}\n")
+fs.write(dir .. "/run.sh", "#!/bin/sh\necho hi\n", {mode = 493})
+fs.write(dir .. "/Makefile", "all:\n\ttrue\n")
+fs.write(dir .. "/src/other.c", "/* Copyright 2020 Someone Else */\nint o;\n")
+fs.write(dir .. "/vendor/v.c", "int v;\n")
+fs.write(dir .. "/notes.txt", "text\n")
+local originals = {}
+for _, f in {"src/a.c", "src/a.h", "m.sea", "run.sh", "Makefile"} do originals[f] = fs.read(dir .. "/" .. f) end
+
+print(run({"-check"}))
+print(run({"-l", "MIT", "-c", "Ana Silva", "-y", "2026", "-n"}))
+print(run({"-l", "MIT", "-c", "Ana Silva", "-y", "2026", "-license-file"}))
+print(fs.read(dir .. "/src/a.c"))
+print(fs.read(dir .. "/run.sh"))
+print(fs.read(dir .. "/m.sea"))
+print(fs.stat(dir .. "/run.sh").mode == 493, string.sub(fs.read(dir .. "/LICENSE"), 1, 41))
+print(run({"-l", "MIT", "-c", "Ana Silva", "-y", "2026", "-check"}))
+print(run({"-l", "MIT", "-c", "Ana Silva", "-y", "2026"}))
+print(run({"-l", "Apache-2.0", "-c", "Ana Silva", "-y", "2025-2026", "-check"}))
+print(run({"-l", "Apache-2.0", "-c", "Ana Silva", "-y", "2025-2026", "-update"}))
+print(string.sub(fs.read(dir .. "/m.sea"), 1, 70))
+local p = process.run({SEA, "doc", "m.sea"}, {cwd = dir})
+print(string.contains(p.stdout, "m — a module"), string.contains(p.stdout, "Copyright"))
+print(run({"-remove"}))
+local same = true
+for f, text in originals do
+    if fs.read(dir .. "/" .. f) ~= text then same = false end
+end
+print("restored:", same)
+print(run({"-l", "MIT", "-c", "X", "-force", "src/other.c"}))
+print(run({"-l", "bad id!"}))
+print(run({"-l", "MIT", "-c", "X", "notes.txt"}))
+print(run({"-l", "GPL-3.0-or-later", "-c", "X", "-n", "-license-file", "m.sea"}))
+fs.remove(dir, {recursive = true})

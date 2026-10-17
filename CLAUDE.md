@@ -16,6 +16,9 @@ bin/sea fmt -l .      # sea fmt / doc / test: Sea scripts in tools/, embedded at
                       # (sea/test = libs/test/test.sea, sea/check = tools/lib/check.sea)
                       # into gen/sea_modules.h
 
+bin/sea util/license.sea -l MIT -check   # license headers in .c/.h/.sea/.sh/Makefile
+                      # (-n dry run, -update, -remove; skips vendor/, gen/, obj/)
+
 # Native libraries under libs/ (e.g. json, yaml, toml, csv, compress, xml, console, http, ssl, jwt, tensor, duckdb)
 make -C libs/json     # Build a library's .so
 make -C libs/duckdb test  # duckdb: first build downloads libduckdb into libs/duckdb/vendor/

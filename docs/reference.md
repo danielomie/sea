@@ -61,7 +61,8 @@ stderr) and left alone; the exit status is then 2.
 Prints the documentation written in comments. A **doc comment** is the
 block of `--` lines (or a `--[[ ]]` comment) right above a declaration;
 the **module comment** is the comment block at the top of a file, when a
-blank line separates it from the first statement. Documented: functions
+blank line separates it from the first statement (a license header block,
+one with `SPDX-License-Identifier`, is skipped). Documented: functions
 stored in the table the file returns (`function M.f(...)`, shown as
 `file.f`), functions and methods of other tables (`function Conn:send(...)`,
 grouped under `Conn`), global functions, and documented fields

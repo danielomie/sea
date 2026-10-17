@@ -168,21 +168,40 @@ local function read_module(file)
     end
 
     -- the module comment: the comment block at the top, unless it sits right
-    -- on the first statement
+    -- on the first statement; a license header block (SPDX-License-Identifier)
+    -- before it is skipped
     local first_line = len(stmts) > 0 and stmts[0].line or 1000000000
-    local top = []
+    local blocks = []
+    local block = nil
     local last_end = 0
     for _, c in ast.comments do
         if c.inline or c.line >= first_line then break end
-        if string.starts_with(c.text, "#!") then
-            -- a shebang line
-        else
-            if last_end > 0 and c.line > last_end + 1 then break end
-            top[] = c
+        if not string.starts_with(c.text, "#!") then
+            if block == nil or c.line > last_end + 1 then
+                block = []
+                blocks[] = block
+            end
+            block[] = c
             last_end = c.line + count_lines(c.text)
         end
     end
-    if len(top) > 0 and last_end < first_line - 1 then
+    local function block_end(b)
+        local c = b[len(b) - 1]
+        return c.line + count_lines(c.text)
+    end
+    local function is_license(b)
+        for _, c in b do
+            if string.contains(c.text, "SPDX-License-Identifier") then return true end
+        end
+        return false
+    end
+    local top = nil
+    if len(blocks) > 0 and not is_license(blocks[0]) then
+        top = blocks[0]
+    elseif len(blocks) > 1 and block_end(blocks[0]) + 1 < blocks[1][0].line then
+        top = blocks[1]
+    end
+    if top ~= nil and block_end(top) < first_line - 1 then
         local parts = []
         for _, c in top do parts[] = comment_text(c.text) end
         mod.doc = string.trim(string.join(parts, "\n"))

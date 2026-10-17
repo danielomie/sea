@@ -75,6 +75,7 @@ bin/sea test -cover                   # line coverage of the code under test (-c
 bin/sea new myapp                     # start a project (sea.toml, main.sea, a test)
 bin/sea get https://host/repo@v1.0    # add a dependency: sea_modules/, sea.lock; require("repo")
 bin/sea lsp                           # language server: diagnostics, format, hover, definition, completion
+bin/sea util/license.sea -l MIT       # put copyright + SPDX license headers in the sources (-check, -n, -remove)
 ```
 
 Native libraries are built per library, e.g. `make -C libs/json`.
