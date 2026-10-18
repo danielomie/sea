@@ -244,11 +244,29 @@ static SeaToken scan_string(SeaLexer *l, char quote) {
                         int lo = isdigit((unsigned char)h2) ? h2 - '0' : (tolower((unsigned char)h2) - 'a' + 10);
                         c = (char)(hi * 16 + lo);
                     } else {
-                        c = 'x';
+                        if (buf) sea_free(buf, (size_t)buf_cap);
+                        return error_token(l, "invalid \\x escape (use \\xHH with two hex digits)");
                     }
                     break;
                 }
-                default:   c = esc;  break;
+                case '\n':
+                    /* a backslash at the end of a line keeps the newline (as in Lua) */
+                    l->line++;
+                    l->line_start = l->cur;
+                    c = '\n';
+                    break;
+                default: {
+                    if (buf) sea_free(buf, (size_t)buf_cap);
+                    static _Thread_local char msg[160];  /* error_token keeps the pointer */
+                    if (esc == '\0')
+                        snprintf(msg, sizeof msg, "unterminated string");
+                    else if ((unsigned char)esc >= 0x20 && (unsigned char)esc < 0x7F)
+                        snprintf(msg, sizeof msg, "invalid escape '\\%c' (valid: \\n \\t \\r \\\\ \\\" \\' \\0 \\a \\b \\f \\v \\xHH \\u{XXXX}; "
+                                 "write a backslash as \\\\)", esc);
+                    else
+                        snprintf(msg, sizeof msg, "invalid escape (a backslash followed by byte 0x%02X)", (unsigned char)esc);
+                    return error_token(l, msg);
+                }
             }
         }
         SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, c);

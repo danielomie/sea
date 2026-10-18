@@ -16,3 +16,8 @@ hELLo
 65
 A
 hello world
+t.sea:1:11: invalid escape '\1' (valid: \n \t \r \\ \" \' \0 \a \b \f \v \xHH \u{XXXX}; write a backslash as \\)
+t.sea:1:11: invalid escape '\d' (valid: \n \t \r \\ \" \' \0 \a \b \f \v \xHH \u{XXXX}; write a backslash as \\)
+t.sea:1:11: invalid \x escape (use \xHH with two hex digits)
+ok
+ok	7

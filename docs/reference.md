@@ -433,6 +433,11 @@ Integer (`int`) and float (`number`) are **distinct types**. `1 == 1.0` is **fal
 | `\v` | vertical tab |
 | `\xHH` | byte with hex value `HH` (exactly two hex digits) |
 | `\u{H…}` | the code point `H…` (1 to 6 hex digits, up to `10FFFF`, not a surrogate) as UTF-8: `"\u{E9}"` is `"é"`, `"\u{1F600}"` is `"😀"`. Anything else after `\u` is a compile error |
+| `\` at the end of a line | the newline itself (the string goes on on the next line) |
+
+Any other character after a backslash (`"\d"`, `"\1"`, `"\x4"`) is a
+compile error: `invalid escape '\d'`. Write a backslash as `\\` (regular
+expressions: `"\\d+"`, or a long string `[[\d+]]`).
 
 ### Long strings (no escape processing)
 

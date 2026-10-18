@@ -122,10 +122,10 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     ternary `?:`** (use `cond and a or b`, which fails when `a` is false
     or nil), or `print` with `%` formatting (use `printf` or
     `string.format`).
-26. **Escapes:** `\n \t \r \\ \" \' \0 \xHH \u{HHHH}` and a few control
-    characters. Any other backslash sequence drops the backslash: `"\1"` is
-    the character `1`, not a byte. Write bytes as `"\x01"`.
-
+26. **Escapes:** `\n \t \r \\ \" \' \0 \xHH \u{HHHH}` and `\a \b \f \v`.
+    Any other backslash sequence is a compile error: `"\d+"` must be
+    `"\\d+"` (or the long string `[[\d+]]`), and a byte is `"\x01"`
+    (Lua's decimal `"\1"` is an error).
 27. **Reserved words cannot be names**, not even field names: besides
     Lua's (`and break do else elseif end false for function if in local nil
     not or return then true while`), Sea reserves `const continue del go

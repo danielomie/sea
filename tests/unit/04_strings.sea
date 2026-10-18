@@ -21,3 +21,16 @@ print(string.replace(s, "ell", "ELL")) -- hELLo
 print(string.byte("A"))         -- 65
 print(string.char(65))          -- A
 print("hello" .. " " .. "world") -- hello world
+
+-- an unknown escape is a compile error (it used to drop the backslash)
+local parser = require("sea/parser")
+local function check_src(src)
+    local d = parser.check(src, {name = "t.sea"})
+    return d == nil and "ok" or d.text
+end
+print(check_src("local s = \"a\\1b\""))
+print(check_src("local s = \"\\d+\""))
+print(check_src("local s = \"\\xG0\""))
+print(check_src("local s = \"\\x41\\u{E9}\\t\\\\\\0\""))
+print(check_src("local s = \"one\\\ntwo\""), len("one\
+two"))
