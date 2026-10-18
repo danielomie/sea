@@ -677,16 +677,21 @@ local function page_source(mod, src)
     if is_error(toks) then
         code[] = esc(src)
     else
-        local at = 0           -- bytes of src already written
+        local at = 0 -- bytes of src already written
         for _, tk in toks do
             local off = starts_list[tk.line - 1] + tk.col - 1
             if off >= at then
                 code[] = esc(string.sub(src, at + 1, off))
                 local cls = nil
-                if tk.kind == "keyword" then cls = "k"
-                elseif tk.kind == "string" then cls = "s"
-                elseif tk.kind == "number" then cls = "n"
-                elseif tk.kind == "comment" then cls = "c" end
+                if tk.kind == "keyword" then
+                    cls = "k"
+                elseif tk.kind == "string" then
+                    cls = "s"
+                elseif tk.kind == "number" then
+                    cls = "n"
+                elseif tk.kind == "comment" then
+                    cls = "c"
+                end
                 local text = string.sub(src, off + 1, off + len(tk.text))
                 code[] = cls == nil and esc(text) or "<span class=\"" .. cls .. "\">" .. esc(text) .. "</span>"
                 at = off + len(tk.text)
