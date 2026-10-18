@@ -15,11 +15,10 @@ local bad = 0
 
 local sc = stream.scanner(stream.open(os.args[1])?)
 while sc:scan() do
-    local m = LINE:match(sc:text())
-    if m == nil then
+    local g = LINE:captures(sc:text())
+    if g == nil then
         bad += 1
     else
-        local g = m.groups
         list.inc(statuses, g[5])
         list.inc(ips, g[1])
         list.inc(paths, re.gsub("/\\d+", g[4], "/:id"))

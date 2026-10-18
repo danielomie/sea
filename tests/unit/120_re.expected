@@ -63,3 +63,7 @@ re.test: not a compiled regex (its __prog was changed)
 -- escape and linear time
 a\.b\*c\[d\]\(e\)\|\{f\}\^\$\\	true
 false	false	false
+-- captures: the strings only
+["a=", "a", nil]	["b", nil, "b"]	nil
+["10-20", "10", "20"]	["2"]	nil
+re.captures: string expected, got int

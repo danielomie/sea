@@ -1,14 +1,16 @@
 ## What the comparison showed
 
-**Speed.** Sea was faster on 4 of the 5 scripts: 3× on the CSV report (the
-CSV reader is C, the loop is light), about 2× on the JSON transform and on
-the file inventory (startup of 4 ms against Python's 16 ms counts on short
-scripts), 1.2–1.3× on word counting. It is slower on regex-heavy line parsing
-(`log_stats`, 0.7–0.8×): a regex match costs about 4.5 µs per line against
-Python's 1 µs — half in the search (Sea's engine guarantees linear time;
-Python's `sre` backtracks without that guarantee), half in building the
-match table (`text`, `groups`, `spans`, `named`), which Python creates
-lazily. That is the place to improve next.
+**Speed.** Sea is faster on all 5 scripts: 3× on the CSV report (the CSV
+reader is C, the loop is light), about 2× on the JSON transform and on the
+file inventory (startup of 4 ms against Python's 16 ms counts on short
+scripts), 1.1–1.3× on word counting and 1.2× on regex-heavy line parsing
+(`log_stats`). That one started at 0.7×: a match cost 4.5 µs per line
+against Python's 1.5 µs (`match` + `groups()`). The search got faster
+(each regex program validated once, not per call; loops like `\S+ ` or
+`[^"]*"` read their run in one go, since their exit character cannot
+continue them; the backtracker's buffers reused) and `re.captures` returns
+just the strings, without the match table's `spans` and `named` (32
+allocations down to 10): 1.8 µs per line now.
 
 **Length.** The Sea versions are as long as the Python ones or shorter
 (8–36 lines against 11–37). The first versions were longer (up to 44

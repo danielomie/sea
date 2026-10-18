@@ -519,7 +519,8 @@ codepoints chars sub(s,i[,j]) offset upper lower reverse width`.
 
 **re** (RE2; `p` is a pattern string or `re.compile(p [, "ims"])`):
 `test(p,s) → bool`, `match(p,s[,init]) → m|nil` (`m.text`, `m.start`,
-`m.stop`, `m.groups[1]`, `m.named.name`), `all(p,s[,n])`,
+`m.stop`, `m.groups[1]`, `m.named.name`), `captures(p,s[,init]) → [whole, g1, ...]|nil`
+(strings only, 2× faster than `match`: use it to parse lines), `all(p,s[,n])`,
 `findall(p,s[,n]) → strings`, `gsub(p,s,repl[,n])` (repl: string with
 `$1`, a function of the match, or a table), `split(p,s[,n])`, `escape(s)`.
 Double the backslashes in normal strings: `"\\d+"`, or use `[[\d+]]`.

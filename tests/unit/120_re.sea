@@ -80,3 +80,8 @@ print("-- escape and linear time")
 print(re.escape("a.b*c[d](e)|{f}^$\\"), re.test(re.escape("1+1=2?"), "is 1+1=2?"))
 local s = string.rep("a", 20000)
 print(re.test("(a*)*b", s), re.test("(a|aa)*c", s), re.test("(x+x+)+y", string.rep("x", 20000)))
+
+print("-- captures: the strings only")
+print(re.captures("(\\w+)=(\\d+)?", "x a= b=2"), re.captures("(a)|(b)", "xb"), re.captures("z", "abc"))
+print(rx:captures("x 10-20"), re.captures("\\d", "a1b2", 3), re.captures("\\d", "a1", 5))
+print(try(function() local _ = re.captures("a", 5) end))

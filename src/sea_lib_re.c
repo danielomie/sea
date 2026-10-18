@@ -14,6 +14,7 @@
  *
  *   re.compile(pattern [, flags]) → regex | error
  *   re.test(p, s) → bool            re.match(p, s [, init]) → match | nil
+ *   re.captures(p, s [, init]) → [whole, group 1, ...] | nil (no match table)
  *   re.all(p, s [, n]) → array of matches     re.findall(p, s [, n]) → array of strings
  *   re.gsub(p, s, repl [, n]) → string        re.split(p, s [, n]) → array
  *   re.escape(s) → string
@@ -21,12 +22,18 @@
  * p is a pattern string or a compiled regex (whose methods are the same
  * functions: rx:test(s), rx:match(s), ...). A match is a table: text, start,
  * stop (1-based byte positions, inclusive, like string.find), groups (array:
- * [0] the whole match, [i] group i or nil), spans ([i] = {start, stop} or
+ * [0] the whole match, [i] group i or nil), spans ([i] = [start, stop] or
  * nil) and named ({name = text}).
  *
  * The compiled program is kept as a string in the regex table (field
  * __prog): immutable and freed by reference counting. It is validated
- * before each use, so a replaced field cannot crash the VM.
+ * on its first use in a thread (prog_load), so a replaced field cannot crash
+ * the VM.
+ *
+ * Short texts (and windows of long ones) are searched by a bounded
+ * backtracker, linear like the Pike VM; a split between branches that start
+ * with disjoint characters (I_SPLITP: \S+ then a space) reads the whole run
+ * of a loop in one go.
  */
 
 #include "sea_array.h"
@@ -46,7 +53,7 @@
 #define RE_MAX_REPEAT  1000      /* {n,m} bounds */
 #define RE_MAX_DEPTH   1000      /* parser nesting */
 #define RE_MAX_GROUPS  1000
-#define RE_MAGIC       0x52454732u   /* "REG2" */
+#define RE_MAGIC       0x52454733u   /* "REG3" */
 
 /* ======================================================================== */
 /* Parse: pattern → AST                                                     */
@@ -617,7 +624,10 @@ static Node *parse_alt(Parser *p) {
 /* Compile: AST → program                                                   */
 /* ======================================================================== */
 
-enum { I_CHAR, I_CHARF, I_ANY, I_ANYNL, I_CLASS, I_MATCH, I_JMP, I_SPLIT, I_SAVE, I_ASSERT, I_NOP };
+/* I_SPLITP is an I_SPLIT whose two branches start with characters that
+ * cannot both match (see mark_exclusive_splits): the backtracker reads the
+ * next character and takes the one branch that can go on, pushing nothing */
+enum { I_CHAR, I_CHARF, I_ANY, I_ANYNL, I_CLASS, I_MATCH, I_JMP, I_SPLIT, I_SAVE, I_ASSERT, I_NOP, I_SPLITP };
 
 typedef struct { int32_t op, x, y; } Inst;
 
@@ -762,6 +772,82 @@ static void compile_node(Code *c, Node *n) {
     }
 }
 
+/* The instruction that consumes the first character on the path from pc,
+ * following saves, nops and jumps; -1 when the path splits, asserts or
+ * matches before it reads a character. */
+static int first_char_inst(const Code *c, int pc) {
+    for (int steps = 0; steps < 64 && pc >= 0 && (size_t)pc < c->n; steps++) {
+        const Inst *in = &c->inst[pc];
+        switch (in->op) {
+            case I_CHAR: case I_CHARF: case I_ANY: case I_ANYNL: case I_CLASS: return pc;
+            case I_SAVE: case I_NOP: pc++; break;
+            case I_JMP: pc = in->x; break;
+            default: return -1;
+        }
+    }
+    return -1;
+}
+
+/* The characters a consuming instruction accepts: its ASCII members, and
+ * whether it may accept a character >= 128 */
+static void char_set_of(const Inst *in, const Parser *p, uint32_t ascii[4], bool *high) {
+    memset(ascii, 0, 4 * sizeof *ascii);
+    *high = true;
+    switch (in->op) {
+        case I_CHAR:
+            if (in->x < 128) { ascii[in->x >> 5] |= 1u << (in->x & 31); *high = false; }
+            break;
+        case I_CHARF:      /* 'k' also matches U+212A: keep high */
+            if (in->x < 128) {
+                uint32_t u = sea_utf8_upper((uint32_t)in->x);
+                ascii[in->x >> 5] |= 1u << (in->x & 31);
+                if (u < 128) ascii[u >> 5] |= 1u << (u & 31);
+            }
+            break;
+        case I_ANY: case I_ANYNL:
+            for (int k = 0; k < 4; k++) ascii[k] = ~0u;
+            if (in->op == I_ANY) ascii[0] &= ~(1u << '\n');
+            break;
+        case I_CLASS: {
+            const CharSet *cs = &p->sets[in->x];
+            bool hi = cs->neg || cs->fold;
+            for (size_t k = 0; k < cs->n; k++) if (cs->r[k].hi >= 128) hi = true;
+            *high = hi;
+            for (uint32_t ch = 0; ch < 128; ch++) {
+                bool on = false;
+                for (size_t k = 0; k < cs->n && !on; k++) {
+                    uint32_t lo = cs->r[k].lo, h = cs->r[k].hi;
+                    on = (ch >= lo && ch <= h) ||
+                         (cs->fold && ((sea_utf8_lower(ch) >= lo && sea_utf8_lower(ch) <= h) ||
+                                       (sea_utf8_upper(ch) >= lo && sea_utf8_upper(ch) <= h)));
+                }
+                if (cs->neg) on = !on;
+                if (on) ascii[ch >> 5] |= 1u << (ch & 31);
+            }
+            break;
+        }
+    }
+}
+
+/* A split whose branches both start by reading a character, from sets with
+ * nothing in common (\S+ followed by a space, [^"]*", \d+ before a dot):
+ * at most one branch can get past the next character, so the backtracker
+ * need not remember the other. Becomes I_SPLITP. */
+static void mark_exclusive_splits(Code *c, const Parser *p) {
+    for (size_t i = 0; i < c->n; i++) {
+        if (c->inst[i].op != I_SPLIT) continue;
+        int a = first_char_inst(c, c->inst[i].x), b = first_char_inst(c, c->inst[i].y);
+        if (a < 0 || b < 0) continue;
+        uint32_t sa[4], sb[4];
+        bool ha, hb;
+        char_set_of(&c->inst[a], p, sa, &ha);
+        char_set_of(&c->inst[b], p, sb, &hb);
+        bool overlap = ha && hb;
+        for (int k = 0; k < 4; k++) if (sa[k] & sb[k]) overlap = true;
+        if (!overlap) c->inst[i].op = I_SPLITP;
+    }
+}
+
 /* The literal prefix every match starts with (for a quick skip), when the
  * pattern begins with case-sensitive literals. */
 static size_t literal_prefix(Node *root, char *out, size_t cap) {
@@ -866,8 +952,26 @@ static SeaString *build_blob(Code *c, Parser *p, const char *prefix, size_t plen
     return s;
 }
 
+/* The fields of a blob (one prog_check accepted) */
+static bool prog_view(SeaString *s, Prog *pg) {
+    const uint32_t *w = (const uint32_t *)(const void *)s->data;
+    uint32_t ninst = w[1], ncl = w[2], nr = w[3];
+    pg->w = w;
+    pg->ninst = ninst;
+    pg->nclasses = ncl;
+    pg->nranges = nr;
+    pg->ngroups = w[4];
+    pg->prefix_len = w[5];
+    pg->inst = (const int32_t *)(w + HDR);
+    pg->klass = w + HDR + (size_t)ninst * 3;
+    pg->ranges = pg->klass + (size_t)ncl * 3;
+    pg->ascii = pg->ranges + (size_t)nr * 2;
+    pg->prefix = (const char *)(pg->ascii + (size_t)ncl * 4);
+    return true;
+}
+
 /* Check a blob's structure; false if it is not a program we built. */
-static bool prog_load(SeaString *s, Prog *pg) {
+static bool prog_check(SeaString *s, Prog *pg) {
     if (!s || s->len < HDR * 4 || s->len % 4) return false;
     const uint32_t *w = (const uint32_t *)(const void *)s->data;
     if (((uintptr_t)w & 3) || w[0] != RE_MAGIC) return false;
@@ -875,17 +979,7 @@ static bool prog_load(SeaString *s, Prog *pg) {
     if (ninst == 0 || ninst > RE_MAX_INST || ng > RE_MAX_GROUPS || pl > 64) return false;
     uint64_t words = HDR + ninst * 3 + ncl * 3 + nr * 2 + ncl * 4 + (pl + 3) / 4;
     if (words * 4 != s->len) return false;
-    pg->w = w;
-    pg->ninst = (uint32_t)ninst;
-    pg->nclasses = (uint32_t)ncl;
-    pg->nranges = (uint32_t)nr;
-    pg->ngroups = (uint32_t)ng;
-    pg->prefix_len = (uint32_t)pl;
-    pg->inst = (const int32_t *)(w + HDR);
-    pg->klass = w + HDR + ninst * 3;
-    pg->ranges = pg->klass + ncl * 3;
-    pg->ascii = pg->ranges + nr * 2;
-    pg->prefix = (const char *)(pg->ascii + ncl * 4);
+    prog_view(s, pg);
     for (uint32_t i = 0; i < ncl; i++) {
         uint64_t off = pg->klass[i * 3], cnt = pg->klass[i * 3 + 1];
         if (off + cnt > nr) return false;
@@ -898,7 +992,7 @@ static bool prog_load(SeaString *s, Prog *pg) {
             case I_ANY: case I_ANYNL: case I_MATCH: case I_NOP: break;
             case I_CLASS: if (x < 0 || (uint32_t)x >= ncl) return false; break;
             case I_JMP: if (x < 0 || (uint32_t)x >= pg->ninst) return false; break;
-            case I_SPLIT:
+            case I_SPLIT: case I_SPLITP:
                 if (x < 0 || (uint32_t)x >= pg->ninst || y < 0 || (uint32_t)y >= pg->ninst) return false;
                 break;
             case I_SAVE: if (x < 0 || (uint32_t)x >= ncap) return false; break;
@@ -908,6 +1002,25 @@ static bool prog_load(SeaString *s, Prog *pg) {
         /* every instruction but the last must not fall off the end */
         if (i + 1 == pg->ninst && op != I_MATCH && op != I_JMP) return false;
     }
+    return true;
+}
+
+/* prog_check, once per blob: a regex's __prog is checked on its first use
+ * in a thread, then read in place. Strings are immutable, and the cache
+ * holds a reference, so a blob seen here cannot change or be replaced at
+ * the same address. */
+#define CHECKED_MAX 16
+static _Thread_local SeaString *checked[CHECKED_MAX];
+static _Thread_local unsigned checked_next;
+
+static bool prog_load(SeaString *s, Prog *pg) {
+    for (int i = 0; i < CHECKED_MAX; i++)
+        if (checked[i] == s) return prog_view(s, pg);
+    if (!prog_check(s, pg)) return false;
+    SeaString **slot = &checked[checked_next++ % CHECKED_MAX];
+    if (*slot) sea_obj_release(&(*slot)->obj);
+    sea_obj_retain(&s->obj);
+    *slot = s;
     return true;
 }
 
@@ -980,6 +1093,20 @@ static inline uint32_t cp_at(const unsigned char *s, size_t len, size_t i, int *
     return cp;
 }
 
+/* Whether the consuming instruction in accepts the character at pos (< len) */
+static inline bool char_ok(const Prog *pg, const int32_t *in, const unsigned char *s, size_t len, size_t pos) {
+    int w;
+    uint32_t c = cp_at(s, len, pos, &w);
+    switch (in[0]) {
+        case I_CHAR:  return c == (uint32_t)in[1];
+        case I_CHARF: return sea_utf8_lower(c) == (uint32_t)in[1];
+        case I_ANY:   return c != '\n';
+        case I_ANYNL: return true;
+        case I_CLASS: return class_has(pg, (uint32_t)in[1], c);
+        default:      return false;
+    }
+}
+
 static bool assert_ok(VM *v, int kind, size_t pos) {
     switch (kind) {
         case A_BOT: return pos == 0;
@@ -1022,7 +1149,7 @@ static void addthread(VM *v, int l, int pc0, const int *caps, size_t pos) {
         const int32_t *in = v->pg->inst + pc * 3;
         switch (in[0]) {
             case I_JMP: push_stack(v, &sp, in[1]); break;
-            case I_SPLIT:
+            case I_SPLIT: case I_SPLITP:
                 push_stack(v, &sp, in[2]);
                 push_stack(v, &sp, in[1]);
                 break;
@@ -1066,6 +1193,55 @@ static void bt_push(VM *v, size_t *sp, int a, int b) {
     }
     v->bt_jobs[(*sp)++] = a;
     v->bt_jobs[(*sp)++] = b;
+}
+
+/* I_SPLITP at pc, position *pos: 1 to take the first branch, 2 the second
+ * (after reading a whole loop's run: *pos moves past it), 0 when the path
+ * fails (a (pc, position) visited before), -1 at the window edge. */
+static __attribute__((noinline)) int bt_splitp(VM *v, int pc, size_t *ppos, size_t base, size_t span) {
+    const Prog *pg = v->pg;
+    const int32_t *in = pg->inst + pc * 3;
+    size_t pos = *ppos;
+    int body = in[1];
+    bool loop = (body == pc - 1 || (body == pc + 1 && pg->inst[(pc + 2) * 3] == I_JMP &&
+                                    pg->inst[(pc + 2) * 3 + 1] == pc)) &&
+                pg->inst[body * 3] <= I_CLASS;
+    if (!loop) {
+        int f = body;
+        for (;;) {
+            int op = pg->inst[f * 3];
+            if (op == I_JMP) f = pg->inst[f * 3 + 1];
+            else if (op == I_SAVE || op == I_NOP) f++;
+            else break;
+        }
+        return pos < v->len && char_ok(pg, pg->inst + f * 3, v->s, v->len, pos) ? 1 : 2;
+    }
+    /* x+ or x*: read the whole run of x here, marking (pc, position)
+     * visited as the loop would */
+    const int32_t *bi = pg->inst + body * 3;
+    const uint32_t *bm = bi[0] == I_CLASS ? pg->ascii + (size_t)bi[1] * 4 : NULL;
+    for (;;) {
+        if (pos >= v->len) break;
+        unsigned ch = v->s[pos];
+        int cw = 1;
+        if (bm && ch < 128) {
+            if (!((bm[ch >> 5] >> (ch & 31)) & 1u)) break;
+        } else {
+            if (!char_ok(pg, bi, v->s, v->len, pos)) break;
+            cp_at(v->s, v->len, pos, &cw);
+        }
+        if (pos >= v->bt_edge) {
+            v->bt_hit_edge = true;
+            return -1;
+        }
+        pos += (size_t)cw;
+        size_t bb = (size_t)pc * span + (pos - base);
+        uint64_t bm2 = 1ull << (bb & 63);
+        if (v->bt_vis[bb >> 6] & bm2) return 0;
+        v->bt_vis[bb >> 6] |= bm2;
+    }
+    *ppos = pos;
+    return 2;
 }
 
 /* One attempt from position s (base: the position bit 0 stands for) */
@@ -1121,6 +1297,11 @@ static bool bt_run(VM *v, size_t s, size_t base, size_t span, int *cap, int *out
                     pos += (size_t)w; pc++; continue;
                 case I_CLASS:
                     if (at_end) goto fail;
+                    if (v->s[pos] < 128) {
+                        unsigned ch = v->s[pos];
+                        if (!((pg->ascii[(size_t)in[1] * 4 + (ch >> 5)] >> (ch & 31)) & 1u)) goto fail;
+                        pos++; pc++; continue;
+                    }
                     c = cp_at(v->s, v->len, pos, &w);
                     if (!class_has(pg, (uint32_t)in[1], c)) goto fail;
                     pos += (size_t)w; pc++; continue;
@@ -1129,6 +1310,14 @@ static bool bt_run(VM *v, size_t s, size_t base, size_t span, int *cap, int *out
                     bt_push(v, &sp, in[2], (int)pos);   /* the lower-priority branch, for later */
                     pc = in[1];
                     continue;
+                case I_SPLITP:
+                    /* only the branch whose first character matches can go on */
+                    switch (bt_splitp(v, pc, &pos, base, span)) {
+                        case 0: goto fail;
+                        case 1: pc = in[1]; continue;
+                        case 2: pc = in[2]; continue;
+                        default: return false;   /* reached the window edge */
+                    }
                 case I_NOP: pc++; continue;
                 case I_SAVE:
                     if (in[1] < v->ncap) {
@@ -1289,6 +1478,11 @@ static bool pike_search(VM *v, size_t start, int *out) {
     return matched;
 }
 
+/* The backtracker's buffers outlive a search: one set per thread, taken by
+ * vm_init and given back by vm_free (a search nested in a gsub callback
+ * finds the slot empty and allocates its own) */
+static _Thread_local struct { uint64_t *vis; size_t vis_words; int *jobs; size_t jobs_cap; } bt_spare;
+
 static void vm_init(VM *v, const Prog *pg, const char *s, size_t len, int ncap) {
     memset(v, 0, sizeof *v);
     v->pg = pg;
@@ -1296,6 +1490,13 @@ static void vm_init(VM *v, const Prog *pg, const char *s, size_t len, int ncap) 
     v->len = len;
     v->ncap = ncap;
     v->cur = malloc((size_t)ncap * 2 * sizeof *v->cur + sizeof(int));
+    v->bt_vis = bt_spare.vis;
+    v->bt_vis_words = bt_spare.vis_words;
+    v->bt_jobs = bt_spare.jobs;
+    v->bt_jobs_cap = bt_spare.jobs_cap;
+    bt_spare.vis = NULL;
+    bt_spare.jobs = NULL;
+    bt_spare.vis_words = bt_spare.jobs_cap = 0;
     /* the Pike VM's thread lists are allocated when a search needs them
      * (short texts use the backtracker) */
 }
@@ -1317,8 +1518,19 @@ static void vm_free(VM *v) {
     free(v->mark);
     free(v->stack);
     free(v->cur);
-    free(v->bt_vis);
-    free(v->bt_jobs);
+    /* keep buffers up to 64 KB each for the next search */
+    if (!bt_spare.vis && v->bt_vis_words <= 8192) {
+        bt_spare.vis = v->bt_vis;
+        bt_spare.vis_words = v->bt_vis_words;
+    } else {
+        free(v->bt_vis);
+    }
+    if (!bt_spare.jobs && v->bt_jobs_cap <= 16384) {
+        bt_spare.jobs = v->bt_jobs;
+        bt_spare.jobs_cap = v->bt_jobs_cap;
+    } else {
+        free(v->bt_jobs);
+    }
 }
 
 /* ======================================================================== */
@@ -1383,6 +1595,7 @@ static bool compile_pattern(const char *pat, size_t plen, const char *flags, Rx 
         parser_free(&p);
         return false;
     }
+    mark_exclusive_splits(&c, &p);
     char prefix[64];
     size_t pl = literal_prefix(root, prefix, sizeof prefix);
     r->blob = build_blob(&c, &p, prefix, pl);
@@ -1408,11 +1621,20 @@ static void tset(SeaTable *t, const char *k, SeaValue v) {
     if (sea_is_obj(v)) sea_obj_release(sea_as_obj(v));
 }
 
-static bool table_field(SeaValue t, const char *k, SeaValue *out) {
+/* The keys of regex and match tables, interned once (sea_table_set_str
+ * would intern them on every call, under the intern table's lock) */
+enum { K_PROG, K_NAMES, K_TEXT, K_START, K_STOP, K_GROUPS, K_SPANS, K_NAMED, K_COUNT };
+static const char *const KEY_NAMES[K_COUNT] = { "__prog", "names", "text", "start", "stop", "groups", "spans", "named" };
+static SeaValue KEY[K_COUNT];
+
+static bool table_field(SeaValue t, int k, SeaValue *out) {
     *out = SEA_NIL_VAL;
-    if (sea_is_table(t)) return sea_table_get_str(SEA_AS_TABLE(t), k, out);
+    if (sea_is_table(t)) return sea_table_get(SEA_AS_TABLE(t), KEY[k], out);
     return false;
 }
+
+/* t[KEY[k]] = v, taking over v */
+static void kset(SeaTable *t, int k, SeaValue v) { sea_table_set_move(t, KEY[k], v); }
 
 /* The pattern argument: a string (compiled now) or a regex from re.compile. */
 /* Patterns given as strings are compiled once per thread and kept in a
@@ -1465,13 +1687,13 @@ static void get_rx(SeaVM *vm, const char *fn, int argc, SeaValue *args, Rx *r) {
     r->names = SEA_NIL_VAL;
     if (argc < 1) sea_vm_error_noreturn(vm, "re.%s: pattern expected", fn);
     SeaValue blob;
-    if (sea_is_table(args[0]) && table_field(args[0], "__prog", &blob)) {
+    if (sea_is_table(args[0]) && table_field(args[0], K_PROG, &blob)) {
         if (!sea_is_string(blob) || !prog_load(SEA_AS_STRING(blob), &r->pg))
             sea_vm_error_noreturn(vm, "re.%s: not a compiled regex (its __prog was changed)", fn);
         r->blob = SEA_AS_STRING(blob);
         sea_obj_retain(&r->blob->obj);
         SeaValue names;
-        if (table_field(args[0], "names", &names) && sea_is_table(names)) {
+        if (table_field(args[0], K_NAMES, &names) && sea_is_table(names)) {
             r->names = names;
             sea_obj_retain(sea_as_obj(names));
         }
@@ -1517,22 +1739,21 @@ static SeaValue make_match(Rx *r, SeaString *s, const int *caps) {
         if (a >= 0 && b >= a) {
             SeaValue t = new_str(s->data + a, (size_t)(b - a));
             sea_array_push(groups, t);
-            if (g == 0) sea_table_set_str(m, "text", t);   /* the same string as groups[0] (retained) */
+            if (g == 0) sea_table_set(m, KEY[K_TEXT], t);   /* the same string as groups[0] (retained) */
             sea_obj_release(sea_as_obj(t));
             SeaArray *sp = sea_array_new(2);   /* [start, stop] */
             sea_array_push(sp, sea_int_val(a + 1));
             sea_array_push(sp, sea_int_val(b));
-            sea_array_push(spans, sea_obj_val(&sp->obj));
-            sea_obj_release(&sp->obj);
+            sea_array_push_move(spans, sea_obj_val(&sp->obj));
         } else {
             sea_array_push(groups, SEA_NIL_VAL);
             sea_array_push(spans, SEA_NIL_VAL);
         }
     }
-    tset(m, "start", sea_int_val(caps[0] + 1));
-    tset(m, "stop", sea_int_val(caps[1]));
-    tset(m, "groups", sea_obj_val(&groups->obj));
-    tset(m, "spans", sea_obj_val(&spans->obj));
+    kset(m, K_START, sea_int_val(caps[0] + 1));
+    kset(m, K_STOP, sea_int_val(caps[1]));
+    kset(m, K_GROUPS, sea_obj_val(&groups->obj));
+    kset(m, K_SPANS, sea_obj_val(&spans->obj));
     SeaTable *named = sea_table_new(TABLE_MAP);
     if (sea_is_table(r->names)) {
         uint32_t it = 0;
@@ -1549,7 +1770,7 @@ static SeaValue make_match(Rx *r, SeaString *s, const int *caps) {
             }
         }
     }
-    tset(m, "named", sea_obj_val(&named->obj));
+    kset(m, K_NAMED, sea_obj_val(&named->obj));
     return sea_obj_val(&m->obj);
 }
 
@@ -1586,6 +1807,7 @@ static void each_match(VM *v, int64_t limit, MatchFn cb, void *ctx) {
 
 static SeaValue re_test(SeaVM *vm, int argc, SeaValue *args);
 static SeaValue re_match(SeaVM *vm, int argc, SeaValue *args);
+static SeaValue re_captures(SeaVM *vm, int argc, SeaValue *args);
 static SeaValue re_all(SeaVM *vm, int argc, SeaValue *args);
 static SeaValue re_findall(SeaVM *vm, int argc, SeaValue *args);
 static SeaValue re_gsub(SeaVM *vm, int argc, SeaValue *args);
@@ -1612,6 +1834,7 @@ static SeaValue re_compile(SeaVM *vm, int argc, SeaValue *args) {
         sea_table_set_str(t, "__prog", sea_obj_val(&r.blob->obj));
         mod_set(vm, t, "test",    re_test);
         mod_set(vm, t, "match",   re_match);
+        mod_set(vm, t, "captures", re_captures);
         mod_set(vm, t, "all",     re_all);
         mod_set(vm, t, "findall", re_findall);
         mod_set(vm, t, "gsub",    re_gsub);
@@ -1655,6 +1878,38 @@ static SeaValue re_match(SeaVM *vm, int argc, SeaValue *args) {
         vm_init(&v, &r.pg, s->data, s->len, ncap);
         int *caps = malloc((size_t)ncap * sizeof *caps);
         if (vm_search(&v, (size_t)(init - 1), caps)) result = make_match(&r, s, caps);
+        free(caps);
+        vm_free(&v);
+    }
+    sea_obj_release(&s->obj);
+    rx_free(&r);
+    return result;
+}
+
+/* re.captures(p, s [, init]): just the strings of the first match, as an
+ * array [whole, group 1, ...] (nil for a group that did not take part), or
+ * nil: re.match without the table (Go's FindStringSubmatch) */
+static SeaValue re_captures(SeaVM *vm, int argc, SeaValue *args) {
+    Rx r;
+    get_rx(vm, "captures", argc, args, &r);
+    SeaString *s = subject_arg(vm, "captures", &r, argc, args, 1);
+    int64_t init = int_opt(argc, args, 2, 1);
+    if (init < 0) init += (int64_t)s->len + 1;
+    if (init < 1) init = 1;
+    SeaValue result = SEA_NIL_VAL;
+    if ((size_t)(init - 1) <= s->len) {
+        int ng = (int)r.pg.ngroups, ncap = 2 * (ng + 1);
+        VM v;
+        vm_init(&v, &r.pg, s->data, s->len, ncap);
+        int *caps = malloc((size_t)ncap * sizeof *caps);
+        if (vm_search(&v, (size_t)(init - 1), caps)) {
+            SeaArray *out = sea_array_new((uint32_t)ng + 1);
+            for (int g = 0; g <= ng; g++) {
+                int a = caps[2 * g], b = caps[2 * g + 1];
+                sea_array_push_move(out, a >= 0 && b >= a ? new_str(s->data + a, (size_t)(b - a)) : SEA_NIL_VAL);
+            }
+            result = sea_obj_val(&out->obj);
+        }
         free(caps);
         vm_free(&v);
     }
@@ -1917,10 +2172,14 @@ static SeaValue re_escape(SeaVM *vm, int argc, SeaValue *args) {
 }
 
 void sea_lib_re_register(SeaVM *vm) {
+    if (KEY[0] == 0)
+        for (int k = 0; k < K_COUNT; k++)
+            KEY[k] = sea_obj_val(&sea_string_intern(KEY_NAMES[k], strlen(KEY_NAMES[k]))->obj);   /* kept */
     SeaTable *mod = sea_table_new(TABLE_MAP);
     mod_set(vm, mod, "compile", re_compile);
     mod_set(vm, mod, "test",    re_test);
     mod_set(vm, mod, "match",   re_match);
+    mod_set(vm, mod, "captures", re_captures);
     mod_set(vm, mod, "all",     re_all);
     mod_set(vm, mod, "findall", re_findall);
     mod_set(vm, mod, "gsub",    re_gsub);

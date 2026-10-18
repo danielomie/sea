@@ -1344,6 +1344,7 @@ character. Results are checked against Go's `regexp` (same semantics).
 | `re.compile` | `compile(pattern [, flags]) → regex\|error` | Compile once, reuse. `flags`: a string of `i` (case-insensitive), `m` (`^`/`$` at line breaks), `s` (`.` matches `\n`), `U` (repeats lazy by default). A bad pattern is an error value: `re: missing closing ) at position 4 in /(ab/` |
 | `re.test` | `test(p, s) → bool` | Whether `p` matches anywhere in `s` |
 | `re.match` | `match(p, s [, init]) → match\|nil` | The first match at or after byte `init` (1-based, negative from the end) |
+| `re.captures` | `captures(p, s [, init]) → array\|nil` | The first match's strings only: `[whole, group 1, ...]` (`nil` for a group that did not take part), like Go's `FindStringSubmatch` or Python's `m.groups()`. About twice as fast as `match`, which also builds `spans` and `named`: use it to parse lines |
 | `re.all` | `all(p, s [, n]) → array` | Successive non-overlapping matches (at most `n`), as match tables. An empty match right after the previous match is skipped |
 | `re.findall` | `findall(p, s [, n]) → array` | The same, as strings (the whole match) |
 | `re.gsub` | `gsub(p, s, repl [, n]) → string` | Replace every match (or the first `n`). `repl`: a string where `$0`/`$1`/`${12}`/`${name}` insert groups and `$$` is a `$`; a function `fn(match)` returning the replacement (`nil` or `false` keeps the match; other values go through `tostring`); or a table from matched text to replacement (missing: kept) |
@@ -1352,7 +1353,7 @@ character. Results are checked against Go's `regexp` (same semantics).
 
 `p` is a pattern string (compiled once and kept in a small per-thread cache) or a regex from `re.compile`,
 whose methods are the same functions: `rx:test(s)`, `rx:match(s [, init])`,
-`rx:all`, `rx:findall`, `rx:gsub`, `rx:split`. A regex also has `pattern`,
+`rx:captures`, `rx:all`, `rx:findall`, `rx:gsub`, `rx:split`. A regex also has `pattern`,
 `flags`, `groups` (number of capture groups) and `names` (`{name = index}`).
 A pattern string that does not compile is a runtime error in these functions.
 
@@ -1375,6 +1376,7 @@ whole match, `[i]` group `i`, `nil` when it did not take part), `spans`
 ```sea
 local m = re.match("(?P<user>[\\w.]+)@(?P<host>[\\w.]+)", "write to ana@sea.dev")
 print(m.named.user, m.named.host, m.start)            -- ana  sea.dev  10
+print(re.captures("(\\w+)=(\\d+)", "x a=1"))             -- ["a=1", "a", "1"]
 local date = re.compile("(\\d{4})-(\\d\\d)-(\\d\\d)")
 print(date:gsub("on 2026-10-16", "$3/$2/$1"))           -- on 16/10/2026
 print(re.gsub("\\d+", "a1b22", function(m) return tonumber(m.text) * 2 end))   -- a2b44

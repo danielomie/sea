@@ -12,12 +12,17 @@ local patterns = [
     "x*", "(a*)*", "(a|b)*?c", "^\\s*(\\S+)\\s*=\\s*(.*?)\\s*$", "(?i)hello|world", "\\bfoo\\b",
     "[^,]*,", "(?m)^\\w+$", "(?s)<.+?>", "a{2,5}", "(?U)a+", "é+|ü", "(x)(y)?(z)?", ".*",
     "[[:digit:]]{3}", "(?P<k>\\w+): (?P<v>[^;]*);?", "\\d{4}-\\d\\d-\\d\\d", "(ab|a)(bc|c)*",
+    -- loops whose exit character cannot continue them (I_SPLITP)
+    "(\\S+) (\\S+)", "\"[^\"]*\"", "(\\d+)\\.(\\d+)", "[a-z]*[0-9]", "é*ü", "(?i)k+s", "a+?b", "[^ ]+$",
+    "^(\\S+) \\S+ \\S+ \\[[^:]+:(\\d\\d):[^\\]]+\\] \"(\\S+) (\\S+) [^\"]*\" (\\d{3}) (\\d+) ([\\d.]+)$",
 ]
 local texts = [
     "", "a", "aaab", "abcd", "xx ana@site.com yy bob@mail.com", "12-34 5- 678-9",
     "hello World HELLO", "foo food foo.bar", "a,bb,,ccc,", "one\ntwo words\nthree",
     "<a><b>c</b></a>", "aaaaaaa", "ééüü", "key = value  ", "xyz xy x", "2026-10-18 and 1999-01-01",
     "name: ana; age: 31; city: Recife",
+    "66.249.1.7 - - [12/Mar/2026:14:03:22 +0000] \"GET /api/items/123 HTTP/1.1\" 200 5123 0.042",
+    "KSks kks 3.14 x9 \"q\" \"\" éééü aab",
 ]
 -- long texts: matches crossing every window size the backtracker tries
 local long = []
