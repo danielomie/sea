@@ -171,7 +171,7 @@ end
 
 -- ---- transport ----
 
-local stdin = io.open("/dev/stdin", "rb")
+local stdin = io.stdin()
 if stdin == nil then
     io.write_err("sea lsp: cannot read stdin\n")
     os.exit(1)

@@ -1,0 +1,109 @@
+{
+  "name": "sea-language",
+  "displayName": "Sea Language",
+  "description": "Sea language support: syntax highlighting, snippets and the sea lsp language server (diagnostics, formatting, hover, go to definition, completion, outline)",
+  "version": "0.2.0",
+  "publisher": "dopsilva",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "keywords": [
+    "sea",
+    "sea-lang",
+    "sea language"
+  ],
+  "activationEvents": [
+    "onLanguage:sea"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "sea",
+        "aliases": [
+          "Sea",
+          "sea"
+        ],
+        "extensions": [
+          ".sea"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/sea-icon.png",
+          "dark": "./icons/sea-icon.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sea",
+        "scopeName": "source.sea",
+        "path": "./syntaxes/sea.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "sea",
+        "path": "./snippets/sea.json"
+      }
+    ],
+    "configuration": {
+      "title": "Sea Language",
+      "properties": {
+        "sea.executablePath": {
+          "type": "string",
+          "default": "sea",
+          "description": "Path to the sea executable; the extension runs `sea lsp` from it. Set an absolute path if sea is not in your PATH."
+        },
+        "sea.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Log the messages between VS Code and the Sea language server (in the \"Sea Language Server\" output)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "sea.restartServer",
+        "title": "Restart Language Server",
+        "category": "Sea"
+      }
+    ],
+    "configurationDefaults": {
+      "[sea]": {
+        "editor.defaultFormatter": "dopsilva.sea-language"
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -p ./ --watch",
+    "vscode:prepublish": "npm run compile",
+    "package": "cp ../../LICENSE LICENSE && vsce package; rm -f LICENSE",
+    "test": "npm run compile && node test/run.js"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.0.0"
+  },
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dopsilva/sea"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "icon": "icons/sea-icon.png"
+}

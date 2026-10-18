@@ -1,0 +1,187 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "function ${1:name}(${2:args})",
+      "\t$0",
+      "end"
+    ],
+    "description": "Named function definition"
+  },
+  "Local function": {
+    "prefix": "fnl",
+    "body": [
+      "local function ${1:name}(${2:args})",
+      "\t$0",
+      "end"
+    ],
+    "description": "Local function assigned to variable"
+  },
+  "If": {
+    "prefix": "if",
+    "body": [
+      "if ${1:cond} then",
+      "\t$0",
+      "end"
+    ],
+    "description": "If statement"
+  },
+  "If/else": {
+    "prefix": "ife",
+    "body": [
+      "if ${1:cond} then",
+      "\t${2:-- then}",
+      "else",
+      "\t$0",
+      "end"
+    ],
+    "description": "If/else statement"
+  },
+  "Elseif": {
+    "prefix": "eif",
+    "body": [
+      "elseif ${1:cond} then",
+      "\t$0"
+    ],
+    "description": "Elseif clause"
+  },
+  "For numeric": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} = ${2:0}, ${3:n-1} do",
+      "\t$0",
+      "end"
+    ],
+    "description": "Numeric for loop"
+  },
+  "For in": {
+    "prefix": "forin",
+    "body": [
+      "for ${1:i}, ${2:v} in ${3:arr} do",
+      "\t$0",
+      "end"
+    ],
+    "description": "Iterator for loop"
+  },
+  "While": {
+    "prefix": "while",
+    "body": [
+      "while ${1:cond} do",
+      "\t$0",
+      "end"
+    ],
+    "description": "While loop"
+  },
+  "Do block": {
+    "prefix": "do",
+    "body": [
+      "do",
+      "\t$0",
+      "end"
+    ],
+    "description": "Do block (scope isolation)"
+  },
+  "Local": {
+    "prefix": "loc",
+    "body": [
+      "local ${1:name} = $0"
+    ],
+    "description": "Local variable declaration"
+  },
+  "Const": {
+    "prefix": "con",
+    "body": [
+      "const ${1:name} = $0"
+    ],
+    "description": "Constant declaration"
+  },
+  "Const block": {
+    "prefix": "conb",
+    "body": [
+      "const (",
+      "\t${1:name} = $0",
+      ")"
+    ],
+    "description": "Constant block declaration"
+  },
+  "Go goroutine": {
+    "prefix": "go",
+    "body": [
+      "go ${1:fn}($0)"
+    ],
+    "description": "Spawn goroutine"
+  },
+  "Select": {
+    "prefix": "sel",
+    "body": [
+      "select",
+      "\tcase ${1:v} = <-${2:ch} then",
+      "\t\t$0",
+      "\tcase default then",
+      "end"
+    ],
+    "description": "Select over channels"
+  },
+  "Defer": {
+    "prefix": "def",
+    "body": [
+      "defer function()",
+      "\t$0",
+      "end"
+    ],
+    "description": "Defer a cleanup function"
+  },
+  "Panic": {
+    "prefix": "panic",
+    "body": [
+      "panic(${1:\"error message\"})"
+    ],
+    "description": "Panic with message"
+  },
+  "Require": {
+    "prefix": "req",
+    "body": [
+      "local ${1:mod} = require(\"${2:./path}\")"
+    ],
+    "description": "Require a module"
+  },
+  "Array": {
+    "prefix": "arr",
+    "body": [
+      "local ${1:a} = []"
+    ],
+    "description": "Dynamic array"
+  },
+  "Map": {
+    "prefix": "map",
+    "body": [
+      "local ${1:m} = [=]"
+    ],
+    "description": "Hash map"
+  },
+  "Print": {
+    "prefix": "print",
+    "body": [
+      "print($0)"
+    ],
+    "description": "Print to stdout"
+  },
+  "Error check": {
+    "prefix": "iferr",
+    "body": [
+      "if is_error(${1:result}) then",
+      "\t$0",
+      "end"
+    ],
+    "description": "Check for error value"
+  },
+  "Channel send/recv": {
+    "prefix": "ch",
+    "body": [
+      "local ${1:ch} = chan(${2:0})",
+      "${1:ch} <- ${3:value}",
+      "local ${4:v} = <-${1:ch}"
+    ],
+    "description": "Channel create, send, receive"
+  }
+}

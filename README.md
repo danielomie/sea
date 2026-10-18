@@ -134,4 +134,6 @@ bash tests/compare/run_benchmarks.sh   # regenerate docs/benchmarks.md
 ```
 
 Layout: `src/` (compiler, VM, runtime, stdlib), `libs/` (external libraries),
-`examples/`, `tests/` (unit tests, benchmarks), `docs/`.
+`examples/`, `tests/` (unit tests, benchmarks), `docs/`, `tools/` (the `sea`
+subcommands written in Sea), `extras/vscode/` (the VS Code extension: grammar,
+snippets and a client for `sea lsp`; see its README).

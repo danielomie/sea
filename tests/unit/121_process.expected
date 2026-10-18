@@ -32,3 +32,5 @@ error(process.spawn: no-such-command-xyz: No such file or directory)
 true	true	2	1
 -- goroutines keep running while children are waited on
 1,2,3	true
+first line	abc	rest
+

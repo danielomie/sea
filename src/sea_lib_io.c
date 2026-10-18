@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ---- stdin helpers (original io.read / io.write) ------------------------- */
 
@@ -98,6 +99,28 @@ static SeaValue io_open(SeaVM *vm, int argc, SeaValue *args) {
     FILE *fp = fopen(path, mode);
     if (!fp) return SEA_NIL_VAL;
 
+    IoFile *h = SEA_ALLOC(IoFile);
+    h->tag = TAG_FILE;
+    h->fp  = fp;
+    return PACK(h);
+}
+
+/* ---- io.stdin() → handle | nil ------------------------------------------- */
+/*
+ * A handle on standard input, for io.read_line / io.read_bytes / io.read_all.
+ * It reads a dup of fd 0, so it works whatever stdin is (a pipe, a terminal, a
+ * file, or a socket, which opening /dev/stdin refuses with ENXIO: Node hands
+ * child processes socketpairs), and io.close() leaves fd 0 open.
+ */
+static SeaValue io_stdin(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm; (void)argc; (void)args;
+    int fd = dup(0);
+    if (fd < 0) return SEA_NIL_VAL;
+    FILE *fp = fdopen(fd, "rb");
+    if (!fp) {
+        close(fd);
+        return SEA_NIL_VAL;
+    }
     IoFile *h = SEA_ALLOC(IoFile);
     h->tag = TAG_FILE;
     h->fp  = fp;
@@ -340,6 +363,7 @@ void sea_lib_io_register(SeaVM *vm) {
 
     /* buffered file I/O */
     mod_set(vm, mod, "open",         io_open);
+    mod_set(vm, mod, "stdin",        io_stdin);
     mod_set(vm, mod, "close",        io_close);
     mod_set(vm, mod, "read_line",    io_read_line);
     mod_set(vm, mod, "read_bytes",   io_read_bytes);
