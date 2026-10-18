@@ -904,7 +904,18 @@ local d = time.parse("18/10/2026", "02/01/2006", "UTC")?   -- a Go layout
 print(t:add_date(0, 1, 0), t:add_seconds(7 * 86400))   -- a month / a week later
 print(t:iso(), t:utc():iso(), t:in_zone("+09:00"):format("15:04 MST"))
 print(time.date(2026, 12, 25, "UTC"), time.days(time.date(2026, 12, 25):sub(time.now())))
+local call = time.date(2026, 11, 3, 9, 0, 0, "America/New_York")
+print(call:in_zone("America/Sao_Paulo"):format("15:04 MST"))   -- 11:00 -03
 ```
+
+A **zone** argument is `"local"` (the default: `TZ` or `/etc/localtime`),
+`"UTC"`, a fixed offset (`"+03:00"`, `"-0530"`), or a name of the IANA tz
+database (`"America/Sao_Paulo"`, `"Europe/Lisbon"`), read from the system's
+files (`$TZDIR`, `/usr/share/zoneinfo`; install `tzdata` in minimal
+containers). A time in a named zone follows its summer-time rules: the offset
+is the one in effect at that instant, including dates after the last change
+the files list (from the POSIX rule they end with). A wall time skipped when
+clocks move forward is moved forward by the gap; a repeated one is the first.
 
 ### Module functions
 
@@ -947,8 +958,8 @@ Returned by `time.now()`, `time.unix()`, etc. All methods take the Time object a
 | `t.add(t, ns)` | `(ns) → Time` | New Time shifted by `ns` nanoseconds (an int up to ~39 h, or a number) |
 | `t.add_seconds(t, s)` | `(s) → Time` | Shifted by `s` seconds (any size, may be fractional) |
 | `t.add_date(t, years, months, days)` | `(...) → Time` | Calendar arithmetic in the time's zone, keeping the time of day (Jan 31 + 1 month is Mar 3, as in Go) |
-| `t.utc(t)`, `t.local_time(t)`, `t.in_zone(t, zone)` | `() → Time` | The same instant in UTC, the local zone, or a fixed offset (`"+03:00"`, `"-0530"`, `"UTC"`, `"local"`) |
-| `t.zone(t)` | `() → string` | `"local"`, `"UTC"` or the offset (`"-03:00"`) |
+| `t.utc(t)`, `t.local_time(t)`, `t.in_zone(t, zone)` | `() → Time` | The same instant in UTC, the local zone, or another zone (`"+03:00"`, `"-0530"`, `"UTC"`, `"local"`, `"Asia/Tokyo"`) |
+| `t.zone(t)` | `() → string` | `"local"`, `"UTC"`, the offset (`"-03:00"`) or the zone's name (`"Europe/Lisbon"`) |
 | `t.offset(t)` | `() → int` | Seconds east of UTC at that instant |
 | `t.iso(t [, nanos])` | `() → string` | RFC 3339: `2026-10-18T14:30:00-03:00` (`Z` in UTC); with `true`, the fraction of a second |
 | `t.sub(t, other)` | `(other) → number` | Duration between two Times in nanoseconds |

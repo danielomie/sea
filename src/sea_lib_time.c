@@ -8,6 +8,7 @@
 #include "sea_string.h"
 #include "sea_table.h"
 #include "sea_memory.h"
+#include "sea_tz.h"
 #include <time.h>
 #include <string.h>
 #include <strings.h>
@@ -32,9 +33,35 @@ static int64_t get_int_field(SeaValue v, const char *name, bool *found) {
 static int64_t get_sec(SeaValue v) { bool f; return get_int_field(v, "__sec", &f); }
 static int64_t get_ns(SeaValue v)  { bool f; return get_int_field(v, "__ns", &f); }
 
-/* The time's zone: a fixed offset east of UTC in seconds (*has_off), or the
- * local zone (TZ / /etc/localtime) */
-static int64_t get_off(SeaValue v, bool *has_off) { return get_int_field(v, "__off", has_off); }
+/* A time's zone: the local one (TZ / /etc/localtime), a fixed offset east
+ * of UTC in seconds (field __off), or a named zone of the tz database
+ * (field __tz: "America/Sao_Paulo", src/sea_tz.c) */
+enum { Z_LOCAL, Z_FIXED, Z_NAMED };
+typedef struct {
+    int          kind;
+    int64_t      off;      /* Z_FIXED */
+    const SeaTZ *tz;       /* Z_NAMED */
+} Zone;
+
+static const Zone ZONE_LOCAL = { Z_LOCAL, 0, NULL };
+static const Zone ZONE_UTC = { Z_FIXED, 0, NULL };
+
+static void get_zone(SeaValue v, Zone *z) {
+    bool has_off;
+    int64_t off = get_int_field(v, "__off", &has_off);
+    *z = ZONE_LOCAL;
+    if (has_off) {
+        z->kind = Z_FIXED;
+        z->off = off;
+        return;
+    }
+    SeaValue name = SEA_NIL_VAL;
+    if (sea_is_table(v) && sea_table_get_str(SEA_AS_TABLE(v), "__tz", &name) && sea_is_string(name)) {
+        char err[160];
+        const SeaTZ *tz = sea_tz_load(SEA_AS_STRING(name)->data, err, sizeof err);
+        if (tz) { z->kind = Z_NAMED; z->tz = tz; }
+    }
+}
 
 static int64_t arg_ns(SeaValue v) {
     if (sea_is_int(v))    return sea_as_int(v);
@@ -42,8 +69,8 @@ static int64_t arg_ns(SeaValue v) {
     return 0;
 }
 
-static SeaValue make_time_z(SeaVM *vm, int64_t sec, int64_t ns, bool has_off, int64_t off);
-static SeaValue make_time(SeaVM *vm, int64_t sec, int64_t ns) { return make_time_z(vm, sec, ns, false, 0); }
+static SeaValue make_time_z(SeaVM *vm, int64_t sec, int64_t ns, const Zone *z);
+static SeaValue make_time(SeaVM *vm, int64_t sec, int64_t ns) { return make_time_z(vm, sec, ns, &ZONE_LOCAL); }
 
 /* "+03:00" / "-05:30" / "Z" for an offset in seconds */
 static void offset_text(int64_t off, bool colon, bool z, char *out, size_t n) {
@@ -53,31 +80,50 @@ static void offset_text(int64_t off, bool colon, bool z, char *out, size_t n) {
     snprintf(out, n, colon ? "%c%02d:%02d" : "%c%02d%02d", sign, (int)(a / 3600), (int)(a / 60 % 60));
 }
 
-/* The broken-down time of a Time value in its zone */
-static void broken(SeaValue v, struct tm *tm) {
-    bool has_off;
-    int64_t off = get_off(v, &has_off);
-    time_t sec = (time_t)get_sec(v);
-    if (has_off) {
-        static _Thread_local char zone[16];
-        time_t t = sec + (time_t)off;
-        gmtime_r(&t, tm);
-        tm->tm_gmtoff = (long)off;
-        if (off == 0) snprintf(zone, sizeof zone, "UTC");
-        else offset_text(off, false, false, zone, sizeof zone);
-        tm->tm_zone = zone;
-    } else {
-        localtime_r(&sec, tm);
+/* The broken-down time of an instant in a zone */
+static void broken_in(const Zone *z, int64_t sec, struct tm *tm) {
+    static _Thread_local char abbr[16];
+    if (z->kind == Z_LOCAL) {
+        time_t t = (time_t)sec;
+        localtime_r(&t, tm);
+        return;
     }
+    const char *name = NULL;
+    int64_t off = z->kind == Z_FIXED ? z->off : sea_tz_offset(z->tz, sec, &name);
+    time_t t = (time_t)(sec + off);
+    gmtime_r(&t, tm);
+    tm->tm_gmtoff = (long)off;
+    if (name && *name) snprintf(abbr, sizeof abbr, "%s", name);
+    else if (off == 0) snprintf(abbr, sizeof abbr, "UTC");
+    else offset_text(off, false, false, abbr, sizeof abbr);
+    tm->tm_zone = abbr;
 }
 
-/* A zone name: "local", "UTC", "Z", "+03:00", "-0300", "+3" → has_off, off */
-static bool parse_zone(const char *z, bool *has_off, int64_t *off) {
-    if (!z || !*z || strcmp(z, "local") == 0 || strcmp(z, "Local") == 0) { *has_off = false; *off = 0; return true; }
+/* The broken-down time of a Time value in its zone */
+static void broken(SeaValue v, struct tm *tm) {
+    Zone z;
+    get_zone(v, &z);
+    broken_in(&z, get_sec(v), tm);
+}
+
+/* A zone: "local", "UTC", "Z", "+03:00", "-0300", "+3", or a name of the tz
+ * database ("America/Sao_Paulo"). false with a message in err. */
+static bool parse_zone(const char *s, Zone *zone, char *err, size_t errlen) {
+    *zone = ZONE_LOCAL;
+    const char *z = s;
+    if (!z || !*z || strcmp(z, "local") == 0 || strcmp(z, "Local") == 0) return true;
     if (strcmp(z, "UTC") == 0 || strcmp(z, "utc") == 0 || strcmp(z, "Z") == 0 || strcmp(z, "GMT") == 0) {
-        *has_off = true; *off = 0; return true;
+        *zone = ZONE_UTC;
+        return true;
     }
-    if (z[0] != '+' && z[0] != '-') return false;
+    if (z[0] != '+' && z[0] != '-') {
+        const SeaTZ *tz = sea_tz_load(z, err, errlen);
+        if (!tz) return false;
+        zone->kind = Z_NAMED;
+        zone->tz = tz;
+        return true;
+    }
+    snprintf(err, errlen, "unknown time zone '%.60s' (use \"UTC\", \"local\", an offset like \"-03:00\" or a name like \"America/Sao_Paulo\")", s);
     int sign = z[0] == '-' ? -1 : 1;
     const char *p = z + 1;
     int h = 0, m = 0, digits = 0;
@@ -87,15 +133,16 @@ static bool parse_zone(const char *z, bool *has_off, int64_t *off) {
     digits = 0;
     while (*p >= '0' && *p <= '9' && digits < 2) { m = m * 10 + (*p - '0'); p++; digits++; }
     if (*p || h > 14 || m > 59) return false;
-    *has_off = true;
-    *off = sign * (h * 3600 + m * 60);
+    zone->kind = Z_FIXED;
+    zone->off = sign * (h * 3600 + m * 60);
     return true;
 }
 
 /* Seconds since the epoch of a broken-down time in a zone (fields may be out
  * of range: month 13, day 0, ... are normalized) */
-static int64_t epoch_of(struct tm *tm, bool has_off, int64_t off) {
-    if (has_off) return (int64_t)timegm(tm) - off;
+static int64_t epoch_of(struct tm *tm, const Zone *z) {
+    if (z->kind == Z_FIXED) return (int64_t)timegm(tm) - z->off;
+    if (z->kind == Z_NAMED) return sea_tz_from_wall(z->tz, (int64_t)timegm(tm));
     tm->tm_isdst = -1;
     return (int64_t)mktime(tm);
 }
@@ -141,9 +188,9 @@ static SeaValue tm_nanosecond(SeaVM *vm, int argc, SeaValue *args) {
 }
 
 static SeaValue same_zone(SeaVM *vm, SeaValue t, int64_t sec, int64_t ns) {
-    bool has_off;
-    int64_t off = get_off(t, &has_off);
-    return make_time_z(vm, sec, ns, has_off, off);
+    Zone z;
+    get_zone(t, &z);
+    return make_time_z(vm, sec, ns, &z);
 }
 
 /* t:add(ns): a duration in nanoseconds (an int, or a number for long ones) */
@@ -195,9 +242,9 @@ static SeaValue tm_add_date(SeaVM *vm, int argc, SeaValue *args) {
     tm.tm_year += argc > 1 ? (int)sea_as_int(args[1]) : 0;
     tm.tm_mon  += argc > 2 ? (int)sea_as_int(args[2]) : 0;
     tm.tm_mday += argc > 3 ? (int)sea_as_int(args[3]) : 0;
-    bool has_off;
-    int64_t off = get_off(args[0], &has_off);
-    return make_time_z(vm, epoch_of(&tm, has_off, off), get_ns(args[0]), has_off, off);
+    Zone z;
+    get_zone(args[0], &z);
+    return make_time_z(vm, epoch_of(&tm, &z), get_ns(args[0]), &z);
 }
 
 // Returns duration as float (nanoseconds) to handle ranges beyond 48-bit int
@@ -233,22 +280,21 @@ static SeaValue tm_equal(SeaVM *vm, int argc, SeaValue *args) {
 /* The same instant shown in another zone */
 static SeaValue tm_utc(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1) return SEA_NIL_VAL;
-    return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), true, 0);
+    return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), &ZONE_UTC);
 }
 
 static SeaValue tm_local(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1) return SEA_NIL_VAL;
-    return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), false, 0);
+    return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), &ZONE_LOCAL);
 }
 
 static SeaValue tm_in_zone(SeaVM *vm, int argc, SeaValue *args) {
-    if (argc < 2 || !sea_is_string(args[1])) sea_vm_error_noreturn(vm, "time.in_zone: expected a zone (\"UTC\", \"local\", \"+03:00\")");
-    bool has_off;
-    int64_t off;
-    if (!parse_zone(SEA_AS_STRING(args[1])->data, &has_off, &off))
-        sea_vm_error_noreturn(vm, "time.in_zone: unknown zone '%s' (use \"UTC\", \"local\" or an offset like \"-03:00\")",
-                              SEA_AS_STRING(args[1])->data);
-    return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), has_off, off);
+    if (argc < 2 || !sea_is_string(args[1])) sea_vm_error_noreturn(vm, "time.in_zone: expected a zone (\"UTC\", \"local\", \"+03:00\", \"Europe/Lisbon\")");
+    Zone z;
+    char err[200];
+    if (!parse_zone(SEA_AS_STRING(args[1])->data, &z, err, sizeof err))
+        sea_vm_error_noreturn(vm, "time.in_zone: %s", err);
+    return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), &z);
 }
 
 /* Go layout → output, for one broken-down time. Tokens: 2006 06 01 1 Jan
@@ -347,24 +393,30 @@ static SeaValue tm_iso(SeaVM *vm, int argc, SeaValue *args) {
     return sea_obj_val(&sea_string_from_cstr(buf)->obj);
 }
 
-/* t:zone() → "local", "UTC" or the offset ("+03:00") */
+/* t:zone() → "local", "UTC", the offset ("+03:00") or the zone's name */
 static SeaValue tm_zone(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 1) return SEA_NIL_VAL;
-    bool has_off;
-    int64_t off = get_off(args[0], &has_off);
+    Zone z;
+    get_zone(args[0], &z);
     char buf[16];
-    if (!has_off) snprintf(buf, sizeof buf, "local");
-    else if (off == 0) snprintf(buf, sizeof buf, "UTC");
-    else offset_text(off, true, false, buf, sizeof buf);
+    if (z.kind == Z_NAMED) return sea_obj_val(&sea_string_from_cstr(sea_tz_name(z.tz))->obj);
+    if (z.kind == Z_LOCAL) snprintf(buf, sizeof buf, "local");
+    else if (z.off == 0) snprintf(buf, sizeof buf, "UTC");
+    else offset_text(z.off, true, false, buf, sizeof buf);
     return sea_obj_val(&sea_string_from_cstr(buf)->obj);
 }
 
-static SeaValue make_time_z(SeaVM *vm, int64_t sec, int64_t ns, bool has_off, int64_t off) {
+static SeaValue make_time_z(SeaVM *vm, int64_t sec, int64_t ns, const Zone *z) {
     SeaTable *t = sea_table_new(TABLE_STRUCT);
     sea_table_set_str(t, "__sec", sea_int_val(sec));
     sea_table_set_str(t, "__ns",  sea_int_val(ns));
-    if (has_off) sea_table_set_str(t, "__off", sea_int_val(off));
+    if (z->kind == Z_FIXED) sea_table_set_str(t, "__off", sea_int_val(z->off));
+    if (z->kind == Z_NAMED) {
+        SeaString *name = sea_string_from_cstr(sea_tz_name(z->tz));
+        sea_table_set_str(t, "__tz", sea_obj_val(&name->obj));
+        sea_obj_release(&name->obj);
+    }
     mod_set(vm, t, "unix",        tm_unix);
     mod_set(vm, t, "unix_nano",   tm_unix_nano);
     mod_set(vm, t, "year",        tm_year);
@@ -554,12 +606,11 @@ static SeaValue time_date_fn(SeaVM *vm, int argc, SeaValue *args) {
         v[i] = (int)sea_as_int(args[i]);
     }
     if (argc < 3) sea_vm_error_noreturn(vm, "time.date: expected year, month and day");
-    bool has_off = false;
-    int64_t off = 0;
+    Zone zone = ZONE_LOCAL;
     SeaValue z = argc > n && sea_is_string(args[n]) ? args[n] : SEA_NIL_VAL;
-    if (sea_is_string(z) && !parse_zone(SEA_AS_STRING(z)->data, &has_off, &off))
-        sea_vm_error_noreturn(vm, "time.date: unknown zone '%s' (use \"UTC\", \"local\" or an offset like \"-03:00\")",
-                              SEA_AS_STRING(z)->data);
+    char err[200];
+    if (sea_is_string(z) && !parse_zone(SEA_AS_STRING(z)->data, &zone, err, sizeof err))
+        sea_vm_error_noreturn(vm, "time.date: %s", err);
     struct tm tm;
     memset(&tm, 0, sizeof tm);
     tm.tm_year = v[0] - 1900;
@@ -568,7 +619,7 @@ static SeaValue time_date_fn(SeaVM *vm, int argc, SeaValue *args) {
     tm.tm_hour = v[3];
     tm.tm_min = v[4];
     tm.tm_sec = v[5];
-    return make_time_z(vm, epoch_of(&tm, has_off, off), 0, has_off, off);
+    return make_time_z(vm, epoch_of(&tm, &zone), 0, &zone);
 }
 
 /* time.parse(s [, layout [, zone]]) → Time | error. Without a layout: ISO
@@ -595,10 +646,16 @@ static SeaValue time_parse_fn(SeaVM *vm, int argc, SeaValue *args) {
         snprintf(msg, sizeof msg, "time.parse: '%.80s': a field is out of range", s);
         return sea_make_error_str(vm, msg);
     }
-    if (!f.has_off && argc > 2 && sea_is_string(args[2]) &&
-        !parse_zone(SEA_AS_STRING(args[2])->data, &f.has_off, &f.off)) {
-        snprintf(msg, sizeof msg, "time.parse: unknown zone '%.40s'", SEA_AS_STRING(args[2])->data);
-        return sea_make_error_str(vm, msg);
+    Zone zone = ZONE_LOCAL;
+    if (f.has_off) {
+        zone.kind = Z_FIXED;
+        zone.off = f.off;
+    } else if (argc > 2 && sea_is_string(args[2])) {
+        char err[200];
+        if (!parse_zone(SEA_AS_STRING(args[2])->data, &zone, err, sizeof err)) {
+            snprintf(msg, sizeof msg, "time.parse: %s", err);
+            return sea_make_error_str(vm, msg);
+        }
     }
     struct tm tm;
     memset(&tm, 0, sizeof tm);
@@ -608,16 +665,15 @@ static SeaValue time_parse_fn(SeaVM *vm, int argc, SeaValue *args) {
     tm.tm_hour = f.hour;
     tm.tm_min = f.min;
     tm.tm_sec = f.sec;
-    int64_t sec = epoch_of(&tm, f.has_off, f.off);
+    int64_t sec = epoch_of(&tm, &zone);
     /* the date must exist (2026-02-30 is not Mar 2) */
     struct tm chk;
-    time_t back = (time_t)(sec + (f.has_off ? f.off : 0));
-    if (f.has_off) gmtime_r(&back, &chk); else localtime_r(&back, &chk);
+    broken_in(&zone, sec, &chk);
     if (chk.tm_mday != f.day || chk.tm_mon != f.mon - 1) {
         snprintf(msg, sizeof msg, "time.parse: '%.80s' is not a valid date", s);
         return sea_make_error_str(vm, msg);
     }
-    return make_time_z(vm, sec, f.ns, f.has_off, f.off);
+    return make_time_z(vm, sec, f.ns, &zone);
 }
 
 /* time.days(ns) → days as a number */

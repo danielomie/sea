@@ -12,3 +12,15 @@ error(time.parse: '2026-02-30' is not a valid date)	error(time.parse: 'nope' doe
 2026-10-18T14:30:00Z	time(1970-01-01T00:00:00Z)	local	UTC	Sunday, October 18 2026 2:30 PM UTC
 2026-10-18T14:30:05.123456789Z	14:30:05.123	123456789
 86400000000000	1
+America/Sao_Paulo	09:00 -03 -03:00	09:00 -03 -03:00	America/Sao_Paulo
+America/New_York	08:00 EDT -04:00	07:00 EST -05:00	America/New_York
+Europe/Lisbon	13:00 WEST +01:00	12:00 WET +00:00	Europe/Lisbon
+Asia/Kolkata	17:30 IST +05:30	17:30 IST +05:30	Asia/Kolkata
+Australia/Sydney	22:00 AEST +10:00	23:00 AEDT +11:00	Australia/Sydney
+time(2026-03-08T03:30:00-04:00)
+time(2026-11-01T01:30:00-04:00)
+time(2026-11-01T01:30:00-05:00)
+time(2026-12-25T09:00:00+01:00)	time(2050-07-01T12:00:00-04:00)
+time(2026-03-08T12:00:00-04:00)	23
+time.date: unknown time zone 'Mars/Olympus'
+time.in_zone: unknown time zone '../etc/passwd'

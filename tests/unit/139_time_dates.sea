@@ -20,3 +20,27 @@ print(t:utc():iso(true), time.unix(0):utc(), time.unix(0):zone(), time.unix(0):u
 local x = time.parse("2026-10-18T14:30:05.123456789Z")
 print(x:iso(true), x:format("15:04:05.000"), x:nanosecond())
 print(time.Day, time.days(time.Day))
+
+-- named zones (the system's tz database)
+local noon = time.date(2026, 7, 1, 12, 0, 0, "UTC")
+for _, z in ["America/Sao_Paulo", "America/New_York", "Europe/Lisbon", "Asia/Kolkata", "Australia/Sydney"] do
+    local w = time.date(2026, 1, 15, 12, 0, 0, "UTC"):in_zone(z)
+    print(z, noon:in_zone(z):format("15:04 MST -07:00"), w:format("15:04 MST -07:00"), w:zone())
+end
+print(time.date(2026, 3, 8, 2, 30, 0, "America/New_York"))          -- skipped hour: moved forward
+print(time.date(2026, 11, 1, 1, 30, 0, "America/New_York"))         -- repeated hour: the first
+print(time.date(2026, 11, 1, 1, 30, 0, "America/New_York"):add_seconds(3600))
+print(time.parse("2026-12-25 09:00", "", "Europe/Berlin"), time.date(2050, 7, 1, 12, 0, 0, "America/New_York"))
+local d = time.date(2026, 3, 7, 12, 0, 0, "America/New_York")
+print(d:add_date(0, 0, 1), d:add_date(0, 0, 1):sub(d) / time.Hour)  -- a 23-hour day
+local function try(f)
+    local err = nil
+    local function run()
+        defer function() err = recover() end
+        f()
+    end
+    run()
+    return string.sub(tostring(err), string.find(tostring(err), ": time.") + 2, -2)
+end
+print(try(function() time.date(2026, 1, 1, 0, 0, 0, "Mars/Olympus") end))
+print(try(function() time.now():in_zone("../etc/passwd") end))

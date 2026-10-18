@@ -558,13 +558,14 @@ random bytes), `token([n])` (secure random hex), `uuid()` (UUID v4).
 
 **time** (durations are int **nanoseconds**, at most ~39 hours in an int):
 constants `Nanosecond Microsecond Millisecond Second Minute Hour Day`;
-`now() → Time`, `date(y,m,d[,h,min,s][,zone])`, `parse(s[,layout[,zone]]) →
+`now() → Time`, `date(y,m,d[,h,min,s][,zone])` (zone: `"local"`, `"UTC"`,
+`"-03:00"` or an IANA name like `"Europe/Lisbon"`, with its summer time), `parse(s[,layout[,zone]]) →
 Time|error` (ISO 8601 by default: `"2026-10-18"`, `"2026-10-18 14:30"`,
 `"...T14:30:00Z"`), `unix(sec[,ns])`, `time() → unix seconds`, `sleep(ns)`,
 `since(t) → ns`, `days(ns)`, `seconds(ns)`... A Time has methods
 `t:year() t:month() t:day() t:hour() t:minute() t:second() t:weekday()
 t:add_date(y,m,d) t:add_seconds(s) t:add(ns) t:sub(t2) → ns
-t:before(t2) t:after(t2) t:utc() t:in_zone("+03:00") t:iso()
+t:before(t2) t:after(t2) t:utc() t:in_zone("+03:00" or "America/Sao_Paulo") t:iso()
 t:format("02/01/2006 15:04")` (Go layouts; also for parse). `print(t)` shows
 `time(2026-10-18T14:30:00-03:00)`.
 
