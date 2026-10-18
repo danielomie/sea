@@ -432,7 +432,11 @@ static SeaValue node_to_val(SeaNode *n, const SrcIndex *ix) {
 
         case NODE_ASSIGN:
             tset(t, "targets", nodes_to_arr(n->assign.targets, n->assign.count, ix));
-            tset(t, "values",  nodes_to_arr(n->assign.exprs, n->assign.expr_count, ix));
+            if (n->assign.op_wrapped)   /* a op= b: the parser built a op b; show b */
+                tset(t, "values", nodes_to_arr(&n->assign.exprs[0]->binop.right, 1, ix));
+            else
+                tset(t, "values",  nodes_to_arr(n->assign.exprs, n->assign.expr_count, ix));
+            if (n->assign.op) tset(t, "op", str_val(binop_name((SeaBinop)(n->assign.op - 1))));
             break;
 
         case NODE_IF:
@@ -1750,7 +1754,22 @@ static bool print_simple(Printer *P, Obj *s) {
         }
         if (starts_with_paren(as_node(targets->data[0]))) outc(P, ';');
         print_list(P, targets);
-        outs(P, " = ");
+        const char *op = tget_str(s, "op");
+        if (op) {
+            static const char *const OPS[] = {"+", "-", "*", "/", "//", "%", "^", ".."};
+            bool known = false;
+            for (size_t k = 0; k < sizeof OPS / sizeof OPS[0]; k++)
+                if (strcmp(op, OPS[k]) == 0) known = true;
+            if (!known || targets->len != 1 || values->len != 1) {
+                fail(P, "'assign' with op '%s' needs one target and one value (op one of + - * / // %% ^ ..)", op);
+                return true;
+            }
+            outc(P, ' ');
+            outs(P, op);
+            outs(P, "= ");
+        } else {
+            outs(P, " = ");
+        }
         print_list(P, values);
     } else if (strcmp(type, "expr_stmt") == 0) {
         Obj *e = need(P, s, "expr");

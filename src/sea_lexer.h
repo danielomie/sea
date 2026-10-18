@@ -14,7 +14,8 @@
 typedef enum {
     // Literals
     TK_NIL, TK_TRUE, TK_FALSE, TK_NUMBER, TK_STRING, TK_IDENT,
-    TK_TEMPLATE,   /* `text ${expr} text`: start/len cover the whole literal, backticks included */
+    TK_TEMPLATE,
+    TK_OP_ASSIGN,  /* += -= *= /= //= %= ^= ..= : val.number holds the SeaBinop */   /* `text ${expr} text`: start/len cover the whole literal, backticks included */
 
     // Keywords
     TK_AND, TK_BREAK, TK_CHAN, TK_CONST, TK_CONTINUE, TK_DEFAULT,

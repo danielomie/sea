@@ -915,10 +915,97 @@ static bool is_lvalue(SeaNode *n) {
     return n && (n->type == NODE_IDENT || n->type == NODE_INDEX || n->type == NODE_FIELD);
 }
 
+/* A target that can be evaluated twice with no effect: a name, or fields and
+ * indexes of one with literal or name keys (a.b[i].c). */
+static bool simple_target(SeaNode *n) {
+    if (!n) return false;
+    switch (n->type) {
+    case NODE_IDENT: return true;
+    case NODE_FIELD: return simple_target(n->field.obj);
+    case NODE_INDEX: {
+        SeaNode *k = n->index.key;
+        if (!k) return false;
+        bool simple_key = k->type == NODE_IDENT || k->type == NODE_NUMBER || k->type == NODE_STRING ||
+                          k->type == NODE_BOOL;
+        return simple_key && simple_target(n->index.obj);
+    }
+    default: return false;
+    }
+}
+
+static SeaNode *clone_simple(SeaNode *n) {
+    SeaNode *c = node_new(n->type, n->line, n->col);
+    switch (n->type) {
+    case NODE_IDENT: c->ident = dup_cstr(n->ident); break;
+    case NODE_FIELD:
+        c->field.obj = clone_simple(n->field.obj);
+        c->field.field = dup_cstr(n->field.field);
+        break;
+    case NODE_INDEX:
+        c->index.obj = clone_simple(n->index.obj);
+        c->index.key = clone_simple(n->index.key);
+        break;
+    case NODE_NUMBER:
+        c->number = n->number;
+        c->num_is_float = n->num_is_float;
+        break;
+    case NODE_STRING:
+        c->string.ptr = dup_str(n->string.ptr, n->string.len);
+        c->string.len = n->string.len;
+        break;
+    case NODE_BOOL: c->boolean = n->boolean; break;
+    default: break;
+    }
+    return c;
+}
+
 static SeaNode* parse_assign_or_call(SeaParser *p) {
     int line = cur(p).line, col = cur(p).col;
     SeaNode *first = parse_expr(p);
     if (!first || p->had_error) return first;
+
+    // Compound assignment: a += b (one target, one value)
+    if (check(p, TK_OP_ASSIGN)) {
+        if (!is_lvalue(first)) {
+            parser_error_at(p, line, col, "invalid assignment target");
+            sea_node_free(first);
+            return NULL;
+        }
+        int op = (int)cur(p).val.number;
+        advance(p);
+        SeaNode *e = parse_expr(p);
+        if (!e || p->had_error) {
+            sea_node_free(first);
+            sea_node_free(e);
+            return NULL;
+        }
+        if (check(p, TK_COMMA)) {
+            parser_error(p, "a compound assignment (+=, ..=, ...) takes one target and one value");
+            sea_node_free(first);
+            sea_node_free(e);
+            return NULL;
+        }
+        SeaNode *n = node_new(NODE_ASSIGN, line, col);
+        n->assign.targets = SEA_ALLOC_N(SeaNode*, 1);
+        n->assign.targets[0] = first;
+        n->assign.count = 1;
+        n->assign.exprs = SEA_ALLOC_N(SeaNode*, 1);
+        n->assign.expr_count = 1;
+        n->assign.op = op + 1;
+        if (simple_target(first)) {
+            /* a op= b is a = a op b: every analysis of the compiler then sees
+             * the real value (x /= 2 is a float), and s ..= x appends in place */
+            SeaNode *b = node_new(NODE_BINOP, e->line, e->col);
+            b->binop.op = (SeaBinop)op;
+            b->binop.left = clone_simple(first);
+            b->binop.right = e;
+            n->assign.exprs[0] = b;
+            n->assign.op_wrapped = true;
+        } else {
+            n->assign.exprs[0] = e;   /* evaluated once by the compiler */
+        }
+        return n;
+    }
 
     // Check for assignment: a, b = ...
     if (check(p, TK_COMMA) || check(p, TK_ASSIGN)) {
@@ -942,6 +1029,8 @@ static SeaNode* parse_assign_or_call(SeaParser *p) {
             SEA_DYNARRAY_PUSH(targets, tcount, tcap, SeaNode*, t2);
         }
 
+        if (check(p, TK_OP_ASSIGN))
+            parser_error(p, "a compound assignment (+=, ..=, ...) takes one target and one value");
         expect(p, TK_ASSIGN);
 
         SeaNode **exprs = NULL;

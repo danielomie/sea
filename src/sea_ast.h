@@ -184,6 +184,9 @@ struct SeaNode {
             int       count;
             SeaNode **exprs;
             int       expr_count;
+            int       op;        // compound assignment (a += b): SeaBinop + 1; 0 for =
+            bool      op_wrapped;  // exprs[0] is the binop `a op b` built by the parser
+                                   // (its right side is what the source wrote)
         } assign;
 
         // If statement

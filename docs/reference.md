@@ -612,6 +612,7 @@ a number (by value: `bigint.new(5) == 5`).
 |----------|-------------|
 | `=` | Assign |
 | `arr[] = v` | Append `v` to array `arr` |
+| `+=` `-=` `*=` `/=` `//=` `%=` `^=` `..=` | Compound assignment: `x += 1` is `x = x + 1` (`s ..= t` appends in place). One target and one value; a target with effects (`t[f()] += 1`) is evaluated once |
 
 ---
 

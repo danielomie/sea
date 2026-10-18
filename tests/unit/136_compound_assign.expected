@@ -1,0 +1,20 @@
+24
+4	int
+2	number
+9
+a123
+11	200	4	v!	2
+6	30	3
+5000050000	0.125	number
+6
+t.sea:1:6: a compound assignment (+=, ..=, ...) takes one target and one value
+t.sea:2:7: a compound assignment (+=, ..=, ...) takes one target and one value
+t.sea:1:1: invalid assignment target
+t.sea:2:6: unexpected token '<eof>' in expression
+x += 1
+t.a ..= 'x'
+t[f()] //= 2
+
+assign	+	field	y
+s ..= "x"
+

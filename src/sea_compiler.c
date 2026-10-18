@@ -1179,6 +1179,89 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst);
 static void compile_stmt(SeaCompiler *c, SeaNode *node);
 static void compile_block(SeaCompiler *c, SeaNode *block);
 
+/* ---- a op= b with a target that has effects (t[f()] += 1) ----
+ * Simple targets were turned into a = a op b by the parser. Here the object
+ * (and the key) are evaluated once into hidden locals:
+ *     do local (o) = obj; local (k) = key; (o)[(k)] = (o)[(k)] op b end
+ * The nodes built here borrow the original subtrees and are freed after. */
+static char *cc_strdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *d = (char*)sea_malloc(n);
+    memcpy(d, s, n);
+    return d;
+}
+
+static SeaNode *cc_ident(const char *name, int line) {
+    SeaNode *n = sea_node_alloc(NODE_IDENT, line);
+    n->ident = cc_strdup(name);
+    return n;
+}
+
+static SeaNode *cc_local(const char *name, SeaNode *value, int line) {
+    SeaNode *n = sea_node_alloc(NODE_LOCAL, line);
+    n->local.names = (char**)sea_malloc(sizeof(char*));
+    n->local.names[0] = cc_strdup(name);
+    n->local.count = 1;
+    n->local.exprs = (SeaNode**)sea_malloc(sizeof(SeaNode*));
+    n->local.exprs[0] = value;
+    n->local.expr_count = 1;
+    return n;
+}
+
+static SeaNode *cc_target(SeaNode *t, bool hidden_key, int line) {
+    SeaNode *n = sea_node_alloc(t->type, line);
+    if (t->type == NODE_FIELD) {
+        n->field.obj = cc_ident("(o)", line);
+        n->field.field = cc_strdup(t->field.field);
+    } else {
+        n->index.obj = cc_ident("(o)", line);
+        n->index.key = hidden_key ? cc_ident("(k)", line) : NULL;
+    }
+    return n;
+}
+
+static void compile_stmt(SeaCompiler *c, SeaNode *node);
+
+static void compile_compound_assign(SeaCompiler *c, SeaNode *node) {
+    SeaNode *t = node->assign.targets[0];
+    SeaNode *rhs = node->assign.exprs[0];
+    int line = node->line;
+    SeaNode *obj = t->type == NODE_FIELD ? t->field.obj : t->index.obj;
+    SeaNode *key = t->type == NODE_INDEX ? t->index.key : NULL;
+
+    SeaNode *stmts[3];
+    int ns = 0;
+    stmts[ns++] = cc_local("(o)", obj, line);
+    if (key) stmts[ns++] = cc_local("(k)", key, line);
+
+    SeaNode *bin = sea_node_alloc(NODE_BINOP, line);
+    bin->binop.op = (SeaBinop)(node->assign.op - 1);
+    bin->binop.left = cc_target(t, key != NULL, line);
+    bin->binop.right = rhs;
+    SeaNode *as = sea_node_alloc(NODE_ASSIGN, line);
+    as->assign.targets = (SeaNode**)sea_malloc(sizeof(SeaNode*));
+    as->assign.targets[0] = cc_target(t, key != NULL, line);
+    as->assign.count = 1;
+    as->assign.exprs = (SeaNode**)sea_malloc(sizeof(SeaNode*));
+    as->assign.exprs[0] = bin;
+    as->assign.expr_count = 1;
+    stmts[ns++] = as;
+
+    SeaNode *blk = sea_node_alloc(NODE_DO, line);
+    blk->block.stmts = (SeaNode**)sea_malloc(sizeof(SeaNode*) * (size_t)ns);
+    for (int i = 0; i < ns; i++) blk->block.stmts[i] = stmts[i];
+    blk->block.count = ns;
+    blk->block.end_line = line;
+
+    compile_stmt(c, blk);
+
+    /* give the borrowed subtrees back, then free what was built */
+    stmts[0]->local.exprs[0] = NULL;
+    if (key) stmts[1]->local.exprs[0] = NULL;
+    bin->binop.right = NULL;
+    sea_node_free(blk);
+}
+
 /* Is `name` the target of an assignment anywhere in `n` (nested functions
  * included)? Name-based, so shadowing only over-approximates. */
 static bool name_assigned_in(SeaNode *n, const char *name) {
@@ -2632,6 +2715,10 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
         }
 
         case NODE_ASSIGN: {
+            if (node->assign.op && !node->assign.op_wrapped) {
+                compile_compound_assign(c, node);
+                break;
+            }
             /* Single assignment to a local: the local owns its value, so the
              * old one is released (OP_SETLOCAL) — skipped when both the old
              * and the new value need no RC, in which case the RHS is

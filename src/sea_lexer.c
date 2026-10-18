@@ -6,6 +6,7 @@
 #include "sea_lexer.h"
 #include "sea_memory.h"
 #include "sea_utf8.h"
+#include "sea_ast.h"   /* SeaBinop, for compound assignment tokens */
 #include <ctype.h>
 #include <errno.h>
 
@@ -334,6 +335,13 @@ static bool skip_template(SeaLexer *l) {
     return *l->cur == '`';
 }
 
+/* A compound assignment token (+= ...): val.number is the operator (SeaBinop) */
+static SeaToken op_assign(SeaLexer *l, int binop) {
+    SeaToken t = make_token(l, TK_OP_ASSIGN);
+    t.val.number = binop;
+    return t;
+}
+
 static SeaToken scan_template(SeaLexer *l) {
     if (!skip_template(l)) return error_token(l, "unterminated template string (a ` without its closing `)");
     l->cur++;   /* the closing backtick */
@@ -551,23 +559,36 @@ static SeaToken scan_token(SeaLexer *l) {
         case ']': return make_token(l, TK_RBRACKET);
         case ';': return make_token(l, TK_SEMICOLON);
         case ',': return make_token(l, TK_COMMA);
-        case '%': return make_token(l, TK_PERCENT);
-        case '^': return make_token(l, TK_CARET);
+        case '%':
+            if (match_char(l, '=')) return op_assign(l, BINOP_MOD);
+            return make_token(l, TK_PERCENT);
+        case '^':
+            if (match_char(l, '=')) return op_assign(l, BINOP_POW);
+            return make_token(l, TK_CARET);
         case '#': return error_token(l, "unexpected character '#'");
         case '&': return make_token(l, TK_AMP);
         case '|': return make_token(l, TK_PIPE);
         case '~':
             if (match_char(l, '=')) return make_token(l, TK_NEQ);
             return make_token(l, TK_TILDE);
-        case '+': return make_token(l, TK_PLUS);
-        case '*': return make_token(l, TK_STAR);
+        case '+':
+            if (match_char(l, '=')) return op_assign(l, BINOP_ADD);
+            return make_token(l, TK_PLUS);
+        case '*':
+            if (match_char(l, '=')) return op_assign(l, BINOP_MUL);
+            return make_token(l, TK_STAR);
         case '?': return make_token(l, TK_QUESTION);
         case ':': return make_token(l, TK_COLON);
         case '/':
-            if (match_char(l, '/')) return make_token(l, TK_DSLASH);
+            if (match_char(l, '/')) {
+                if (match_char(l, '=')) return op_assign(l, BINOP_IDIV);
+                return make_token(l, TK_DSLASH);
+            }
+            if (match_char(l, '=')) return op_assign(l, BINOP_DIV);
             return make_token(l, TK_SLASH);
         case '-':
             if (match_char(l, '>')) return make_token(l, TK_ARROW_RIGHT);
+            if (match_char(l, '=')) return op_assign(l, BINOP_SUB);
             return make_token(l, TK_MINUS);
         case '<':
             if (match_char(l, '-')) return make_token(l, TK_ARROW_LEFT);
@@ -587,6 +608,7 @@ static SeaToken scan_token(SeaLexer *l) {
         case '.':
             if (match_char(l, '.')) {
                 if (match_char(l, '.')) return make_token(l, TK_DOTDOTDOT);
+                if (match_char(l, '=')) return op_assign(l, BINOP_CONCAT);
                 return make_token(l, TK_DOTDOT);
             }
             return make_token(l, TK_DOT);
@@ -670,6 +692,7 @@ const char* sea_tk_name(SeaTK tk) {
         case TK_NUMBER:    return "<number>";
         case TK_STRING:    return "<string>";
         case TK_TEMPLATE:  return "<template>";
+        case TK_OP_ASSIGN: return "compound assignment";
         case TK_IDENT:     return "<identifier>";
         case TK_AND:       return "and";
         case TK_BREAK:     return "break";

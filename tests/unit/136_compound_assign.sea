@@ -1,0 +1,78 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: compound assignment += -= *= /= //= %= ^= ..=
+local x = 10
+x += 5
+x -= 3
+x *= 2
+print(x) -- 24
+x //= 5
+print(x, type(x)) -- 4  int
+x /= 2
+print(x, type(x)) -- 2  number (as x = x / 2)
+local i = 7
+i %= 4
+i ^= 2
+print(i) -- 9
+local s = "a"
+for k = 1, 3 do s ..= k end
+print(s) -- a123
+
+-- fields, indexes, map entries, globals
+local t = {n = 1}
+t.n += 10
+local arr = [1, 2, 3]
+arr[1] *= 100
+local j = 2
+arr[j] += 1
+local m = [=]
+m["k"] = "v"
+m["k"] ..= "!"
+g = 1
+g += 1
+print(t.n, arr[1], arr[2], m["k"], g)
+
+-- a target with effects is evaluated once
+local calls = 0
+local function idx()
+    calls += 1
+    return 0
+end
+arr[idx()] += 5
+local function get()
+    calls += 1
+    return t
+end
+get().n -= 1
+get()["n"] *= 3
+print(arr[0], t.n, calls)
+
+-- in loops, as fast as x = x + k (the same code)
+local n = 0
+for k = 1, 100000 do n += k end
+local f = 1
+for k = 1, 3 do f /= 2 end
+print(n, f, type(f))
+
+-- closures and loop variables
+local total = 0
+local fns = []
+for k = 1, 3 do fns[] = function() total += k end end
+for _, fn in fns do fn() end
+print(total) -- 6
+
+-- errors and the formatter
+local parser = require("sea/parser")
+local function check(src)
+    local d = parser.check(src, {name = "t.sea"})
+    return d == nil and "ok" or d.text
+end
+print(check("a, b += 1"))
+print(check("local x = 1\nx += 1, 2"))
+print(check("f() += 1"))
+print(check("local x = 1\nx += "))
+print(parser.format("x+=1\nt.a ..= 'x'\nt[f()] //= 2"))
+local node = parser.parse("t.n += y").stmts[0]
+print(node.type, node.op, node.targets[0].type, node.values[0].name)
+print(parser.format({type = "block", stmts = [{type = "assign", op = "..", targets = [{type = "ident", name = "s"}], values = [{type = "string", value = "x"}]}]}))

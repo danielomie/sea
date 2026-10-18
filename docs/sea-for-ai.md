@@ -120,7 +120,7 @@ says what to write instead (`undefined variable 'pairs' (iterate with
 25. **String interpolation uses backquotes**: `` `total: ${n} items` ``
     (any expression inside `${}`; not `"${n}"`, not `f"..."`).
     **No `goto`, `repeat ... until`, `switch`, classes, metatables,
-    `setmetatable`, `__index`, `+=` / `++`,
+    `setmetatable`, `__index`, `++` / `--` (but `+= -= *= /= //= %= ^= ..=` exist),
     ternary `?:`** (use `cond and a or b`, which fails when `a` is false
     or nil), or `print` with `%` formatting (use `printf` or
     `string.format`).
@@ -147,6 +147,8 @@ local n = 42                      -- int
 local pi = 3.14                   -- number
 local s = "text" .. " more"       -- .. concatenates (numbers are converted)
 local msg = `n is ${n}, twice ${n * 2}`   -- template string: ${expr} inside backquotes
+local count = 0
+count += 2                        -- also -= *= /= //= %= ^= and ..= (append to a string)
 local raw = [[no \n escapes here]]
 local yes, no = true, nil
 
@@ -698,7 +700,7 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | `return nil, "message"` | `return error("message")` |
 | `if err != nil { return err }` | `local v = f()?` |
 | `x ~= nil and x or y` | the same (`cond and a or b`) |
-| `x += 1`, `x++` | `x = x + 1` |
+| `x += 1`, `x++` | `x += 1` (there is no `++`) |
 | `!=`, `&&`, `\|\|`, `!` | `~=` (or `!=`), `and`, `or`, `not` |
 | `null`, `None`, `undefined` | `nil` |
 | `class Foo`, `setmetatable` | a function returning a table with fields and methods (section 5) |
