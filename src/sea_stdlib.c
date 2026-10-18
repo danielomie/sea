@@ -18,6 +18,7 @@
 #include "sea_memory.h"
 #include "sea_parser.h"
 #include "sea_compiler.h"
+#include <pthread.h>
 #include "sea_ast.h"
 #include "sea_chunk.h"
 #include "sea_sched.h"
@@ -577,6 +578,60 @@ static void sea_lib_embedded_register(SeaVM *vm) {
     }
 }
 
+/* load(src [, name]) → function | error: compile Sea source into a
+ * function that runs it (its top-level `return` is the function's result;
+ * it sees the globals, not the caller's locals). name is the source name in
+ * errors and tracebacks (default "load"). The compiled code is kept for the
+ * life of the process: the function may outlive this goroutine. */
+static pthread_mutex_t g_load_mu = PTHREAD_MUTEX_INITIALIZER;
+static SeaChunk *g_load_chunks;
+
+static SeaValue fn_load(SeaVM *vm, int argc, SeaValue *args) {
+    SeaString *src = argc > 0 ? sea_value_get_flat_string(args[0]) : NULL;
+    if (!src) sea_vm_error_noreturn(vm, "load: expected a string of Sea code, got %s", argc > 0 ? sea_type_name(args[0]) : "nothing");
+    SeaString *nm = argc > 1 && !sea_is_nil(args[1]) ? sea_value_get_flat_string(args[1]) : NULL;
+    char *name = strdup(nm ? nm->data : "load");     /* the chunk keeps a pointer to it */
+    if (nm) sea_obj_release(&nm->obj);
+    SeaParser parser;
+    sea_parser_init(&parser, src->data);
+    SeaNode *program = sea_parser_parse(&parser);
+    if (!program) {
+        char perr[1200];
+        sea_parser_error_string(&parser, name, perr, sizeof perr);
+        sea_parser_free(&parser);
+        sea_obj_release(&src->obj);
+        free(name);
+        return sea_make_error_str(vm, perr);
+    }
+    sea_parser_free(&parser);
+    SeaChunk *chunk = sea_compile(program, name);
+    sea_node_free(program);
+    sea_obj_release(&src->obj);
+    if (!chunk) {
+        char msg[1200];
+        snprintf(msg, sizeof msg, "%s:%d: %s", name, sea_compile_error_line(),
+                 sea_compile_error() ? sea_compile_error() : "compile error");
+        free(name);
+        return sea_make_error_str(vm, msg);
+    }
+    chunk->is_vararg = true;              /* the arguments are its ... */
+    pthread_mutex_lock(&g_load_mu);
+    chunk->next_owned = g_load_chunks;
+    g_load_chunks = chunk;
+    pthread_mutex_unlock(&g_load_mu);
+    SeaClosure *cl = SEA_ALLOC(SeaClosure);
+    cl->obj.type      = OBJ_CLOSURE;
+    cl->obj.gc        = 0;
+    cl->obj.refcount  = 1;
+    cl->chunk         = chunk;
+    cl->is_native     = false;
+    cl->native        = NULL;
+    cl->native_name   = NULL;
+    cl->upvalues      = NULL;
+    cl->upval_count   = 0;
+    return sea_obj_val(&cl->obj);
+}
+
 void sea_lib_core_register(SeaVM *vm) {
     sea_vm_register_native(vm, "print",    fn_print);
     sea_vm_register_native(vm, "printf",   fn_printf);
@@ -593,6 +648,7 @@ void sea_lib_core_register(SeaVM *vm) {
     sea_vm_register_native(vm, "panic",    fn_panic);
     sea_vm_register_native(vm, "recover",  fn_recover);
     sea_vm_register_native(vm, "require",  fn_require);
+    sea_vm_register_native(vm, "load",     fn_load);
     sea_vm_register_native(vm, "int_array",   fn_int_array);
     sea_vm_register_native(vm, "float_array", fn_float_array);
 }

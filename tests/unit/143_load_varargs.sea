@@ -1,0 +1,44 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: load(src) compiles code into a function; varargs in [x, ...] and local a, b = ...
+local f = load("return 1 + 2")
+print(f(), type(f))
+Shared = 10
+print(load("return Shared * 2", "macro")())
+print(load("local a, b = ...\nreturn a + b")(3, 4), load("return len({...})")(1, nil, 3))
+local e = load("return +", "bad")
+print(is_error(e), e.message)
+print(is_error(load("x = ")))
+local g = load("local t = [...]\nreturn t")
+print(g(1, 2, 3))
+-- a loaded function outlives its goroutine
+local ch = chan(1)
+go function() ch <- load("return 42") end()
+local h = <-ch
+print(h())
+
+local function va(...)
+    return len([...])
+end
+print(va(), va(1), va(1, nil, 3))
+local function vb(...)
+    return [0, ...]
+end
+print(vb(7, 8), vb())
+local function three(...)
+    local a, b, c = ...
+    return [a, b, c]
+end
+print(three(1, 2), three(1, 2, 3, 4), three())
+local function tail(x, ...)
+    local y, z = ...
+    return [x, y, z]
+end
+print(tail("x", "y", "z"))
+local s = "abc"
+local function cat(...)
+    local p, q = ...
+    return p .. q
+end
+print(cat(s, "d"), s)

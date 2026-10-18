@@ -2531,6 +2531,10 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
                     SeaValue v = frame->varargs ? frame->varargs[j] : SEA_NIL_VAL;
                     sea_table_set(t, k, v);
                 }
+            } else if (sea_is_array(tgt)) {          /* [x, ...] */
+                SeaArray *arr = SEA_AS_ARRAY(tgt);
+                for (int j = 0; j < nva; j++)
+                    sea_array_push(arr, frame->varargs ? frame->varargs[j] : SEA_NIL_VAL);
             }
         } else if (b == 0) {
             /* Expand all varargs starting at R[A] — the tail of a call's

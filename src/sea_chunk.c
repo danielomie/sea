@@ -386,10 +386,14 @@ void sea_op_reads(uint32_t in, SeaRegRanges *r) {
     case OP_LOAD_K: case OP_LOAD_GLOBAL: case OP_LOAD_UP: case OP_JMP:
     case OP_NEW_TABLE: case OP_NEW_STRUCT: case OP_NEW_MAP: case OP_NEW_STRUCT_LOCAL:
     case OP_NEW_ARRAY_LOCAL: case OP_RECOVER: case OP_YIELD: case OP_SELECT_BEGIN:
-    case OP_VARARG: case OP_RETURN0:
+    case OP_RETURN0:
     case OP_CLOSURE:    /* captures named locals by address (never eliminated) */
     case OP_CLOSE_UP:   /* A is a bound; captured registers are named locals */
     case OP_SELECT_END: /* reads the registers its SELECT_CASEs named */
+        break;
+
+    case OP_VARARG:     /* pack mode (C=1) appends to the table/array in R[A] */
+        if (c == 1) rr_add(r, a, a);
         break;
 
     /* R[B] */

@@ -96,7 +96,8 @@ says what to write instead (`undefined variable 'pairs' (iterate with
 17. **A function call in an expression list gives one value.**
     `print(f())`, `return f()`, `{f()}` and `g(f())` all keep only the first
     result. Only `local a, b = f()` (and `a, b = f()`) receive several.
-    Varargs do pass through: `return g(...)`.
+    Varargs do pass through: `return g(...)`, `[a, ...]`, `{...}` and
+    `local x, y = ...` take all of them.
 18. **Not-equal is `~=`** (`!=` is accepted too). Logical operators are the
     words `and`, `or`, `not`. Only `nil` and `false` are falsy: `0` and `""`
     are true.

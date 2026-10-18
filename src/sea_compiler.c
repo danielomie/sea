@@ -2064,6 +2064,11 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
                 emit_abc(c, OP_NEW_ARRAY, dst, cap_reg, 0, line);
                 free_reg(c, cap_reg);
                 for (int i = 0; i < n; i++) {
+                    if (i == n - 1 && node->array_lit.elems[i]->type == NODE_VARARG) {
+                        /* [a, ...]: every vararg, appended (pack mode) */
+                        emit_abc(c, OP_VARARG, dst, 0, 1, line);
+                        break;
+                    }
                     int v = compile_expr(c, node->array_lit.elems[i], -1);
                     if (can_move_from(c, v)) {
                         emit_abc(c, OP_ARRAY_PUSH_MOVE, dst, v, 0, line);
@@ -2657,6 +2662,17 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
                             reg_copy_int_meta(c, reg, src);
                             copy_prop = true;
                         }
+                    }
+                    if (!copy_prop && is_last_expr && init->type == NODE_VARARG && need_from_last > 1) {
+                        /* local a, b = ...: the first varargs, one per name
+                         * (copies of the frame's: each local owns its own) */
+                        for (int k = i + 1; k < node->local.count; k++) alloc_reg(c);
+                        emit_abc(c, OP_VARARG, reg, need_from_last, 0, line);
+                        for (int k = 0; k < need_from_last; k++) {
+                            emit_abc(c, OP_RETAIN, reg + k, 0, 0, line);
+                            reg_clear_int(c, reg + k);
+                        }
+                        break;
                     }
                     if (!copy_prop) {
                         compile_expr(c, init, reg);

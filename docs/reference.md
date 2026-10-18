@@ -636,6 +636,7 @@ a number (by value: `bigint.new(5) == 5`).
 | `is_error` | `is_error(v) → bool` | Check whether a value is an error |
 | `assert` | `assert(v, msg?)` | Abort with `msg` if `v` is falsy |
 | `require` | `require(name) → module` | Load a Sea or native module by path/name |
+| `load` | `load(src [, name]) → function\|error` | Compile a string of Sea code into a function that runs it: its arguments are the code's `...`, its top-level `return` is the result. It sees globals, not the caller's locals. `name` is the source name in errors and tracebacks (default `"load"`). A syntax or compile error is an error value |
 | `int_array` | `int_array(cap?) → IntArray` | Create a typed integer array (no per-element RC) |
 | `float_array` | `float_array(cap?) → FloatArray` | Create a typed float array (no per-element RC) |
 
@@ -1607,7 +1608,7 @@ local q, r = divmod(10, 3)
 
 ```sea
 function sum(...)
-    local args = {...}   -- packs varargs into a table (0-based keys)
+    local args = [...]   -- all the varargs in an array ({...}: a positional table)
     local total = 0
     for i = 0, len(args)-1 do total = total + args[i] end
     return total
@@ -1615,6 +1616,12 @@ end
 
 -- Pass-through
 function wrap(...) return inner(...) end
+
+-- The first ones by name
+function pair(...)
+    local a, b = ...      -- nil when fewer were passed
+    return a, b
+end
 ```
 
 ### Bare `do...end` blocks (scope isolation)
