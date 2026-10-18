@@ -46,7 +46,7 @@ ERRORS.format = true
 
 -- what to say about names from other languages
 local HINTS = {}
-HINTS.array = "arrays are written [a, b, c] (or [] empty), append with arr[] = v"
+HINTS.array = "arrays are written [a, b, c] or [], append with arr[] = v"
 HINTS.push = "append to an array with arr[] = v"
 HINTS.table = "append to an array with arr[] = v, join with string.join; there is no table library"
 HINTS.pairs = "iterate with `for k, v in t do`"
