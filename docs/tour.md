@@ -51,8 +51,8 @@ print(p.x + p.y)             -- 12
 local t = {}
 t.name = "sea"
 t[7] = "seven"
-local list = {"a", "b", "c"}
-print(t.name, t[7], list[1], len(list))   -- sea  seven  b  3
+local letters = {"a", "b", "c"}
+print(t.name, t[7], letters[1], len(letters))   -- sea  seven  b  3
 
 -- typed arrays: contiguous int64 / double storage, no per-element refcount
 local ia = int_array(100)

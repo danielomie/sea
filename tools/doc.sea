@@ -25,7 +25,7 @@ local stream = require("sea/stream")
 
 local BUILTINS = {
     "math", "string", "utf8", "re", "encoding", "hash", "io", "os", "fs", "path",
-    "process", "sync", "time", "net", "gc", "sort", "bigint", "json", "csv", "sea/parser",
+    "process", "sync", "time", "net", "gc", "sort", "bigint", "list", "json", "csv", "sea/parser",
 }
 
 local flags = require("sea/flags")

@@ -84,6 +84,14 @@ static int natural(SeaValue a, SeaValue b) {
     return la < lb ? -1 : la > lb;
 }
 
+/* For other modules (list.min/max): the natural order of two values; *ok is
+ * false when they are not both numbers or both strings. */
+int sea_sort_natural(SeaValue a, SeaValue b, bool *ok) {
+    int ka = kind(a), kb = kind(b);
+    *ok = ka != K_OTHER && ka == kb;
+    return *ok ? natural(a, b) : 0;
+}
+
 /* all values comparable in the natural order (one kind, number or string) */
 static void check_comparable(SeaVM *vm, const char *fn, const SeaValue *v, size_t n, SeaValue *extra) {
     int k = K_OTHER;

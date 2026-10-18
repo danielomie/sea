@@ -239,8 +239,8 @@ t[7] = "seven"
 print(t.name, t[7], t.missing)        -- → sea  seven  nil
 
 -- positional table (keys 0, 1, 2)
-local list = {"a", "b", "c"}
-print(list[0], len(list))             -- → a  3
+local letters = {"a", "b", "c"}
+print(letters[0], len(letters))       -- → a  3
 
 -- nested data
 local cfg = {}
@@ -249,6 +249,11 @@ local grid = [ [1, 2], [3, 4] ]       -- a space after "[": "[[" starts a long s
 print(cfg.servers[1].port, grid[1][0])   -- → 8080  3
 print(grid, {k = "v"})                -- → [ [1, 2], [3, 4] ]  {k = "v"}
 -- print shows contents; dump(v) prints big structures indented
+
+-- list helpers (map, filter, sum, max, keys, group_by, ...)
+local nums = [3, 1, 4, 1, 5]
+print(list.map(nums, function(x) return x * 10 end), list.sum(nums), list.max(nums))   -- → [30, 10, 40, 10, 50]  14  5
+print(list.filter(nums, function(x) return x > 2 end), list.unique(nums))             -- → [3, 4, 5]  [3, 1, 4, 5]
 
 -- sorting
 local words = string.split("pear apple fig", " ")
@@ -472,7 +477,7 @@ print(geometry.area(3, 4))
   `make install` (`require("json")` works by name with an installed `sea`).
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
-  sort bigint json csv`. `require("sea/parser")`, `require("sea/test")`,
+  sort list bigint json csv`. `require("sea/parser")`, `require("sea/test")`,
   `require("sea/check")`, `require("sea/stream")` and `require("sea/flags")`
   are built in too.
 - Doc comments: a comment block at the top of the file documents the
@@ -564,6 +569,14 @@ base32_decode hex_encode hex_decode url_encode url_decode html_escape`.
 **hash**: `md5 sha1 sha224 sha256 sha384 sha512(s[,raw])` (hex, or raw
 bytes), `hmac(alg,key,data[,raw])`, `new(alg)` (`h:update(s)`,
 `h:digest()`), `crc32 adler32 fnv1a`, `equal(a,b)` (constant time).
+
+**list** (global; new arrays, input unchanged; callbacks get `(v, i)`):
+`map(a,fn) filter(a,fn) reduce(a,fn[,init]) find(a,fn) index(a,x)
+contains(a,x) any(a,fn) all(a,fn) count(a,fn|x) sum(a[,fn]) min(a[,fn])
+max(a[,fn]) range(n) range(from,to[,step])` (to **inclusive**)
+`unique(a) slice(a,from[,to])` (to **exclusive**) `concat(a,b,...) flatten
+reversed copy chunk(a,n) zip(a,b,...) group_by(a,fn) count_by(a,fn)` (→ maps)
+`keys(t) values(t) items(t)` (tables/maps sorted by key).
 
 **sort**: `sort(a[,less])` (stable, in place), `by(a,key_or_field[,reverse])`,
 `sorted(a[,less]) → copy`, `reverse(a)`, `is_sorted`, `search(a,x)`,
@@ -700,6 +713,8 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | f-strings `f"{k}={v}"`, template literals `` `${k}` `` | `` `${k}=${v}` `` (backquotes), or `string.format("%s=%d", k, v)` / `printf` |
 | `s:gsub(pattern, r)`, `re.sub` | `re.gsub(pattern, s, r)` (subject second) |
 | `s:find("x", 1, true)` | `string.find(s, "x")` |
+| `[x * 2 for x in a]`, `a.map(f)`, `sum(a)`, `max(a, key=f)`, `Counter(a)` | `list.map(a, function(x) return x * 2 end)`, `list.sum(a)`, `list.max(a, f)`, `list.count_by(a, f)` |
+| `d.keys()`, `d.items()`, `a[1:3]`, `range(n)` | `list.keys(d)`, `list.items(d)`, `list.slice(a, 1, 3)`, `list.range(n)` |
 | `pcall(f)`, `try/except`, `try/catch` | error values + `?`, or `defer` + `recover()` |
 | `error("x")` (Lua throws) | `panic("x")`; `error("x")` only *creates* an error value |
 | `return nil, "message"` | `return error("message")` |

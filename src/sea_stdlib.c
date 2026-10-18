@@ -616,5 +616,6 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_re_register(vm);
     sea_lib_process_register(vm);
     sea_lib_hash_register(vm);
+    sea_lib_list_register(vm);
     sea_lib_embedded_register(vm);
 }

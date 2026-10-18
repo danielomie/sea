@@ -1,0 +1,44 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: the list module (map, filter, reduce, sum, min, max, keys, ...)
+local a = [3, 1, 4, 1, 5, 9, 2, 6]
+print(list.map(a, function(x) return x * 2 end))
+print(list.filter(a, function(x) return x % 2 == 0 end))
+print(list.reduce(a, function(acc, x) return acc + x end, 0), list.reduce(a, function(acc, x) return acc + x end))
+print(list.sum(a), list.sum([1.5, 2]), list.sum([]), list.sum(a, function(x) return x * x end))
+print(list.min(a), list.max(a), list.min(["pear", "apple"]), list.max([], nil))
+local people = [{name = "ana", age = 31}, {name = "bob", age = 25}, {name = "caio", age = 31}]
+print(list.max(people, function(p) return p.age end).name, list.min(people, function(p) return p.age end).name)
+print(list.find(people, function(p) return p.age > 30 end).name, list.find(a, function(x) return x > 100 end))
+print(list.index(a, 5), list.index(a, 7), list.contains(["x", "y"], "y"), list.contains(a, 1.0))
+print(list.any(a, function(x) return x > 8 end), list.all(a, function(x) return x > 0 end), list.count(a, 1), list.count(a, function(x) return x > 3 end))
+print(list.unique(a), list.slice(a, 2, 5), list.slice(a, -2), list.concat([1], [2, 3], {4}))
+print(list.flatten([ [1, 2], [3], 4 ]), list.reversed([1, 2, 3]), list.chunk([1, 2, 3, 4, 5], 2))
+print(list.zip(["a", "b", "c"], [1, 2]), list.range(5), list.range(1, 10, 3), list.range(5, 1, -2))
+print(list.group_by(people, function(p) return p.age end))
+print(list.count_by(["a", "b", "a"], function(s) return s end))
+local t = {b = 2, a = 1, c = 3}
+print(list.keys(t), list.values(t), list.items({x = 1}))
+print(list.map(a, function(x, i) return i end))
+print(list.map({10, 20}, function(x) return x + 1 end))
+local ia = int_array()
+ia[] = 5
+print(list.sum(ia), list.map(ia, function(x) return x end))
+local function try(f)
+    local err = nil
+    local function run()
+        defer function() err = recover() end
+        f()
+    end
+    run()
+    return err
+end
+print(try(function() list.map([1, 2], function(x) panic("boom " .. x) end) end))
+print(string.contains(tostring(try(function() list.sum([1, "x"]) end)), "element 1 is string"))
+print(string.contains(tostring(try(function() list.map(5, print) end)), "expected an array"))
+print(string.contains(tostring(try(function() list.max([1, "a"]) end)), "cannot compare"))
+local big = list.range(100000)
+local s2 = 0
+for _, x in big do s2 += x * 2 end
+print(list.sum(list.map(big, function(x) return x * 2 end)) == s2)

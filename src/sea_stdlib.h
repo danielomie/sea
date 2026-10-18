@@ -34,8 +34,13 @@ void sea_lib_fs_register(SeaVM *vm);
 void sea_lib_re_register(SeaVM *vm);
 void sea_lib_process_register(SeaVM *vm);
 void sea_lib_hash_register(SeaVM *vm);
+void sea_lib_list_register(SeaVM *vm);
 
 // Internal helper used by stdlib lib files
+/* sea_lib_sort.c: the natural order (numbers, or strings by bytes); *ok is
+ * false for values of different kinds or not comparable */
+int sea_sort_natural(SeaValue a, SeaValue b, bool *ok);
+
 void mod_set(SeaVM *vm, SeaTable *mod, const char *name,
              SeaValue (*fn)(SeaVM*, int, SeaValue*));
 

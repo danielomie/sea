@@ -1061,6 +1061,55 @@ stack overflow; these limits apply to every program, not just this library.
 
 ---
 
+## Module: `list`
+
+Helpers over arrays (also positional tables `{a, b}`, `int_array` and
+`float_array`) and over the keys and values of tables, maps and structs —
+what Python's built-ins and list comprehensions do. Every function returns a
+new value and leaves its input unchanged. Callbacks receive `(value, index)`;
+a function may take just the value.
+
+```sea
+local nums = [3, 1, 4, 1, 5, 9]
+print(list.map(nums, function(x) return x * 2 end))       -- [6, 2, 8, 2, 10, 18]
+print(list.filter(nums, function(x) return x > 2 end))    -- [3, 4, 5, 9]
+print(list.sum(nums), list.max(nums), list.unique(nums))  -- 23  9  [3, 1, 4, 5, 9]
+local people = [{name = "ana", age = 31}, {name = "bob", age = 25}]
+print(list.max(people, function(p) return p.age end).name)            -- ana
+print(list.group_by(people, function(p) return p.age > 30 and "senior" or "junior" end))
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `list.map` | `map(a, fn) → array` | `fn(v, i)` for each element |
+| `list.filter` | `filter(a, fn) → array` | The elements for which `fn(v, i)` is true |
+| `list.reduce` | `reduce(a, fn [, init]) → value` | `acc = fn(acc, v, i)` over the elements, from `init` (default: the first element; an empty array without `init` is an error) |
+| `list.find` | `find(a, fn) → value\|nil` | The first element for which `fn(v, i)` is true |
+| `list.index` | `index(a, x) → int\|nil` | The index of the first element `== x` |
+| `list.contains` | `contains(a, x) → bool` | Whether an element `== x` |
+| `list.any`, `list.all` | `any(a, fn) → bool` | Whether `fn(v, i)` is true for some / every element (`all` of `[]` is true) |
+| `list.count` | `count(a, fn_or_value) → int` | How many elements `fn` accepts, or are `== value` |
+| `list.sum` | `sum(a [, fn]) → number` | The sum of the elements (or of `fn(v, i)`): an int while every term is an int, `0` for `[]` |
+| `list.min`, `list.max` | `min(a [, fn]) → value\|nil` | The element with the smallest / largest value (or key `fn(v, i)`), numbers or strings in the natural order; the first one on ties; `nil` for `[]` |
+| `list.range` | `range(n)`, `range(from, to [, step]) → array` | `[0, ..., n-1]`; or `from` to `to` **inclusive**, like a numeric `for` (`range(1, 10, 3)` is `[1, 4, 7, 10]`) |
+| `list.unique` | `unique(a) → array` | Without repeats, first occurrences kept (by map key: `1` and `1.0` differ) |
+| `list.slice` | `slice(a, from [, to]) → array` | Elements `from` to `to - 1` (**`to` exclusive**, as in Python/JS; negative indexes count from the end; `to` defaults to the end) |
+| `list.concat` | `concat(a, b, ...) → array` | The elements of all |
+| `list.flatten` | `flatten(a) → array` | The elements of nested arrays, one level |
+| `list.reversed` | `reversed(a) → array` | A reversed copy (`sort.reverse` reverses in place) |
+| `list.copy` | `copy(a) → array` | A shallow copy |
+| `list.chunk` | `chunk(a, n) → array` | Arrays of `n` elements (the last may be shorter) |
+| `list.zip` | `zip(a, b, ...) → array` | `[[a[0], b[0]], [a[1], b[1]], ...]`, as long as the shortest |
+| `list.group_by` | `group_by(a, fn) → map` | `fn(v, i)` → the array of elements with that key |
+| `list.count_by` | `count_by(a, fn) → map` | `fn(v, i)` → how many elements have that key (like Python's `Counter`) |
+| `list.keys`, `list.values` | `keys(t) → array` | The keys / values of a table or map (sorted by key: numbers, then strings), a struct (its literal's order) or an array (indexes) |
+| `list.items` | `items(t) → array` | `[[key, value], ...]` in the same order |
+
+A panic or runtime error in a callback stops the function and goes on as
+any panic.
+
+---
+
 ## Module: `sort`
 
 Sorting and binary search. Works on arrays, `int_array` and `float_array`.
@@ -1740,7 +1789,7 @@ local http = require("./libs/http/http")
 
 Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
 `os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
-`json`, `csv`,
+`json`, `csv`, `list`,
 `sea/parser`, and the Sea modules `sea/test`, `sea/check`, `sea/stream` and `sea/flags`) are found
 first, then, in an executable made by `sea build`, the modules bundled in
 it. An absolute path (`require("/opt/sea/libs/yaml/yaml")`) names the file
