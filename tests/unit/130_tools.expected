@@ -245,3 +245,12 @@ HI SEA	X
 	
 0	
 1	true
+-- sea -e, sea -, sea <file without .sea>
+0	2:a	[1, 2]
+
+0	stdin	false
+
+0	tool	x
+
+1	-e:1:10: unexpected token ')' in expression
+

@@ -21,6 +21,9 @@ strings: escapes such as `\xFF` can still put any byte in one.
 sea                              # REPL
 sea file.sea [args...]           # run (args in os.args)
 sea run file.sea                 # the same
+sea ./tool [args...]             # any file name, e.g. a script starting with #!/usr/bin/env sea
+sea -e 'code' [args...]          # run code from the command line (like python -c)
+sea - [args...]                  # run code read from stdin (cat script.sea | sea -)
 sea compile file.sea -o out.seac # bytecode; run it with `sea out.seac`
 sea bytecode file.sea            # disassembly
 sea --jit file.sea               # with the JIT (bin/sea-jit)

@@ -57,6 +57,7 @@ pinned).
 ```sh
 make                              # build bin/sea
 bin/sea examples/nbody/nbody.sea  # run a program
+bin/sea -e 'print(`2^10 = ${2 ^ 10}`)'   # one-liner (also: sea - reads the program from stdin)
 bin/sea                           # interactive REPL
 
 bin/sea compile app.sea -o app.seac   # compile to bytecode …

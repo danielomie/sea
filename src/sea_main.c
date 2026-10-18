@@ -18,6 +18,7 @@
 #include "sea_prof.h"
 #include "sea_cover.h"
 #include <unistd.h>
+#include <sys/stat.h>
 
 #ifndef SEA_NO_READLINE
 #  ifdef __has_include
@@ -345,6 +346,9 @@ static void usage(void) {
         "Commands:\n"
         "  sea                          Start REPL\n"
         "  sea run <file.sea>           Execute source file\n"
+        "  sea <file> [args...]         The same (any name, e.g. a #! script)\n"
+        "  sea -e 'code' [args...]      Run code given on the command line\n"
+        "  sea - [args...]              Run code read from stdin\n"
         "  sea compile <file> [-o out]  Compile to bytecode\n"
         "  sea bytecode <file.sea>      Print disassembly\n"
         "  sea fmt [flags] [path...]    Format Sea source (sea fmt -h)\n"
@@ -408,6 +412,39 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(cmd, "version") == 0 || strcmp(cmd, "-v") == 0 || strcmp(cmd, "--version") == 0) {
         printf("sea version " SEA_VERSION "\n");
+        return 0;
+    }
+
+    /* sea -e 'code' [args...]: one-liners, like python -c */
+    if (strcmp(cmd, "-e") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "sea -e: expected code (sea -e 'print(1 + 1)')\n");
+            return 1;
+        }
+        g_script_argc = argc - 3;
+        g_script_argv = argv + 3;
+        cmd_run_ex("-e", argv[2]);
+        return 0;
+    }
+
+    /* sea - [args...]: the program from stdin (cat script.sea | sea -) */
+    if (strcmp(cmd, "-") == 0) {
+        size_t cap = 65536, len = 0;
+        char *src = (char*)malloc(cap);
+        size_t got;
+        while (src && (got = fread(src + len, 1, cap - len - 1, stdin)) > 0) {
+            len += got;
+            if (cap - len < 2) {
+                cap *= 2;
+                src = (char*)realloc(src, cap);
+            }
+        }
+        if (!src) return 1;
+        src[len] = '\0';
+        g_script_argc = argc - 2;
+        g_script_argv = argv + 2;
+        cmd_run_ex("<stdin>", src);
+        free(src);
         return 0;
     }
 
@@ -509,6 +546,16 @@ int main(int argc, char *argv[]) {
             g_script_argv = argv + 2;
             cmd_run(cmd);
             return 0;
+        }
+        // Any other existing file: a script named without .sea (#!/usr/bin/env sea)
+        if (cmd[0] != '-' && access(cmd, R_OK) == 0) {
+            struct stat st;
+            if (stat(cmd, &st) == 0 && S_ISREG(st.st_mode)) {
+                g_script_argc = argc - 2;
+                g_script_argv = argv + 2;
+                cmd_run(cmd);
+                return 0;
+            }
         }
     }
 

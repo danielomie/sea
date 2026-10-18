@@ -30,7 +30,8 @@ You can (and should) verify Sea code instead of guessing:
 sea check file.sea        # undefined names, unused variables, wrong arg counts, bad
                           # format strings, missing modules... without running
 sea fmt file.sea          # rewrite in the canonical layout (-d shows a diff, -l lists)
-sea file.sea args...      # run (also: sea run file.sea)
+sea file.sea args...      # run (also: sea run file.sea, or any file starting with #!/usr/bin/env sea)
+sea -e 'print(1 + 1)'     # a one-liner; `sea -` runs a program from stdin
 sea test                  # run the *_test.sea files (sea/test framework)
 sea doc file.sea          # the documentation in the comments
 ```
