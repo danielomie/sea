@@ -15,6 +15,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/random.h>
 
 // os.exit(code?)
 static SeaValue os_exit(SeaVM *vm, int argc, SeaValue *args) {
@@ -179,6 +182,81 @@ void sea_lib_os_set_args(SeaVM *vm, int argc, char **argv) {
     g_os_argv = argv;
 }
 
+/* ---- secure random bytes (getrandom, else /dev/urandom) ---- */
+
+static bool fill_random(unsigned char *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = getrandom(buf + got, n - got, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        got += (size_t)r;
+    }
+    if (got == n) return true;
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    while (got < n) {
+        ssize_t r = read(fd, buf + got, n - got);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            break;
+        }
+        got += (size_t)r;
+    }
+    close(fd);
+    return got == n;
+}
+
+/* os.urandom(n) → n random bytes from the system's cryptographic generator */
+static SeaValue os_urandom(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || !sea_is_int(args[0]) || sea_as_int(args[0]) < 0 || sea_as_int(args[0]) > (1 << 24))
+        sea_vm_error_noreturn(vm, "os.urandom: expected a number of bytes (0 to 16777216)");
+    size_t n = (size_t)sea_as_int(args[0]);
+    unsigned char *buf = (unsigned char*)sea_malloc(n ? n : 1);
+    if (!fill_random(buf, n)) {
+        sea_free(buf, n ? n : 1);
+        return sea_make_error_str(vm, "os.urandom: no random source");
+    }
+    SeaString *s = sea_string_new((const char*)buf, n);
+    sea_free(buf, n ? n : 1);
+    return sea_obj_val(&s->obj);
+}
+
+/* os.token([n]) → n random bytes (default 16) as lowercase hex: tokens, salts, ids */
+static SeaValue os_token(SeaVM *vm, int argc, SeaValue *args) {
+    int64_t n = 16;
+    if (argc >= 1) {
+        if (!sea_is_int(args[0]) || sea_as_int(args[0]) < 1 || sea_as_int(args[0]) > 4096)
+            sea_vm_error_noreturn(vm, "os.token: expected a number of bytes (1 to 4096)");
+        n = sea_as_int(args[0]);
+    }
+    unsigned char buf[4096];
+    if (!fill_random(buf, (size_t)n)) return sea_make_error_str(vm, "os.token: no random source");
+    char hex[8193];
+    static const char *const D = "0123456789abcdef";
+    for (int64_t i = 0; i < n; i++) {
+        hex[2 * i] = D[buf[i] >> 4];
+        hex[2 * i + 1] = D[buf[i] & 15];
+    }
+    hex[2 * n] = '\0';
+    return sea_obj_val(&sea_string_new(hex, (size_t)(2 * n))->obj);
+}
+
+/* os.uuid() → a random UUID (version 4): "1b4e28ba-2fa1-41d2-883f-0016d3cca427" */
+static SeaValue os_uuid(SeaVM *vm, int argc, SeaValue *args) {
+    (void)argc; (void)args;
+    unsigned char b[16];
+    if (!fill_random(b, sizeof b)) return sea_make_error_str(vm, "os.uuid: no random source");
+    b[6] = (unsigned char)((b[6] & 0x0F) | 0x40);   /* version 4 */
+    b[8] = (unsigned char)((b[8] & 0x3F) | 0x80);   /* RFC 4122 variant */
+    char s[37];
+    snprintf(s, sizeof s, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+    return sea_obj_val(&sea_string_new(s, 36)->obj);
+}
+
 void sea_lib_os_register(SeaVM *vm) {
     SeaTable *mod = sea_table_new(TABLE_MAP);
 
@@ -188,6 +266,9 @@ void sea_lib_os_register(SeaVM *vm) {
     mod_set(vm, mod, "readfile", os_readfile);
     mod_set(vm, mod, "filesize", os_filesize);
     mod_set(vm, mod, "glob",     os_glob);
+    mod_set(vm, mod, "urandom",  os_urandom);
+    mod_set(vm, mod, "token",    os_token);
+    mod_set(vm, mod, "uuid",     os_uuid);
 
     /* os.args: index 0 = nil, [1..n] = script arguments */
     SeaArray *arr = sea_array_new((uint32_t)(g_os_argc + 1));

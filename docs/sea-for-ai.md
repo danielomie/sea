@@ -539,7 +539,8 @@ parts isabs abs relative(base,target) sep`.
 
 **os**: `args` (array: `os.args[1]` is the first argument, `os.args[0]` is
 nil; count with `len(os.args) - 1`), `exit([code])`, `getenv(name)`,
-`exec(cmd) → {code, output}` (through the shell).
+`exec(cmd) → {code, output}` (through the shell), `urandom(n)` (secure
+random bytes), `token([n])` (secure random hex), `uuid()` (UUID v4).
 
 **process** (no shell when the command is an array):
 `run(cmd[,opts]) → {ok, code, stdout, stderr, timed_out}|error`,
@@ -735,5 +736,6 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | `d + timedelta(days=30)`, `t.AddDate(0, 1, 0)` | `t:add_date(0, 0, 30)`, `t:add_date(0, 1, 0)` |
 | `sleep(0.1)` (seconds) | `time.sleep(100 * time.Millisecond)` (nanoseconds) |
 | `os.exit(1)`, `sys.exit(1)` | `os.exit(1)` |
+| `uuid.uuid4()`, `secrets.token_hex(16)`, `os.urandom(n)` | `os.uuid()`, `os.token(16)`, `os.urandom(n)` |
 | `io.read("*l")` | `io.read("l")` |
 | `import json`, `import csv` | nothing: `json` and `csv` are built in (`json.decode(s)`) |

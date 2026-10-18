@@ -45,13 +45,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- ---- passwords ----
 
--- users.random_hex(n) → 2n hex digits from n bytes of /dev/urandom
+-- users.random_hex(n) → 2n hex digits from n random bytes (the system's secure generator)
 function M.random_hex(n)
-    local f = io.open("/dev/urandom", "rb")
-    if f == nil then return error("users: cannot open /dev/urandom") end
-    local bytes = io.read_bytes(f, n)
-    io.close(f)
-    return encoding.hex_encode(bytes)
+    return os.token(n)
 end
 
 local function pbkdf2(password, salt, iterations)
