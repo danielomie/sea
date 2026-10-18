@@ -6,6 +6,7 @@
 #include <errno.h>
 #include "sea_bigint.h"
 #include "sea_stdlib.h"
+#include "sea_show.h"
 #include "sea_string.h"
 #include "sea_rope.h"
 #include "sea_array.h"
@@ -58,10 +59,24 @@ static SeaValue fn_print(SeaVM *vm, int argc, SeaValue *args) {
     for (int i = 0; i < argc; i++) {
         if (i > 0) putchar('\t');
         SeaString *s = sea_vm_tostring(vm, args[i]);
-        fputs(s->data, stdout);
+        fwrite(s->data, 1, s->len, stdout);
         sea_obj_release(&s->obj);
     }
     putchar('\n');
+    fflush(stdout);
+    return SEA_NIL_VAL;
+}
+
+// dump(...): each value on its own, containers indented when they don't fit
+// in 80 columns, strings quoted
+static SeaValue fn_dump(SeaVM *vm, int argc, SeaValue *args) {
+    for (int i = 0; i < argc; i++) {
+        SeaString *s = sea_dump(vm, args[i]);
+        fwrite(s->data, 1, s->len, stdout);
+        putchar('\n');
+        sea_obj_release(&s->obj);
+    }
+    if (argc == 0) puts("nil");
     fflush(stdout);
     return SEA_NIL_VAL;
 }
@@ -548,6 +563,7 @@ void sea_lib_core_register(SeaVM *vm) {
     sea_vm_register_native(vm, "printf",   fn_printf);
     sea_vm_register_native(vm, "type",     fn_type);
     sea_vm_register_native(vm, "tostring", fn_tostring);
+    sea_vm_register_native(vm, "dump", fn_dump);
     sea_vm_register_native(vm, "tonumber", fn_tonumber);
     sea_vm_register_native(vm, "error",    fn_error);
     sea_vm_register_native(vm, "is_error", fn_is_error);

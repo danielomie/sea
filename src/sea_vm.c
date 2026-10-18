@@ -4,6 +4,7 @@
  */
 
 #include "sea_vm.h"
+#include "sea_show.h"
 #include "sea_bigint.h"
 #include "sea_chunk.h"
 #include "sea_string.h"
@@ -448,21 +449,10 @@ SeaString* sea_vm_tostring(SeaVM *vm, SeaValue v) {
     if (sea_is_obj(v)) {
         SeaObject *obj = sea_as_obj(v);
         switch (obj->type) {
-            case OBJ_ARRAY: {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "array(%u)", ((SeaArray*)obj)->len);
-                return sea_string_from_cstr(buf);
-            }
-            case OBJ_TABLE: {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "table(%u)", ((SeaTable*)obj)->count);
-                return sea_string_from_cstr(buf);
-            }
-            case OBJ_MAP: {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "map(%u)", ((SeaMap*)obj)->count);
-                return sea_string_from_cstr(buf);
-            }
+            case OBJ_ARRAY: case OBJ_TABLE: case OBJ_MAP: case OBJ_STRUCT:
+            case OBJ_INT_ARRAY: case OBJ_FLOAT_ARRAY:
+                /* the contents: [1, "a"], {k = 1} (src/sea_show.c) */
+                return sea_show(vm, v, SEA_SHOW_DEPTH);
             case OBJ_CLOSURE:
             case OBJ_FUNCTION: {
                 const char *name = obj->type == OBJ_CLOSURE ?
@@ -487,7 +477,7 @@ SeaString* sea_vm_tostring(SeaVM *vm, SeaValue v) {
                 return sea_bigint_to_string((SeaBigInt*)obj, 10);
             default: {
                 char buf[64];
-                snprintf(buf, sizeof(buf), "object(0x%p)", (void*)obj);
+                snprintf(buf, sizeof(buf), "object(%p)", (void*)obj);
                 return sea_string_from_cstr(buf);
             }
         }

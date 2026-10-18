@@ -1,0 +1,31 @@
+[]	{}	[=]	[1, "two", 3.5, true, nil]
+{name = "ana", age = 31}	{"a", "b"}
+{[3] = "x", alpha = [1, 2], ["end"] = 0, ["with space"] = true, zeta = 1}
+[=42 = "answer", "k" = 1]
+[ [ [1, 2], [3] ], [=] ]
+[ [ [ [ [...] ] ] ] ]
+{self = <cycle>}
+9, 100, ... (50 more)]
+int_array[1, 2]	float_array[0.5]	x[1]	error(e)
+["quote \" back \\ nl \n tab \t"]
+{a = [1, {b = 2}]}
+{
+    name = "ana",
+    tags = ["admin", "dev"],
+    address = {city = "Recife", zip = "50000"},
+    history = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25,
+    ],
+}
+"text"
+1
+[1, 2]
+nil
+[
+    [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ],
+    [=42 = "answer", "k" = 1],
+]

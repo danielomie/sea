@@ -246,6 +246,8 @@ local cfg = {}
 cfg.servers = [{host = "a.example", port = 80}, {host = "b.example", port = 8080}]
 local grid = [ [1, 2], [3, 4] ]       -- a space after "[": "[[" starts a long string
 print(cfg.servers[1].port, grid[1][0])   -- → 8080  3
+print(grid, {k = "v"})                -- → [ [1, 2], [3, 4] ]  {k = "v"}
+-- print shows contents; dump(v) prints big structures indented
 
 -- sorting
 local words = string.split("pear apple fig", " ")
@@ -484,7 +486,8 @@ print(geometry.area(3, 4))
 Signatures, one per line. `[x]` is optional; `→ v|error` returns an error
 value on failure.
 
-**Globals**: `print(...)`, `printf(fmt, ...)` (no newline),
+**Globals**: `print(...)` (containers print their contents: `[1, 2]`,
+`{k = 1}`), `dump(v)` (indented, for inspecting data), `printf(fmt, ...)` (no newline),
 `type(v)`, `tostring(v)`, `tonumber(s) → n|nil`, `len(v)`,
 `error(msg)`, `is_error(v)`, `assert(v [, msg])`, `require(path)`,
 `chan([cap])`, `close(ch)`, `panic(v)`, `recover()`, `int_array([cap])`,

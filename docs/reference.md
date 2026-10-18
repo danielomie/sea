@@ -622,10 +622,11 @@ a number (by value: `bigint.new(5) == 5`).
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `print` | `print(...)` | Print values separated by tabs, followed by newline |
+| `print` | `print(...)` | Print values separated by tabs, followed by newline (as `tostring` shows them) |
+| `dump` | `dump(...)` | Print each value on its own line for inspection: strings quoted, containers indented over several lines when they don't fit in 80 columns |
 | `printf` | `printf(fmt, ...)` | Format and print to stdout using `string.format` specifiers (`%d`, `%s`, `%f`, `%x`, etc.); no implicit newline |
 | `type` | `type(v) → string` | Return the type name of `v`: `"nil"`, `"bool"`, `"int"`, `"number"`, `"string"`, `"array"`, `"table"`, `"map"`, `"struct"`, `"function"`, `"channel"`, `"int_array"`, `"float_array"`, `"bigint"` |
-| `tostring` | `tostring(v) → string` | Convert any value to its string representation |
+| `tostring` | `tostring(v) → string` | Convert any value to its string representation. Containers show their contents on one line: `[1, "two"]`, `{name = "ana", n = 1}` (keys sorted; a struct in its literal's order), `{"a", "b"}`, `[="k" = 1]` (map), `int_array[1, 2]`; at most 100 items per container (`... (N more)`), 4 levels deep (`[...]`), `<cycle>` for a container inside itself |
 | `tonumber` | `tonumber(v) → int\|number\|nil` | Parse a string to a number (an int when it fits Sea's 48-bit range, else a number); a bigint becomes a number; `nil` on failure |
 | `len` | `len(v) → int` | Length of string, array, table, map, struct, int_array, or float_array |
 | `error` | `error(msg) → error` | Create an error value |
