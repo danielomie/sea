@@ -10,3 +10,4 @@ true
 [1, 2, nil]	[1, 2, 3]	[nil, nil, nil]
 ["x", "y", "z"]
 abcd	abc
+nil	b	nil	b	3	nil	b

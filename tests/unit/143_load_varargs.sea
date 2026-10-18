@@ -42,3 +42,17 @@ local function cat(...)
     return p .. q
 end
 print(cat(s, "d"), s)
+
+-- several results from a method call
+local T = {}
+function T.f(self, x)
+    if x then return nil, "b", 3 end
+    return "a", nil
+end
+local o = {}
+for k, v in T do o[k] = v end
+local a1, b1 = o:f(true)
+local p1, q1, r1 = o:f(true)
+local x1, y1
+x1, y1 = o:f(true)
+print(a1, b1, p1, q1, r1, x1, y1)

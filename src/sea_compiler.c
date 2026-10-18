@@ -453,8 +453,21 @@ static void patch_jmp(SeaCompiler *c, int pos) {
 
 /* Patch the B (nret) field of the most recently emitted CALL or CALL_MULTI instruction.
  * Used when the caller knows how many return values to expect. */
-static bool patch_last_call_nret(SeaCompiler *c, int nret) {
+static bool patch_last_call_nret(SeaCompiler *c, int nret, int line) {
     int pos = c->chunk->code_len - 1;
+    /* a method call: CALL at base, then MOVE dst <- base (the results land
+     * one register above dst): ask for nret results and move each down */
+    if (pos > 0 && SEA_INSTR_OP(c->chunk->code[pos]) == OP_MOVE &&
+        SEA_INSTR_OP(c->chunk->code[pos - 1]) == OP_CALL &&
+        SEA_INSTR_A(c->chunk->code[pos - 1]) == SEA_INSTR_B(c->chunk->code[pos])) {
+        uint32_t call = c->chunk->code[pos - 1];
+        int mdst = SEA_INSTR_A(c->chunk->code[pos]), msrc = SEA_INSTR_B(c->chunk->code[pos]);
+        if (msrc == mdst + 1) {
+            c->chunk->code[pos - 1] = (call & 0xFF00FFFF) | ((uint32_t)(nret & 0xFF) << 16);
+            for (int k = 1; k < nret; k++) emit_abc(c, OP_MOVE, mdst + k, msrc + k, 0, line);
+            return true;
+        }
+    }
     while (pos >= 0) {
         SeaOpcode op = SEA_INSTR_OP(c->chunk->code[pos]);
         if (op == OP_CALL || op == OP_CALL_MULTI || op == OP_CALL_SELF) {
@@ -2679,7 +2692,7 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
                         own_temp(c, reg, line);          /* the local will own it */
                         /* If this is the last expression and it's a call, patch nret */
                         if (is_last_expr && last_is_call && need_from_last > 1) {
-                            bool patched = patch_last_call_nret(c, need_from_last);
+                            bool patched = patch_last_call_nret(c, need_from_last, line);
                             for (int k = i + 1; k < node->local.count; k++)
                                 alloc_reg(c);
                             /* the extra results are owned too (or nil) */
@@ -2843,7 +2856,7 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
                     val_regs[i] = (rl >= 0) ? rl : compile_expr(c, node->assign.exprs[i], -1);
                     if (is_last_expr && an_last_is_call && an_need_from_last > 1) {
                         /* Call occupies val_regs[i..i+need-1] consecutively */
-                        bool patched = patch_last_call_nret(c, an_need_from_last);
+                        bool patched = patch_last_call_nret(c, an_need_from_last, line);
                         /* The extra returns are at val_regs[i]+1, +2, ... */
                         for (int k = 1; k < an_need_from_last && (i + k) < node->assign.count; k++) {
                             val_regs[i + k] = alloc_reg(c);
