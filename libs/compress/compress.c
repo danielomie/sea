@@ -17,6 +17,9 @@
  * opts: level (0-9, default 6), format ("zlib", "raw", "gzip"; inflate also
  * "auto": gzip or zlib by the header), max (largest output in bytes, default
  * 1 GiB: a guard against decompression bombs).
+ *
+ * ZIP and tar archives (zip_write, zip_list, zip_read, zip_extract and the
+ * tar_* ones) are in archive.c.
  */
 
 #include "sea.h"
@@ -323,6 +326,8 @@ static SeaValue fn_version(SeaVM *vm, int argc, SeaValue *args) {
     return sea_obj_val(&sea_string_new(v, strlen(v))->obj);
 }
 
+void compress_archive_register(SeaTable *mod);   /* archive.c */
+
 SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     (void)vm;
     SeaTable *mod = sea_mod_new();
@@ -333,5 +338,6 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     sea_mod_set(mod, "gzip_file",   fn_gzip_file);
     sea_mod_set(mod, "gunzip_file", fn_gunzip_file);
     sea_mod_set(mod, "version",     fn_version);
+    compress_archive_register(mod);
     return sea_obj_val(&mod->obj);
 }

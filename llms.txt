@@ -15,7 +15,7 @@ Check code with `sea check file.sea` and format it with `sea fmt file.sea`.
 
 - [Sea for AI assistants](docs/sea-for-ai.md): the rules models get wrong, the syntax, verified examples, the standard library and translation tables, in one file
 - [Language reference](docs/reference.md): syntax, operators, built-ins, standard library, command line tools
-- [External libraries](docs/libs.md): json, yaml, toml, csv, xml, http, ssl, websocket, jwt, sqlite, duckdb, flags, test, template, tensor, console, compress
+- [External libraries](docs/libs.md): json, yaml, toml, csv, xml, http, ssl, websocket, jwt, sqlite, duckdb, flags, log, test, template, tensor, console, compress (gzip, zip, tar)
 - [A tour of Sea](docs/tour.md): example-driven introduction
 
 ## Examples

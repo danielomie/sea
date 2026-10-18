@@ -367,7 +367,7 @@ end, {header = true, numbers = true})?
 
 ## `compress`
 
-gzip, zlib and raw DEFLATE, on the system's zlib. Build: `make -C
+gzip, zlib and raw DEFLATE, and ZIP and tar archives, on the system's zlib. Build: `make -C
 libs/compress` (needs zlib's headers: `zlib1g-dev` on Debian/Ubuntu).
 
 ```sea
@@ -396,6 +396,39 @@ a guard against decompression bombs). Damaged data is an error value with
 zlib's reason (`incorrect header check`, `invalid distance too far back`) or
 `truncated compressed data`. CRC-32 and Adler-32 checksums are in the
 built-in `hash` module.
+
+### Archives: ZIP and tar
+
+```sea
+compress.zip_write("site.zip", ["public", {name = "VERSION", data = "1.4\n"}])?
+for _, e in compress.zip_list("site.zip")? do print(e.name, e.size, e.compressed) end
+local index = compress.zip_read("site.zip", "public/index.html")?
+compress.zip_extract("site.zip", "/tmp/site")?
+
+compress.tar_write("backup.tar.gz", ["etc", "notes.txt"], {base = os.getenv("HOME")})?   -- gzip: by the name
+compress.tar_extract("backup.tar.gz", "restore", {names = ["notes.txt"]})?
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `compress.zip_write`, `compress.tar_write` | `(dst, entries [, opts]) → int\|error` | Write an archive; the number of entries. A `.gz` / `.tgz` name (or `opts.gzip`) makes a gzipped tar |
+| `compress.zip_list`, `compress.tar_list` | `(src) → array\|error` | The members: `{name, type, size, mode, mtime}` (`type`: `"file"`, `"dir"`, `"symlink"`, `"link"`, `"other"`; a link has `link`; ZIP adds `compressed`) |
+| `compress.zip_read`, `compress.tar_read` | `(src, name [, opts]) → string\|error` | One file's contents |
+| `compress.zip_extract`, `compress.tar_extract` | `(src, dir [, opts]) → array\|error` | Extract files and directories under `dir` (created as needed), with their modes and times; the names extracted. `opts.names`: only these |
+
+**Entries** (writing): an array of paths, where a directory adds every file
+under it (in name order, empty directories kept), and of tables `{name =
+"in/archive.txt", data = "..."}` or `{name = ..., path = "on/disk"}`; a
+single path works too. Names in the archive are the paths as given
+(`{base = dir}`: read relative to `dir`). **Options:** `base`, `level`
+(0-9), `mtime` (one time for every entry, for reproducible archives), `max`
+(largest member read, default 1 GiB), `names` (extract).
+
+Reading takes ZIPs from any tool (stored or deflated) and tar archives in
+ustar, PAX and GNU formats (long names, gzipped or not). Archives are read
+whole into memory. Extraction refuses an archive with an absolute name or a
+`..` part before writing anything, and skips links. Not supported: ZIP64
+(archives over 4 GB or 65535 entries) and encrypted ZIPs.
 
 ---
 

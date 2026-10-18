@@ -10,8 +10,8 @@ SEA_SRC = ../../src
 
 all: compress.so
 
-compress.so: compress.c $(wildcard ../../src/*.h)
-	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ $< -lz
+compress.so: compress.c archive.c $(wildcard ../../src/*.h)
+	$(CC) $(CFLAGS) -I$(SEA_SRC) -o $@ compress.c archive.c -lz
 
 clean:
 	rm -f compress.so

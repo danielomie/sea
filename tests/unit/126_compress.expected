@@ -24,3 +24,30 @@ true
 error(compress.gunzip_file: output larger than the limit (opts.max))
 compress.gzip_file: <tmp>/missing: No such file or directory
 error(compress.gunzip_file: incorrect header check)
+-- zip and tar archives
+zip	6
+src/a.txt:file:6 src/empty:dir:0 src/sub/deep/nums.txt:file:55000 notes/x.md:file:5 dddddddddddddddddddddddddddddddddddddddd copy.txt:file:6
+# hi
+	long	55000	1700000000
+6	hello
+	long	true
+["copy.txt"]
+tar	6
+src/a.txt:file:6 src/empty:dir:0 src/sub/deep/nums.txt:file:55000 notes/x.md:file:5 dddddddddddddddddddddddddddddddddddddddd copy.txt:file:6
+# hi
+	long	55000	1700000000
+6	hello
+	long	true
+["copy.txt"]
+tgz	6
+src/a.txt:file:6 src/empty:dir:0 src/sub/deep/nums.txt:file:55000 notes/x.md:file:5 dddddddddddddddddddddddddddddddddddddddd copy.txt:file:6
+# hi
+	long	55000	1700000000
+6	hello
+	long	true
+["copy.txt"]
+31	PK
+compress.zip_read: 'nope' is not in <tmp>/out.zip
+compress.zip_list: not a ZIP archive	compress.tar_list: not a tar archive
+compress.zip_write: entry 0: the name is empty or has ".."
+compress.tar_write: <tmp>/no/such/file: No such file or directory

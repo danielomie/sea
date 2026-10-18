@@ -643,7 +643,7 @@ need a build first: `make -C libs/<name>`. `json` and `csv` are built in.
 | `flags` | built in: `require("sea/flags")` | Command-line flags: `flags.string/int/number/bool/list(name, default, usage, {alias, choices})`, then `local files = flags.parse()`; `.value` holds each result |
 | `template` | `libs/template/template` | Text templates |
 | `console` | `libs/console/console` | Terminal colors, prompts, spinners |
-| `compress` | `libs/compress/compress` | gzip / zlib |
+| `compress` | `libs/compress/compress` | gzip / zlib, ZIP and tar archives (`zip_write`, `tar_extract`, ...) |
 | `tensor` | `libs/tensor/tensor` | Numeric arrays and linear algebra |
 | `test` | built in: `require("sea/test")` | The test framework (below) |
 

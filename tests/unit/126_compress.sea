@@ -46,3 +46,35 @@ print(compress.gunzip_file(dir .. "/data.txt.gz", dir .. "/limited", {max = 100}
 print(string.replace(compress.gzip_file(dir .. "/missing", dir .. "/x.gz").message, dir, "<tmp>"))
 print(compress.gunzip_file(src, dir .. "/y"))
 fs.remove(dir, {recursive = true})
+
+print("-- zip and tar archives")
+local dir = fs.tempdir("arch-")
+local src = path.join(dir, "src")
+fs.mkdir(path.join(src, "sub", "deep"), {parents = true})?
+fs.mkdir(path.join(src, "empty"))?
+fs.write(path.join(src, "a.txt"), "hello\n")?
+fs.write(path.join(src, "sub", "deep", "nums.txt"), string.rep("1234567890\n", 5000))?
+local long = string.rep("d", 120) .. "/" .. string.rep("f", 120) .. ".txt"
+local entries = ["src", {name = "notes/x.md", data = "# hi\n"}, {name = long, data = "long"}, {name = "copy.txt", path = "src/a.txt"}]
+for _, kind in ["zip", "tar", "tgz"] do
+    local file = path.join(dir, "out." .. (kind == "tgz" and "tar.gz" or kind))
+    local w = kind == "zip" and compress.zip_write or compress.tar_write
+    local l = kind == "zip" and compress.zip_list or compress.tar_list
+    local r = kind == "zip" and compress.zip_read or compress.tar_read
+    local x = kind == "zip" and compress.zip_extract or compress.tar_extract
+    print(kind, w(file, entries, {base = dir, mtime = 1700000000}))
+    local names = list.map(l(file)?, function(e) return `${e.name}:${e.type}:${e.size}` end)
+    print(string.join(list.map(names, function(n) return string.sub(n, 1, 40) end), " "))
+    print(r(file, "notes/x.md")?, r(file, long)?, len(r(file, "src/sub/deep/nums.txt")?), l(file)?[0].mtime)
+    local out = path.join(dir, "x_" .. kind)
+    print(len(x(file, out)?), fs.read(path.join(out, "src", "a.txt"))?, fs.read(path.join(out, long))?,
+          fs.isdir(path.join(out, "src", "empty")))
+    print(x(file, path.join(dir, "only_" .. kind), {names = ["copy.txt"]})?)
+end
+print(string.byte(fs.read(path.join(dir, "out.tar.gz"))?, 1), string.sub(fs.read(path.join(dir, "out.zip"))?, 1, 2))
+local function msg(e) return string.replace(e.message, dir, "<tmp>") end
+print(msg(compress.zip_read(path.join(dir, "out.zip"), "nope")))
+print(msg(compress.zip_list(path.join(dir, "src", "a.txt"))), msg(compress.tar_list(path.join(dir, "src", "a.txt"))))
+print(msg(compress.zip_write(path.join(dir, "bad.zip"), [{name = "../x", data = "x"}])))
+print(msg(compress.tar_write(path.join(dir, "bad.tar"), ["no/such/file"], {base = dir})))
+fs.remove(dir, {recursive = true})
