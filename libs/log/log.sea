@@ -1,0 +1,192 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- log — leveled, structured logging, in the style of Go's log/slog
+--
+--   local log = require("sea/log")
+--
+--   log.info("listening", {port = 8080})
+--   -- 2026-10-18 14:30:05 INFO  listening port=8080
+--   log.warn("slow request", {path = "/api/items", ms = 812})
+--   log.error("cannot open db", {err = err})       -- an error value shows its message
+--   log.debug("cache miss", {key = k})             -- hidden below the "debug" level
+--
+--   log.set_level("debug")       -- "debug", "info" (default), "warn", "error", "off"
+--   log.set_format("json")       -- one JSON object per line:
+--   -- {"time":"2026-10-18T14:30:05.120-03:00","level":"info","msg":"listening","port":8080}
+--   log.set_output("app.log")    -- a path (appended), "stderr" (default), "stdout",
+--                                -- a file handle from io.open, or function(line)
+--
+-- log.new(opts) makes a logger of its own; opts: level, format ("text" or
+-- "json"), output, fields (added to every line), time (false: no time
+-- stamp, as under systemd or in tests). logger:with(fields) makes a child
+-- that adds fields and shares everything else:
+--
+--   local l = log.new({format = "json", fields = {service = "api"}})
+--   local rl = l:with({request = id})
+--   rl:info("done", {status = 200})
+--
+-- Fields come out in the order of their literal ({b = 1, a = 2}: b then a;
+-- a map: in key order), the logger's before the call's. In text
+-- format a value whose text has spaces, quotes or "=" is quoted. log.fatal
+-- logs at the error level and exits with status 1.
+
+local M = {}
+
+local LEVELS = {debug = 0, info = 1, warn = 2, error = 3, off = 4}
+local NAMES = ["DEBUG", "INFO ", "WARN ", "ERROR"]
+local JSON_NAMES = ["debug", "info", "warn", "error"]
+
+local function level_of(name)
+    local n = LEVELS[name]
+    if n == nil then panic(`log: unknown level '${name}' (use debug, info, warn, error, off)`) end
+    return n
+end
+
+local function writer_of(out)
+    if out == nil or out == "stderr" then
+        return function(line) io.write_err(line, "\n") end
+    end
+    if out == "stdout" then
+        return function(line) io.write(line, "\n") end
+    end
+    if type(out) == "function" then return out end
+    local h = out
+    if type(out) == "string" then
+        h = io.open(out, "a")
+        if h == nil then panic(`log: cannot open '${out}'`) end
+    elseif type(out) ~= "int" then
+        panic(`log: the output must be a path, "stderr", "stdout", a file handle or a function, got ${type(out)}`)
+    end
+    return function(line)
+        io.write_line(h, line)
+        io.flush(h)
+    end
+end
+
+-- a field value in text format
+local function text_value(v)
+    if type(v) == "error" then v = v.message end
+    if type(v) ~= "string" then v = tostring(v) end
+    if v == "" or string.contains(v, " ") or string.contains(v, "\"") or string.contains(v, "=") or
+        string.contains(v, "\n") or string.contains(v, "\t") then
+        return json.encode(v)
+    end
+    return v
+end
+
+-- a field value for JSON: errors as their message, the rest as they are
+-- (json.encode refuses functions and channels: those become text)
+local function json_value(v)
+    local t = type(v)
+    if t == "error" then return v.message end
+    if t == "function" or t == "channel" then return tostring(v) end
+    return v
+end
+
+local function field_names(fields)
+    if fields == nil then return [] end
+    return list.keys(fields)
+end
+
+local Logger = {}
+
+-- logger:log(level, msg [, fields]): what info, warn, ... call
+function Logger.log(self, level, msg, fields)
+    local n = level_of(level)
+    if n < self.state.level or n >= 4 then return end
+    local st = self.state
+    if st.format == "json" then
+        -- the time, level and message first, then the fields in key order
+        local parts = []
+        if st.time then parts[] = `"time":${json.encode(time.now():format("2006-01-02T15:04:05.000Z07:00"))}` end
+        parts[] = `"level":"${JSON_NAMES[n]}"`
+        parts[] = `"msg":${json.encode(tostring(msg))}`
+        for _, fs in [self.fields, fields] do
+            for _, k in field_names(fs) do
+                parts[] = `${json.encode(tostring(k))}:${json.encode(json_value(fs[k]))}`
+            end
+        end
+        st.write("{" .. string.join(parts, ",") .. "}")
+        return
+    end
+    local line = NAMES[n] .. " " .. tostring(msg)
+    if st.time then line = time.now():format("2006-01-02 15:04:05") .. " " .. line end
+    for _, fs in [self.fields, fields] do
+        for _, k in field_names(fs) do
+            line ..= ` ${k}=${text_value(fs[k])}`
+        end
+    end
+    st.write(line)
+end
+
+function Logger.debug(self, msg, fields) self:log("debug", msg, fields) end
+function Logger.info(self, msg, fields) self:log("info", msg, fields) end
+function Logger.warn(self, msg, fields) self:log("warn", msg, fields) end
+function Logger.error(self, msg, fields) self:log("error", msg, fields) end
+
+function Logger.fatal(self, msg, fields)
+    self:log("error", msg, fields)
+    os.exit(1)
+end
+
+-- whether a level is shown (to skip building costly fields)
+function Logger.enabled(self, level)
+    return level_of(level) >= self.state.level and level_of(level) < 4
+end
+
+function Logger.set_level(self, level) self.state.level = level_of(level) end
+
+function Logger.set_format(self, format)
+    if format ~= "text" and format ~= "json" then panic(`log: unknown format '${format}' (use text or json)`) end
+    self.state.format = format
+end
+
+function Logger.set_output(self, out) self.state.write = writer_of(out) end
+
+-- a logger that adds fields to every line, sharing level, format and output
+function Logger.with(self, fields)
+    local merged = [=]
+    for _, fs in [self.fields, fields] do
+        for _, k in field_names(fs) do merged[k] = fs[k] end
+    end
+    return M._make(self.state, merged)
+end
+
+function M._make(state, fields)
+    local l = {}
+    l.state = state
+    l.fields = fields
+    for k, f in Logger do l[k] = f end
+    return l
+end
+
+function M.new(opts)
+    opts = opts or {}
+    local state = {}
+    state.level = level_of(opts.level or "info")
+    state.format = "text"
+    state.time = opts.time ~= false
+    state.write = writer_of(opts.output)
+    local l = M._make(state, opts.fields)
+    if opts.format ~= nil then l:set_format(opts.format) end
+    return l
+end
+
+-- the default logger, behind the module functions
+local std = M.new()
+M.logger = std
+
+function M.debug(msg, fields) std:log("debug", msg, fields) end
+function M.info(msg, fields) std:log("info", msg, fields) end
+function M.warn(msg, fields) std:log("warn", msg, fields) end
+function M.error(msg, fields) std:log("error", msg, fields) end
+function M.fatal(msg, fields) std:fatal(msg, fields) end
+function M.enabled(level) return std:enabled(level) end
+function M.set_level(level) std:set_level(level) end
+function M.set_format(format) std:set_format(format) end
+function M.set_output(out) std:set_output(out) end
+function M.set_time(on) std.state.time = on end
+function M.with(fields) return std:with(fields) end
+
+return M

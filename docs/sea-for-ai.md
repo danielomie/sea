@@ -484,8 +484,8 @@ print(geometry.area(3, 4))
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
   sort list bigint json csv`. `require("sea/parser")`, `require("sea/test")`,
-  `require("sea/check")`, `require("sea/stream")` and `require("sea/flags")`
-  are built in too.
+  `require("sea/check")`, `require("sea/stream")`, `require("sea/flags")`
+  and `require("sea/log")` are built in too.
 - Doc comments: a comment block at the top of the file documents the
   module; `--` lines right above a function document it, by convention
   starting with the signature (`-- name(args) → result`). `sea doc` reads
@@ -603,6 +603,13 @@ field name, or fields `["-total", "name"]`; a key function may return an array
 **bigint**: `new(v[,base])`, `add sub mul div mod pow neg abs cmp
 tostring(a[,base]) toint tonumber`. Comparisons, `==`, `..`, `tostring`
 and `print` accept bigints; `+ - *` do not.
+
+**sea/log** (`local log = require("sea/log")`; leveled logging like Go's
+slog, to stderr): `log.info(msg[,fields])`, `log.debug`, `log.warn`,
+`log.error`, `log.fatal` (exits 1) → `2026-10-18 14:30:05 INFO  listening
+port=8080`; `log.set_level("debug")`, `log.set_format("json")`,
+`log.set_output(path|"stdout"|handle|fn)`; `log.new({level, format, output,
+fields, time = false})` → `l:info(...)`, `l:with(fields)` (a child logger).
 
 **sea/stream** (`local stream = require("sea/stream")`; buffered I/O like
 Go's bufio, over sockets, processes, files, stdin, strings):

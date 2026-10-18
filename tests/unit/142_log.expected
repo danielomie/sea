@@ -1,0 +1,19 @@
+INFO  listening port=8080 host=0.0.0.0
+DEBUG shown key="a b" q="say \"hi\"" e=boom list="[1, 2]" empty=""
+WARN  careful
+ERROR failed code=3
+{"level":"info","msg":"done","request":42,"service":"api","status":200,"err":"x","f":"function(print)","ratio":0.5,"ok":true}
+info	done	api	42	200	x
+false	true	[="request" = 42, "service" = "api"]
+true
+true
+INFO  one
+INFO  two n=2
+
+1	INFO  to stdout
+ERROR bye
+	WARN  to stderr a=1
+
+true
+true
+true

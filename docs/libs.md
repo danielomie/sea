@@ -22,6 +22,7 @@ pure-Sea libraries work out of the box.
 | `flags` | built in: `require("sea/flags")` (`libs/flags/flags.sea`) | pure Sea | — |
 | `test` | `libs/test/test` | pure Sea | — |
 | `stream` | built in: `require("sea/stream")` (`libs/stream/stream.sea`) | pure Sea | — |
+| `log` | built in: `require("sea/log")` (`libs/log/log.sea`) | pure Sea | — |
 | `template` | `libs/template/template` | pure Sea | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
@@ -1363,6 +1364,47 @@ local sc = stream.scanner(stream.string("a,b,c"), {split = commas})
 ```
 
 ---
+
+## `log`
+
+Leveled, structured logging in the style of Go's `log/slog`. Pure Sea, built
+into the `sea` binary as `require("sea/log")` (`libs/log/log.sea`). Lines go
+to stderr by default.
+
+```sea
+local log = require("sea/log")
+
+log.info("listening", {port = 8080})
+-- 2026-10-18 14:30:05 INFO  listening port=8080
+log.error("cannot open db", {path = p, err = err})   -- an error value shows its message
+log.set_level("debug")
+log.set_format("json")
+log.info("listening", {port = 8080})
+-- {"time":"2026-10-18T14:30:05.120-03:00","level":"info","msg":"listening","port":8080}
+
+local l = log.new({format = "json", output = "app.log", fields = {service = "api"}})
+local rl = l:with({request = id})    -- adds fields, shares level, format and output
+rl:info("done", {status = 200})
+```
+
+| Function | Description |
+|----------|-------------|
+| `log.debug/info/warn/error(msg [, fields])` | Log at that level with the default logger. `fields`: a table, struct or map (`{port = 8080}`) |
+| `log.fatal(msg [, fields])` | Log at the error level, then `os.exit(1)` |
+| `log.set_level(level)` | `"debug"`, `"info"` (default), `"warn"`, `"error"` or `"off"`: lines below it are dropped |
+| `log.set_format(format)` | `"text"` (default) or `"json"` (one object per line: `time`, `level`, `msg`, then the fields) |
+| `log.set_output(out)` | A path (opened for appending), `"stderr"` (default), `"stdout"`, a handle from `io.open`, or `function(line)` |
+| `log.set_time(on)` | `false`: no time stamp (under systemd or in tests) |
+| `log.enabled(level) → bool` | Whether a level is shown (to skip building costly fields) |
+| `log.with(fields) → logger` | A logger adding `fields` to every line |
+| `log.new(opts) → logger` | A logger of its own; `opts`: `level`, `format`, `output`, `fields`, `time` |
+| `log.logger` | The default logger |
+
+A logger has the same functions as methods: `l:info(msg, fields)`,
+`l:set_level("debug")`, `l:with(fields)`, `l:enabled("debug")`, and
+`l:log(level, msg, fields)`. Fields come out in the order of their literal
+(a map's in key order), the logger's before the call's. In text format, a
+value whose text has spaces, quotes or `=` is quoted (`key="a b"`).
 
 ## `template`
 

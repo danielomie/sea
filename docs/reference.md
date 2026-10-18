@@ -1844,7 +1844,7 @@ local http = require("./libs/http/http")
 Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
 `os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
 `json`, `csv`, `list`,
-`sea/parser`, and the Sea modules `sea/test`, `sea/check`, `sea/stream` and `sea/flags`) are found
+`sea/parser`, and the Sea modules `sea/test`, `sea/check`, `sea/stream`, `sea/flags` and `sea/log`) are found
 first, then, in an executable made by `sea build`, the modules bundled in
 it. An absolute path (`require("/opt/sea/libs/yaml/yaml")`) names the file
 itself, tried as `.sea`, `/init.sea`, then `.so`. Otherwise the search order

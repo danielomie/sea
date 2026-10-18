@@ -1,0 +1,72 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: sea/log (levels, text and JSON formats, fields, with, outputs, fatal)
+local log = require("sea/log")
+
+local lines = []
+local l = log.new({time = false, output = function(s) lines[] = s end})
+l:info("listening", {port = 8080, host = "0.0.0.0"})
+l:debug("hidden")
+l:set_level("debug")
+l:debug("shown", {key = "a b", q = "say \"hi\"", e = error("boom"), list = [1, 2], empty = ""})
+l:warn("careful")
+l:error("failed", {code = 3})
+l:set_level("error")
+l:warn("not shown")
+l:set_level("off")
+l:error("not shown either")
+print(string.join(lines, "\n"))
+
+-- JSON, logger fields and with
+lines = []
+local j = log.new({format = "json", output = function(s) lines[] = s end, fields = {service = "api"}, time = false})
+local rl = j:with({request = 42})
+rl:info("done", {status = 200, err = error("x"), f = print, ratio = 0.5, ok = true})
+rl:debug("no")
+print(string.join(lines, "\n"))
+local d = json.decode(lines[0])
+print(d.level, d.msg, d.service, d.request, d.status, d.err)
+print(j:enabled("debug"), j:enabled("info"), rl.fields)
+
+-- time stamps
+lines = []
+local ts = log.new({output = function(s) lines[] = s end})
+ts:info("x")
+print(re.test("^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d INFO  x$", lines[0]))
+lines = []
+ts:set_format("json")
+ts:info("x")
+print(re.test("^\\{\"time\":\"\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}", lines[0]))
+
+-- a file, and the default logger
+local dir = fs.tempdir("log-")
+local file = path.join(dir, "app.log")
+local f = log.new({time = false, output = file})
+f:info("one")
+f:info("two", {n = 2})
+print(fs.read(file)?)
+local out = process.run([
+    fs.realpath("./bin/sea"), "-e", `local log = require("sea/log")
+log.set_time(false)
+log.warn("to stderr", {a = 1})
+log.set_output("stdout")
+log.info("to stdout")
+log.fatal("bye")
+print("not reached")`,
+])
+print(out.code, out.stdout, out.stderr)
+fs.remove(dir, {recursive = true})
+
+local function try(fn)
+    local err = nil
+    local function run()
+        defer function() err = recover() end
+        fn()
+    end
+    run()
+    return err
+end
+print(string.contains(tostring(try(function() l:set_level("loud") end)), "unknown level 'loud'"))
+print(string.contains(tostring(try(function() log.new({format = "xml"}) end)), "unknown format 'xml'"))
+print(string.contains(tostring(try(function() log.new({output = 3.5}) end)), "the output must be"))

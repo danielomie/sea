@@ -181,7 +181,7 @@ end
 -- Can the module be found from dir (as require would)?
 local function module_exists(name, dir)
     if builtins()[name] then return true end
-    if name == "sea/test" or name == "sea/check" or name == "sea/stream" or name == "sea/flags" or name == "sea/parser" then return true end
+    if name == "sea/test" or name == "sea/check" or name == "sea/stream" or name == "sea/flags" or name == "sea/log" or name == "sea/parser" then return true end
     local function try(base)
         return fs.exists(base .. ".sea") or fs.exists(base .. "/init.sea") or fs.exists(base .. ".so")
     end
