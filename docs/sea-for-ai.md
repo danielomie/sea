@@ -501,7 +501,8 @@ value on failure.
 
 **string** (1-based positions; also as methods `s:upper()`):
 `len sub(s,i[,j]) upper lower reverse rep(s,n[,sep]) byte(s[,i]) char(...)
-format(fmt,...) find(s,text[,init]) → pos|nil split(s,sep) → array
+format(fmt,...) find(s,text[,init]) → pos|nil split(s,sep[,n]) → array splitlines(s)
+format_number(n[,decimals[,sep[,point]]])
 contains starts_with ends_with replace(s,old,new) trim
 pad_left/pad_right/pad_center(s,w[,ch]) join(array[,sep]) normalize_ws`.
 `string.format`: `%d %i %u %f %e %g %s %c %x %X %%` with width, precision
@@ -578,7 +579,7 @@ bytes), `hmac(alg,key,data[,raw])`, `new(alg)` (`h:update(s)`,
 **list** (global; new arrays, input unchanged; callbacks get `(v, i)`):
 `map(a,fn) filter(a,fn) reduce(a,fn[,init]) find(a,fn) index(a,x)
 contains(a,x) any(a,fn) all(a,fn) count(a,fn|x) sum(a[,fn]) min(a[,fn])
-max(a[,fn]) range(n) range(from,to[,step])` (to **inclusive**)
+max(a[,fn]) mean(a) median(a) stdev(a) range(n) range(from,to[,step])` (to **inclusive**)
 `unique(a) slice(a,from[,to])` (to **exclusive**) `concat(a,b,...) flatten
 reversed copy chunk(a,n) zip(a,b,...) group_by(a,fn) count_by(a,fn)` (→ maps)
 `keys(t) values(t) items(t)` (tables/maps sorted by key).

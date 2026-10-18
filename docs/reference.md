@@ -721,7 +721,9 @@ a number (by value: `bigint.new(5) == 5`).
 | `string.char` | `char(...) → string` | Build a string from byte values |
 | `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%`, with flags, width and precision (`%-8s`, `%05.1f`). No length limit; a plain `%s` copies any bytes. `%d`/`%x` print a bigint with all its digits. An unknown conversion is written as is |
 | `string.find` | `find(s, pattern [, init]) → int\|nil` | Return 1-based start position of first occurrence of `pattern` (plain text, not a regex: see module `re`), or `nil` |
-| `string.split` | `split(s, sep) → array` | Split `s` by separator string; returns an array of strings |
+| `string.split` | `split(s, sep [, n]) → array` | Split `s` by separator string; returns an array of strings. With `n`, at most `n` pieces (the last holds the rest: `split("k=v=w", "=", 2)` is `["k", "v=w"]`) |
+| `string.splitlines` | `splitlines(s) → array` | The lines, without `\n` / `\r\n` (a final newline adds no empty line) |
+| `string.format_number` | `format_number(n [, decimals [, sep [, point]]]) → string` | Digits grouped by thousands: `format_number(1234567.891)` is `"1,234,567.89"` (decimals default 0 for ints, 2 for numbers); `format_number(1234.5, 1, ".", ",")` is `"1.234,5"` |
 | `string.contains` | `contains(s, sub) → bool` | True if `sub` is present in `s` |
 | `string.trim` | `trim(s) → string` | Strip leading and trailing whitespace |
 | `string.starts_with` | `starts_with(s, prefix) → bool` | True if `s` begins with `prefix` |
@@ -1116,6 +1118,8 @@ print(list.group_by(people, function(p) return p.age > 30 and "senior" or "junio
 | `list.count` | `count(a, fn_or_value) → int` | How many elements `fn` accepts, or are `== value` |
 | `list.sum` | `sum(a [, fn]) → number` | The sum of the elements (or of `fn(v, i)`): an int while every term is an int, `0` for `[]` |
 | `list.min`, `list.max` | `min(a [, fn]) → value\|nil` | The element with the smallest / largest value (or key `fn(v, i)`), numbers or strings in the natural order; the first one on ties; `nil` for `[]` |
+| `list.mean`, `list.median` | `mean(a) → number\|nil` | The arithmetic mean / the middle value (mean of the two middle ones for an even count); `nil` for `[]` |
+| `list.stdev` | `stdev(a) → number\|nil` | The sample standard deviation (as Python's `statistics.stdev`); `nil` with fewer than 2 elements |
 | `list.range` | `range(n)`, `range(from, to [, step]) → array` | `[0, ..., n-1]`; or `from` to `to` **inclusive**, like a numeric `for` (`range(1, 10, 3)` is `[1, 4, 7, 10]`) |
 | `list.unique` | `unique(a) → array` | Without repeats, first occurrences kept (by map key: `1` and `1.0` differ) |
 | `list.slice` | `slice(a, from [, to]) → array` | Elements `from` to `to - 1` (**`to` exclusive**, as in Python/JS; negative indexes count from the end; `to` defaults to the end) |

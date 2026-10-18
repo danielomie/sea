@@ -27,6 +27,7 @@
 #include "sea_map.h"
 #include "sea_typed_array.h"
 #include "sea_memory.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -351,6 +352,69 @@ static SeaValue extreme(SeaVM *vm, const char *name, int argc, SeaValue *args, i
 static SeaValue list_min(SeaVM *vm, int argc, SeaValue *args) { return extreme(vm, "min", argc, args, -1); }
 static SeaValue list_max(SeaVM *vm, int argc, SeaValue *args) { return extreme(vm, "max", argc, args, 1); }
 
+/* The elements as doubles (numbers only) — for mean, median, stdev */
+static double *numbers(SeaVM *vm, const char *name, SeaValue a, uint32_t *n) {
+    Items it = items(vm, name, a);
+    double *x = (double*)malloc(sizeof(double) * (it.n ? it.n : 1));
+    for (uint32_t i = 0; i < it.n; i++) {
+        SeaValue v = it.v[i];
+        if (sea_is_int(v)) x[i] = (double)sea_as_int(v);
+        else if (sea_is_number(v)) x[i] = sea_as_number(v);
+        else {
+            const char *t = sea_type_name(v);
+            free(x);
+            items_free(&it);
+            sea_vm_error_noreturn(vm, "list.%s: element %u is %s, not a number", name, i, t);
+        }
+    }
+    *n = it.n;
+    items_free(&it);
+    return x;
+}
+
+/* list.mean(a) → the arithmetic mean (nil for []) */
+static SeaValue list_mean(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1) sea_vm_error_noreturn(vm, "list.mean: expected an array");
+    uint32_t n;
+    double *x = numbers(vm, "mean", args[0], &n);
+    double s = 0;
+    for (uint32_t i = 0; i < n; i++) s += x[i];
+    free(x);
+    return n ? sea_number_val(s / n) : SEA_NIL_VAL;
+}
+
+static int dbl_cmp(const void *a, const void *b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return x < y ? -1 : x > y;
+}
+
+/* list.median(a) → the middle value (the mean of the two middle ones for an even count; nil for []) */
+static SeaValue list_median(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1) sea_vm_error_noreturn(vm, "list.median: expected an array");
+    uint32_t n;
+    double *x = numbers(vm, "median", args[0], &n);
+    if (!n) { free(x); return SEA_NIL_VAL; }
+    qsort(x, n, sizeof(double), dbl_cmp);
+    double m = n % 2 ? x[n / 2] : (x[n / 2 - 1] + x[n / 2]) / 2;
+    free(x);
+    return sea_number_val(m);
+}
+
+/* list.stdev(a) → the sample standard deviation (as Python's statistics.stdev;
+ * nil with fewer than 2 elements) */
+static SeaValue list_stdev(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1) sea_vm_error_noreturn(vm, "list.stdev: expected an array");
+    uint32_t n;
+    double *x = numbers(vm, "stdev", args[0], &n);
+    if (n < 2) { free(x); return SEA_NIL_VAL; }
+    double mean = 0, ss = 0;
+    for (uint32_t i = 0; i < n; i++) mean += x[i];
+    mean /= n;
+    for (uint32_t i = 0; i < n; i++) ss += (x[i] - mean) * (x[i] - mean);
+    free(x);
+    return sea_number_val(sqrt(ss / (n - 1)));
+}
+
 /* list.range(n) → [0 .. n-1]; list.range(from, to [, step]) → from, from+step, ... up to
  * and including to (like a numeric for) */
 static SeaValue list_range(SeaVM *vm, int argc, SeaValue *args) {
@@ -636,6 +700,9 @@ void sea_lib_list_register(SeaVM *vm) {
     mod_set(vm, mod, "sum",      list_sum);
     mod_set(vm, mod, "min",      list_min);
     mod_set(vm, mod, "max",      list_max);
+    mod_set(vm, mod, "mean",     list_mean);
+    mod_set(vm, mod, "median",   list_median);
+    mod_set(vm, mod, "stdev",    list_stdev);
     mod_set(vm, mod, "range",    list_range);
     mod_set(vm, mod, "unique",   list_unique);
     mod_set(vm, mod, "slice",    list_slice);

@@ -336,6 +336,8 @@ static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
     const char *s = ss->data;
     const char *sep = SEA_AS_STRING(args[1])->data;
     size_t seplen = strlen(sep);
+    /* split(s, sep, n): at most n pieces, the last holding the rest */
+    int64_t limit = argc >= 3 && sea_is_int(args[2]) && sea_as_int(args[2]) > 0 ? sea_as_int(args[2]) : -1;
 
     SeaArray *arr = sea_array_new(4);
     if (seplen == 0) {
@@ -348,7 +350,7 @@ static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
     } else {
         const char *start = s;
         while (*start) {
-            const char *found = strstr(start, sep);
+            const char *found = limit > 0 && (int64_t)arr->len == limit - 1 ? NULL : strstr(start, sep);
             if (!found) {
                 SeaValue sv = sea_obj_val(&sea_string_new(start, strlen(start))->obj);
                 sea_array_push(arr, sv);
@@ -364,6 +366,68 @@ static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
     sea_obj_release(&ss->obj);
     /* Return array rc=1; caller owns */
     return sea_obj_val(&arr->obj);
+}
+
+// string.splitlines(s) → the lines, without "\n" / "\r\n" (a final newline
+// does not add an empty line)
+static SeaValue str_splitlines(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1) sea_vm_error_noreturn(vm, "string.splitlines: expected a string");
+    SeaString *ss = sea_value_get_flat_string(args[0]);
+    if (!ss) sea_vm_error_noreturn(vm, "string.splitlines: expected a string, got %s", sea_type_name(args[0]));
+    SeaArray *arr = sea_array_new(8);
+    size_t i = 0, start = 0, n = ss->len;
+    while (i <= n) {
+        if (i == n || ss->data[i] == '\n') {
+            if (i == n && start == n) break;   /* nothing after the last newline */
+            size_t end = i;
+            if (end > start && ss->data[end - 1] == '\r') end--;
+            SeaString *line = sea_string_new(ss->data + start, end - start);
+            sea_array_push(arr, sea_obj_val(&line->obj));
+            sea_obj_release(&line->obj);
+            start = i + 1;
+        }
+        i++;
+    }
+    sea_obj_release(&ss->obj);
+    return sea_obj_val(&arr->obj);
+}
+
+// string.format_number(n [, decimals [, sep [, point]]]) → "1,234,567.89"
+static SeaValue str_format_number(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || (!sea_is_int(args[0]) && !sea_is_number(args[0])))
+        sea_vm_error_noreturn(vm, "string.format_number: expected a number");
+    int decimals = argc >= 2 && sea_is_int(args[1]) ? (int)sea_as_int(args[1]) : (sea_is_int(args[0]) ? 0 : 2);
+    if (decimals < 0) decimals = 0;
+    if (decimals > 20) decimals = 20;
+    const char *sep = argc >= 3 && sea_is_string(args[2]) ? SEA_AS_STRING(args[2])->data : ",";
+    const char *point = argc >= 4 && sea_is_string(args[3]) ? SEA_AS_STRING(args[3])->data : ".";
+    char digits[512];
+    if (sea_is_int(args[0]) && decimals == 0)
+        snprintf(digits, sizeof digits, "%lld", (long long)sea_as_int(args[0]));
+    else
+        snprintf(digits, sizeof digits, "%.*f", decimals,
+                 sea_is_int(args[0]) ? (double)sea_as_int(args[0]) : sea_as_number(args[0]));
+    const char *p = digits;
+    bool neg = *p == '-';
+    if (neg) p++;
+    const char *dot = strchr(p, '.');
+    size_t int_len = dot ? (size_t)(dot - p) : strlen(p);
+    size_t seplen = strlen(sep), plen = strlen(point);
+    char out[1024];
+    size_t o = 0;
+    if (neg) out[o++] = '-';
+    for (size_t i = 0; i < int_len && o < sizeof out - 8; i++) {
+        if (i > 0 && (int_len - i) % 3 == 0 && o + seplen < sizeof out - 8) { memcpy(out + o, sep, seplen); o += seplen; }
+        out[o++] = p[i];
+    }
+    if (dot && o + plen + strlen(dot + 1) < sizeof out) {
+        memcpy(out + o, point, plen);
+        o += plen;
+        size_t fl = strlen(dot + 1);
+        memcpy(out + o, dot + 1, fl);
+        o += fl;
+    }
+    return sea_obj_val(&sea_string_new(out, o)->obj);
 }
 
 // string.contains(s, sub)
@@ -648,6 +712,8 @@ void sea_lib_string_register(SeaVM *vm) {
     mod_set(vm, mod, "char",        str_char);
     mod_set(vm, mod, "format",      sea_str_format);
     mod_set(vm, mod, "find",        str_find);
+    mod_set(vm, mod, "splitlines",  str_splitlines);
+    mod_set(vm, mod, "format_number", str_format_number);
     mod_set(vm, mod, "split",       str_split);
     mod_set(vm, mod, "contains",    str_contains);
     mod_set(vm, mod, "trim",        str_trim);
