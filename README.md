@@ -107,6 +107,7 @@ any directory: `require("json")`, `require("http")`, `require("sqlite")`.
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |
 | [Benchmarks](docs/benchmarks.md) | Sea, Sea+JIT, Lua 5.4 and Python 3.12 compared |
+| [Everyday scripts](docs/scripts.md) | The same five scripts (CSV, logs, words, files, JSON) in Sea and Python: speed, length, same output |
 | [Bugs & changes](docs/bugs.md) | Known issues and notable fixes (pt-BR) |
 
 ## Examples

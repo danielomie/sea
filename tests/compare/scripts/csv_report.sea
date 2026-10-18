@@ -1,0 +1,27 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Sales report from a CSV: revenue in total, by region, by month, top products.
+local by_region = [=]
+local by_month = [=]
+local by_product = [=]
+local total = 0
+local rows = csv.each(os.args[1], function(r)
+    local revenue = r.qty * r.unit_price
+    total += revenue
+    by_region[r.region] = (by_region[r.region] or 0) + revenue
+    local month = string.sub(r.date, 1, 7)
+    by_month[month] = (by_month[month] or 0) + revenue
+    by_product[r.product] = (by_product[r.product] or 0) + revenue
+end, {header = true, numbers = true})?
+
+print(`rows: ${rows}`)
+printf("total: %.2f\n", total)
+print("by region:")
+for _, region in list.keys(by_region) do printf("  %-8s %14.2f\n", region, by_region[region]) end
+print("by month:")
+for _, month in list.keys(by_month) do printf("  %s %14.2f\n", month, by_month[month]) end
+print("top products:")
+local products = list.items(by_product)
+sort.sort(products, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[0] < b[0]) end)
+for _, p in list.slice(products, 0, 5) do printf("  %s %.2f\n", p[0], p[1]) end

@@ -419,6 +419,53 @@ end
 
 M.SPLITS = {lines = split_lines, words = split_words, bytes = split_bytes, chars = split_chars}
 
+-- The same splits reading the reader's buffer in place: fast(buf, pos,
+-- at_eof) → advance (bytes from pos), token. No copy of the buffer per token.
+local WORD = re.compile("\\S+")
+
+local function fast_lines(buf, pos, at_eof)
+    local at = string.find(buf, "\n", pos)
+    if at ~= nil then
+        local e = at - 1
+        if e >= pos and string.byte(buf, e) == 13 then e -= 1 end
+        return at - pos + 1, string.sub(buf, pos, e)
+    end
+    if at_eof and pos <= len(buf) then return len(buf) - pos + 1, string.sub(buf, pos) end
+    return 0, nil
+end
+
+local function fast_words(buf, pos, at_eof)
+    local m = WORD:match(buf, pos)
+    if m == nil then return len(buf) - pos + 1, nil end   -- only spaces: drop them
+    if m.stop < len(buf) or at_eof then return m.stop - pos + 1, m.text end
+    return m.start - pos, nil   -- the word may go on in the next piece
+end
+
+local function fast_bytes(buf, pos, at_eof)
+    if pos > len(buf) then return 0, nil end
+    return 1, string.sub(buf, pos, pos)
+end
+
+local function fast_chars(buf, pos, at_eof)
+    if pos > len(buf) then return 0, nil end
+    local b = string.byte(buf, pos)
+    local n = 1
+    if b >= 0xF0 then
+        n = 4
+    elseif b >= 0xE0 then
+        n = 3
+    elseif b >= 0xC0 then
+        n = 2
+    end
+    if pos + n - 1 > len(buf) then
+        if at_eof then return len(buf) - pos + 1, string.sub(buf, pos) end
+        return 0, nil
+    end
+    return n, string.sub(buf, pos, pos + n - 1)
+end
+
+local FAST = {lines = fast_lines, words = fast_words, bytes = fast_bytes, chars = fast_chars}
+
 local Scanner = {}
 
 -- stream.scanner(src [, opts]) → scanner over a source or a reader
@@ -440,11 +487,13 @@ end
 
 -- scanner:split(mode) — "lines", "words", "bytes", "chars", or a function(data, at_eof) → advance, token
 function Scanner.split(self, mode)
+    self.fast = nil
     if type(mode) == "function" then
         self.split_fn = mode
     else
         self.split_fn = M.SPLITS[mode]
         if self.split_fn == nil then panic("stream: unknown split mode " .. tostring(mode)) end
+        self.fast = FAST[mode]
     end
 end
 
@@ -453,9 +502,14 @@ function Scanner.scan(self)
     if self.done then return false end
     local r = self.reader
     while true do
-        local data = string.sub(r.buf, r.pos)
-        if data ~= "" or r.eof then
-            local advance, token = self.split_fn(data, r.eof)
+        if r:buffered() > 0 or r.eof then
+            -- built-in modes read the buffer in place; a function gets a copy of the rest
+            local advance, token
+            if self.fast ~= nil then
+                advance, token = self.fast(r.buf, r.pos, r.eof)
+            else
+                advance, token = self.split_fn(string.sub(r.buf, r.pos), r.eof)
+            end
             if is_error(advance) then
                 self.error = advance
                 self.done = true

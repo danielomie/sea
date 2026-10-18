@@ -91,3 +91,16 @@ end
 assert(result_bad.message == "division by zero", "error message via is_error gate")
 
 print("PASS: error handling")
+
+-- f()? as a statement: an error returns from the function, a value is dropped
+local function steps(fail_at)
+    local function step(i)
+        if i == fail_at then return error("step " .. i .. " failed") end
+        return i
+    end
+    step(1)?
+    step(2)?
+    step(3)?
+    return "all done"
+end
+print(steps(0), steps(2).message)

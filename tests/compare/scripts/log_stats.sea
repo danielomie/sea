@@ -1,0 +1,54 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Statistics of an HTTP access log: status codes, top clients and paths, p95 latency.
+local stream = require("sea/stream")
+
+local LINE = re.compile([=[^(\S+) \S+ \S+ \[[^:]+:(\d\d):[^\]]+\] "(\S+) (\S+) [^"]*" (\d{3}) (\d+) ([\d.]+)$]=])   -- [=[ ]=]: the pattern holds "]]"
+local statuses = [=]
+local ips = [=]
+local paths = [=]
+local hours = [=]
+local times = []
+local total_bytes = 0
+local bad = 0
+
+local function count(m, k)
+    m[k] = (m[k] or 0) + 1
+end
+
+-- the keys of a counter, most frequent first (ties by key)
+local function by_count(m)
+    local items = list.items(m)
+    sort.sort(items, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[0] < b[0]) end)
+    return items
+end
+
+local sc = stream.scanner(stream.open(os.args[1])?)
+while sc:scan() do
+    local m = LINE:match(sc:text())
+    if m == nil then
+        bad += 1
+    else
+        local g = m.groups
+        count(statuses, g[5])
+        count(ips, g[1])
+        count(paths, re.gsub("/\\d+", g[4], "/:id"))
+        count(hours, g[2])
+        total_bytes += tonumber(g[6])
+        times[] = tonumber(g[7])
+    end
+end
+
+sort.sort(times)
+local p95 = times[math.ceil(0.95 * len(times)) - 1]
+print(`requests: ${len(times)} (unparsed: ${bad})`)
+print(`bytes: ${total_bytes}`)
+printf("p95: %.3f s, mean: %.4f s\n", p95, list.mean(times))
+print("status:")
+for _, s in list.keys(statuses) do print(`  ${s} ${statuses[s]}`) end
+print("top clients:")
+for _, kv in list.slice(by_count(ips), 0, 5) do print(`  ${kv[0]} ${kv[1]}`) end
+print("paths:")
+for _, kv in by_count(paths) do print(`  ${kv[0]} ${kv[1]}`) end
+print(`busiest hour: ${by_count(hours)[0][0]}`)

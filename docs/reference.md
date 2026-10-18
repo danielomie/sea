@@ -607,7 +607,7 @@ a number (by value: `bigint.new(5) == 5`).
 
 | Operator | Description |
 |----------|-------------|
-| `expr?` | If `expr` is an error, return it immediately from the current function; otherwise unwrap the value |
+| `expr?` | If `expr` is an error, return it immediately from the current function; otherwise unwrap the value. A call with `?` is also a statement: `fs.write(p, data)?` |
 
 ### Assignment
 
@@ -1288,10 +1288,10 @@ ints (`0x1A4` is 0644; Sea has no octal literals).
 
 ```sea
 local dir = fs.tempdir("build-")?
-local _ = fs.mkdir(path.join(dir, "out/logs"), {parents = true})?
-local _ = fs.write(path.join(dir, "out/config.json"), json.encode(cfg), {atomic = true})?
+fs.mkdir(path.join(dir, "out/logs"), {parents = true})?
+fs.write(path.join(dir, "out/config.json"), json.encode(cfg), {atomic = true})?
 for _, f in fs.walk(dir, {files = true})? do print(path.relative(dir, f), fs.stat(f).size) end
-local _ = fs.remove(dir, {recursive = true})?
+fs.remove(dir, {recursive = true})?
 ```
 
 ---

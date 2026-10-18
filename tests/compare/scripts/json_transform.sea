@@ -1,0 +1,29 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Load orders from JSON, keep the paid and shipped ones, total them per
+-- customer, write the top customers as JSON and print a summary.
+local orders = json.decode(fs.read(os.args[1])?)?
+
+local per_customer = [=]
+local kept = 0
+for _, o in orders do
+    if o.status ~= "paid" and o.status ~= "shipped" then continue end
+    kept += 1
+    local total = list.sum(o.items, function(item) return item.qty * item.price end)
+    local c = per_customer[o.customer]
+    if c == nil then
+        c = {customer = o.customer, orders = 0, total = 0.0}
+        per_customer[o.customer] = c
+    end
+    c.orders += 1
+    c.total += total
+end
+
+local top = list.values(per_customer)
+sort.sort(top, function(a, b) return a.total > b.total or (a.total == b.total and a.customer < b.customer) end)
+top = list.slice(top, 0, 10)
+for _, c in top do c.total = math.round(c.total * 100) / 100 end
+fs.write(os.args[2], json.encode(top, {indent = 2, sort_keys = true}))?
+print(`orders: ${len(orders)}, kept: ${kept}, customers: ${len(per_customer)}`)
+for _, c in list.slice(top, 0, 3) do printf("  %s %d %.2f\n", c.customer, c.orders, c.total) end

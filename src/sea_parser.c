@@ -1049,9 +1049,12 @@ static SeaNode* parse_assign_or_call(SeaParser *p) {
         return n;
     }
 
-    // It's a call expression used as statement
+    // It's a call expression used as statement (also `f()?`: an error
+    // returns from the function, a value is discarded)
+    bool propagated_call = first->type == NODE_PROPAGATE && first->propagate &&
+                           (first->propagate->type == NODE_CALL || first->propagate->type == NODE_METHOD_CALL);
     if (first->type == NODE_CALL || first->type == NODE_METHOD_CALL ||
-        first->type == NODE_CHAN_SEND) {
+        first->type == NODE_CHAN_SEND || propagated_call) {
         SeaNode *n = node_new(NODE_EXPR_STMT, line, col);
         n->expr_stmt = first;
         return n;

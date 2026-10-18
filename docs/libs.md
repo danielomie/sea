@@ -374,7 +374,7 @@ local compress = require("../libs/compress/compress")   -- relative to the requi
 
 local gz = compress.gzip(body)               -- e.g. for Content-Encoding: gzip
 local back = compress.gunzip(gz)?
-local _ = compress.gzip_file("access.log", "access.log.gz", {level = 9})?
+compress.gzip_file("access.log", "access.log.gz", {level = 9})?
 ```
 
 | Function | Signature | Description |
@@ -1009,7 +1009,7 @@ end)
 
 ```sea
 local conn = ws.connect("wss://example.com/chat", {protocols = {"chat"}})?
-local _ = conn:send("hello")?
+conn:send("hello")?
 print(conn:receive(5000))
 conn:close()
 ```
@@ -1498,7 +1498,7 @@ Tests: `make -C libs/duckdb test`.
 local duckdb = require("../libs/duckdb/duckdb")   -- relative to the requiring file
 
 local db = duckdb.open("sales.duckdb")?           -- nil or ":memory:": in memory
-local _ = db:exec("CREATE TABLE IF NOT EXISTS sales (day DATE, item VARCHAR, qty INTEGER, price DECIMAL(10,2))")?
+db:exec("CREATE TABLE IF NOT EXISTS sales (day DATE, item VARCHAR, qty INTEGER, price DECIMAL(10,2))")?
 local added = db:exec("INSERT INTO sales VALUES (?, ?, ?, ?)", "2026-10-01", "tea", 3, 4.5)?
 for _, r in db:query("SELECT item, sum(qty * price) AS total FROM sales GROUP BY item ORDER BY total DESC")? do
     print(r.item, r.total)
@@ -1627,8 +1627,8 @@ with FTS5, R*Tree, JSON and math functions; extension loading is off.
 local sqlite = require("../libs/sqlite/sqlite")   -- relative to the requiring file
 
 local db = sqlite.open("app.db", {wal = true})?
-local _ = db:exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INT)")?
-local _ = db:exec("INSERT INTO users (name, age) VALUES (?, ?)", "ana", 31)?
+db:exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INT)")?
+db:exec("INSERT INTO users (name, age) VALUES (?, ?)", "ana", 31)?
 print(db:last_insert_id())
 for _, u in db:query("SELECT * FROM users WHERE age >= :min", {min = 18})? do print(u.id, u.name) end
 db:close()

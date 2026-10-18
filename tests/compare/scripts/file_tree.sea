@@ -1,0 +1,22 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Inventory of a directory tree: files and bytes by extension, the largest files.
+local root = os.args[1]
+local count = [=]
+local size = [=]
+local files = []
+for _, p in fs.walk(root, {files = true})? do
+    local n = fs.stat(p)?.size
+    local ext = path.ext(p)
+    if ext == "" then ext = "(none)" end
+    count[ext] = (count[ext] or 0) + 1
+    size[ext] = (size[ext] or 0) + n
+    files[] = {size = n, path = path.relative(root, p)?}
+end
+
+print(`files: ${len(files)}, bytes: ${list.sum(list.values(size))}`)
+for _, ext in list.keys(count) do printf("  %-8s %5d %10d\n", ext, count[ext], size[ext]) end
+print("largest:")
+sort.sort(files, function(a, b) return a.size > b.size or (a.size == b.size and a.path < b.path) end)
+for _, f in list.slice(files, 0, 5) do printf("  %6d %s\n", f.size, f.path) end

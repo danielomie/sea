@@ -46,7 +46,7 @@
 #define RE_MAX_REPEAT  1000      /* {n,m} bounds */
 #define RE_MAX_DEPTH   1000      /* parser nesting */
 #define RE_MAX_GROUPS  1000
-#define RE_MAGIC       0x52454731u   /* "REG1" */
+#define RE_MAGIC       0x52454732u   /* "REG2" */
 
 /* ======================================================================== */
 /* Parse: pattern → AST                                                     */
@@ -801,6 +801,7 @@ typedef struct {
     const int32_t *inst;          /* op, x, y */
     const uint32_t *klass;        /* off, count, flags */
     const uint32_t *ranges;       /* lo, hi */
+    const uint32_t *ascii;        /* per class: 4 words, bit c set when c (< 128) is in it */
     const char *prefix;
 } Prog;
 
@@ -810,7 +811,7 @@ typedef struct {
 static SeaString *build_blob(Code *c, Parser *p, const char *prefix, size_t plen) {
     size_t nranges = 0;
     for (size_t i = 0; i < p->nsets; i++) nranges += p->sets[i].n;
-    size_t words = HDR + c->n * 3 + p->nsets * 3 + nranges * 2 + (plen + 3) / 4;
+    size_t words = HDR + c->n * 3 + p->nsets * 3 + nranges * 2 + p->nsets * 4 + (plen + 3) / 4;
     SeaString *s = sea_string_alloc(words * 4);
     uint32_t *w = (uint32_t *)(void *)s->data;
     memset(w, 0, words * 4);
@@ -838,6 +839,28 @@ static SeaString *build_blob(Code *c, Parser *p, const char *prefix, size_t plen
             *q++ = p->sets[i].r[k].lo;
             *q++ = p->sets[i].r[k].hi;
         }
+    /* the ASCII members of each class, negation and case folding applied:
+     * one bit test per ASCII character at match time */
+    for (size_t i = 0; i < p->nsets; i++) {
+        const CharSet *cs = &p->sets[i];
+        uint32_t bits[4] = {0, 0, 0, 0};
+        for (uint32_t ch = 0; ch < 128; ch++) {
+            uint32_t probes[3] = { ch, ch, ch };
+            int np = 1;
+            if (cs->fold) {
+                probes[1] = sea_utf8_lower(ch);
+                probes[2] = sea_utf8_upper(ch);
+                np = 3;
+            }
+            bool in = false;
+            for (int t = 0; t < np && !in; t++)
+                for (size_t k = 0; k < cs->n && !in; k++)
+                    if (probes[t] >= cs->r[k].lo && probes[t] <= cs->r[k].hi) in = true;
+            if (cs->neg) in = !in;
+            if (in) bits[ch >> 5] |= 1u << (ch & 31);
+        }
+        for (int k = 0; k < 4; k++) *q++ = bits[k];
+    }
     memcpy(q, prefix, plen);
     s->data[words * 4] = '\0';
     return s;
@@ -850,7 +873,7 @@ static bool prog_load(SeaString *s, Prog *pg) {
     if (((uintptr_t)w & 3) || w[0] != RE_MAGIC) return false;
     uint64_t ninst = w[1], ncl = w[2], nr = w[3], ng = w[4], pl = w[5];
     if (ninst == 0 || ninst > RE_MAX_INST || ng > RE_MAX_GROUPS || pl > 64) return false;
-    uint64_t words = HDR + ninst * 3 + ncl * 3 + nr * 2 + (pl + 3) / 4;
+    uint64_t words = HDR + ninst * 3 + ncl * 3 + nr * 2 + ncl * 4 + (pl + 3) / 4;
     if (words * 4 != s->len) return false;
     pg->w = w;
     pg->ninst = (uint32_t)ninst;
@@ -861,7 +884,8 @@ static bool prog_load(SeaString *s, Prog *pg) {
     pg->inst = (const int32_t *)(w + HDR);
     pg->klass = w + HDR + ninst * 3;
     pg->ranges = pg->klass + ncl * 3;
-    pg->prefix = (const char *)(pg->ranges + nr * 2);
+    pg->ascii = pg->ranges + nr * 2;
+    pg->prefix = (const char *)(pg->ascii + ncl * 4);
     for (uint32_t i = 0; i < ncl; i++) {
         uint64_t off = pg->klass[i * 3], cnt = pg->klass[i * 3 + 1];
         if (off + cnt > nr) return false;
@@ -892,6 +916,7 @@ static bool prog_load(SeaString *s, Prog *pg) {
 /* ======================================================================== */
 
 static bool class_has(const Prog *pg, uint32_t k, uint32_t cp) {
+    if (cp < 128) return (pg->ascii[k * 4 + (cp >> 5)] >> (cp & 31)) & 1u;
     const uint32_t *r = pg->ranges + pg->klass[k * 3] * 2;
     uint32_t n = pg->klass[k * 3 + 1], flags = pg->klass[k * 3 + 2];
     uint32_t probes[3] = { cp, cp, cp };
@@ -936,6 +961,13 @@ typedef struct {
     int *stack;
     size_t stack_cap;
     int *cur;                 /* working capture array */
+    /* bounded backtracker (see bt_search) */
+    uint64_t *bt_vis;         /* visited (pc, pos) bits */
+    size_t bt_vis_words;
+    int *bt_jobs;             /* (pc, pos) or (-(slot+1), value) pairs */
+    size_t bt_jobs_cap;
+    size_t bt_edge;           /* a path that reaches this position leaves the window */
+    bool bt_hit_edge;
 } VM;
 
 /* Decode the character at i: its code point (an invalid byte: U+FFFD) and width. */
@@ -1018,9 +1050,173 @@ static void addthread(VM *v, int l, int pc0, const int *caps, size_t pos) {
     }
 }
 
+/* ---- Bounded backtracker (RE2's BitState) ----
+ * For short texts: a depth-first search in priority order (the first match
+ * found is the leftmost-first one, as the Pike VM finds), never visiting a
+ * (pc, position) pair twice — a pair that failed once fails again, whatever
+ * the captures — so it stays linear: O(instructions × text). Used when that
+ * product fits BT_MAX_BITS; it is several times faster than the Pike VM,
+ * which copies capture arrays between thread lists at every character. */
+#define BT_MAX_BITS (256 * 1024)
+
+static void bt_push(VM *v, size_t *sp, int a, int b) {
+    if (*sp + 2 > v->bt_jobs_cap) {
+        v->bt_jobs_cap = v->bt_jobs_cap ? v->bt_jobs_cap * 2 : 256;
+        v->bt_jobs = realloc(v->bt_jobs, v->bt_jobs_cap * sizeof *v->bt_jobs);
+    }
+    v->bt_jobs[(*sp)++] = a;
+    v->bt_jobs[(*sp)++] = b;
+}
+
+/* One attempt from position s (base: the position bit 0 stands for) */
+static bool bt_run(VM *v, size_t s, size_t base, size_t span, int *cap, int *out) {
+    const Prog *pg = v->pg;
+    size_t sp = 0;
+    bt_push(v, &sp, 0, (int)s);
+    while (sp > 0) {
+        int b = v->bt_jobs[--sp];
+        int a = v->bt_jobs[--sp];
+        if (a < 0) {                       /* restore a capture slot */
+            cap[-a - 1] = b;
+            continue;
+        }
+        int pc = a;
+        size_t pos = (size_t)b;
+        for (;;) {
+            size_t bit = (size_t)pc * span + (pos - base);
+            uint64_t m = 1ull << (bit & 63);
+            if (v->bt_vis[bit >> 6] & m) break;
+            v->bt_vis[bit >> 6] |= m;
+            const int32_t *in = pg->inst + pc * 3;
+            int w = 0;
+            uint32_t c = 0;
+            bool at_end = pos >= v->len;
+            if (pos >= v->bt_edge && in[0] <= I_CLASS) {
+                /* this path reads past the window: let the Pike VM decide */
+                v->bt_hit_edge = true;
+                return false;
+            }
+            switch (in[0]) {
+                case I_MATCH:
+                    memcpy(out, cap, (size_t)v->ncap * sizeof *out);
+                    return true;
+                case I_CHAR:
+                    if (at_end) goto fail;
+                    c = cp_at(v->s, v->len, pos, &w);
+                    if (c != (uint32_t)in[1]) goto fail;
+                    pos += (size_t)w; pc++; continue;
+                case I_CHARF:
+                    if (at_end) goto fail;
+                    c = cp_at(v->s, v->len, pos, &w);
+                    if (sea_utf8_lower(c) != (uint32_t)in[1]) goto fail;
+                    pos += (size_t)w; pc++; continue;
+                case I_ANY:
+                    if (at_end) goto fail;
+                    c = cp_at(v->s, v->len, pos, &w);
+                    if (c == '\n') goto fail;
+                    pos += (size_t)w; pc++; continue;
+                case I_ANYNL:
+                    if (at_end) goto fail;
+                    cp_at(v->s, v->len, pos, &w);
+                    pos += (size_t)w; pc++; continue;
+                case I_CLASS:
+                    if (at_end) goto fail;
+                    c = cp_at(v->s, v->len, pos, &w);
+                    if (!class_has(pg, (uint32_t)in[1], c)) goto fail;
+                    pos += (size_t)w; pc++; continue;
+                case I_JMP: pc = in[1]; continue;
+                case I_SPLIT:
+                    bt_push(v, &sp, in[2], (int)pos);   /* the lower-priority branch, for later */
+                    pc = in[1];
+                    continue;
+                case I_NOP: pc++; continue;
+                case I_SAVE:
+                    if (in[1] < v->ncap) {
+                        bt_push(v, &sp, -(in[1] + 1), cap[in[1]]);
+                        cap[in[1]] = (int)pos;
+                    }
+                    pc++;
+                    continue;
+                case I_ASSERT:
+                    if (!assert_ok(v, in[1], pos)) goto fail;
+                    pc++;
+                    continue;
+                default: goto fail;
+            }
+        }
+    fail:;
+    }
+    return false;
+}
+
+static bool pike_search(VM *v, size_t start, int *out);
+static void pike_alloc(VM *v);
+
+/* The backtracker over windows of the text: each window's bitmap holds
+ * BT_MAX_BITS bits, so long texts (findall, gsub over a file) are searched a
+ * window at a time. A path that would read past its window hands the search
+ * from that start over to the Pike VM. */
+static bool bt_search(VM *v, size_t start, int *out) {
+    const Prog *pg = v->pg;
+    size_t Wmax = BT_MAX_BITS / pg->ninst;     /* positions per window, at most */
+    if (Wmax < 2) return pike_search(v, start, out);
+    /* small windows first (clearing the bitmap is then cheap: findall over a
+     * big text runs one search per match); a path reaching the edge retries
+     * from its start with a window 4 times larger */
+    size_t W = Wmax < 256 ? Wmax : 256;
+    bool anchored = pg->inst[0] == I_SAVE && pg->ninst > 1 && pg->inst[3] == I_ASSERT && pg->inst[4] == A_BOT;
+    int *cap = v->cur;
+    size_t s = start;
+    for (;;) {
+        size_t wend = v->len - s + 1 <= W ? v->len : s + W - 1;   /* positions s..wend */
+        size_t span = wend - s + 1;
+        size_t words = ((size_t)pg->ninst * span + 63) / 64;
+        if (words > v->bt_vis_words) {
+            free(v->bt_vis);
+            v->bt_vis = malloc(words * sizeof *v->bt_vis);
+            v->bt_vis_words = words;
+        }
+        memset(v->bt_vis, 0, words * sizeof *v->bt_vis);
+        v->bt_edge = wend < v->len ? wend : (size_t)-1;
+        v->bt_hit_edge = false;
+        size_t t = s;
+        for (;;) {
+            if (anchored && t != 0) return false;
+            if (pg->prefix_len && !anchored) {
+                const void *hit = t <= v->len ? memmem(v->s + t, v->len - t, pg->prefix, pg->prefix_len) : NULL;
+                if (!hit) return false;
+                t = (size_t)((const unsigned char *)hit - v->s);
+                if (t >= wend && wend < v->len) break;      /* in a later window */
+            }
+            for (int i = 0; i < v->ncap; i++) cap[i] = -1;
+            if (bt_run(v, t, s, span, cap, out)) return true;
+            if (v->bt_hit_edge) {
+                if (W >= Wmax) return pike_search(v, t, out);
+                W = W * 4 < Wmax ? W * 4 : Wmax;
+                break;   /* the starts before t failed for good: a larger window from t */
+            }
+            if (t >= v->len) return false;
+            int w;
+            cp_at(v->s, v->len, t, &w);
+            t += (size_t)w;
+            if (t >= wend && wend < v->len) break;
+        }
+        s = t;   /* the next window starts where this one's starts ended */
+    }
+}
+
 /* Search s from byte start; true with caps[0..ncap) filled on a match. */
 static bool vm_search(VM *v, size_t start, int *out) {
+    /* SEA_RE_PIKE=1 forces the Pike VM (to test the backtracker against it) */
+    static int force_pike = -1;
+    if (force_pike < 0) force_pike = getenv("SEA_RE_PIKE") != NULL;
+    if (!force_pike && start <= v->len && v->len < INT32_MAX) return bt_search(v, start, out);
+    return pike_search(v, start, out);
+}
+
+static bool pike_search(VM *v, size_t start, int *out) {
     const Prog *pg = v->pg;
+    pike_alloc(v);
     int *empty = v->cur + v->ncap;            /* a capture array of -1s */
     for (int i = 0; i < v->ncap; i++) empty[i] = -1;
     int cl = 0, nl = 1;
@@ -1099,15 +1295,21 @@ static void vm_init(VM *v, const Prog *pg, const char *s, size_t len, int ncap) 
     v->s = (const unsigned char *)s;
     v->len = len;
     v->ncap = ncap;
-    size_t n = pg->ninst;
+    v->cur = malloc((size_t)ncap * 2 * sizeof *v->cur + sizeof(int));
+    /* the Pike VM's thread lists are allocated when a search needs them
+     * (short texts use the backtracker) */
+}
+
+static void pike_alloc(VM *v) {
+    if (v->pcs[0]) return;
+    size_t n = v->pg->ninst;
     for (int i = 0; i < 2; i++) {
         v->pcs[i] = malloc(n * sizeof(int));
-        v->caps[i] = malloc(n * (size_t)ncap * sizeof(int) + sizeof(int));
+        v->caps[i] = malloc(n * (size_t)v->ncap * sizeof(int) + sizeof(int));
     }
     v->mark = calloc(n, sizeof *v->mark);
     v->stack_cap = 64;
     v->stack = malloc(v->stack_cap * sizeof *v->stack);
-    v->cur = malloc((size_t)ncap * 2 * sizeof *v->cur + sizeof(int));
 }
 
 static void vm_free(VM *v) {
@@ -1115,6 +1317,8 @@ static void vm_free(VM *v) {
     free(v->mark);
     free(v->stack);
     free(v->cur);
+    free(v->bt_vis);
+    free(v->bt_jobs);
 }
 
 /* ======================================================================== */
@@ -1211,6 +1415,51 @@ static bool table_field(SeaValue t, const char *k, SeaValue *out) {
 }
 
 /* The pattern argument: a string (compiled now) or a regex from re.compile. */
+/* Patterns given as strings are compiled once per thread and kept in a
+ * small cache (as Python's re does), so re.gsub("\\d+", ...) in a loop does
+ * not recompile. The key is a private copy of the pattern's bytes; the blob
+ * and names are this thread's objects. */
+#define RX_CACHE 32
+typedef struct {
+    char      *pat;      /* malloc'd copy, NULL when the slot is empty */
+    size_t     len;
+    SeaString *blob;     /* +1 */
+    SeaValue   names;    /* +1 or nil */
+} RxCacheEnt;
+static _Thread_local RxCacheEnt rx_cache[RX_CACHE];
+static _Thread_local unsigned rx_cache_next;
+
+static bool rx_cache_get(const char *pat, size_t len, Rx *r) {
+    for (int i = 0; i < RX_CACHE; i++) {
+        RxCacheEnt *e = &rx_cache[i];
+        if (e->pat && e->len == len && memcmp(e->pat, pat, len) == 0) {
+            r->blob = e->blob;
+            sea_obj_retain(&r->blob->obj);
+            r->names = e->names;
+            if (sea_is_obj(r->names)) sea_obj_retain(sea_as_obj(r->names));
+            prog_load(r->blob, &r->pg);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void rx_cache_put(const char *pat, size_t len, const Rx *r) {
+    RxCacheEnt *e = &rx_cache[rx_cache_next++ % RX_CACHE];
+    if (e->pat) {
+        free(e->pat);
+        sea_obj_release(&e->blob->obj);
+        if (sea_is_obj(e->names)) sea_obj_release(sea_as_obj(e->names));
+    }
+    e->pat = malloc(len + 1);
+    memcpy(e->pat, pat, len);
+    e->len = len;
+    e->blob = r->blob;
+    sea_obj_retain(&e->blob->obj);
+    e->names = r->names;
+    if (sea_is_obj(e->names)) sea_obj_retain(sea_as_obj(e->names));
+}
+
 static void get_rx(SeaVM *vm, const char *fn, int argc, SeaValue *args, Rx *r) {
     memset(r, 0, sizeof *r);
     r->names = SEA_NIL_VAL;
@@ -1230,8 +1479,13 @@ static void get_rx(SeaVM *vm, const char *fn, int argc, SeaValue *args, Rx *r) {
     }
     SeaString *pat = sea_value_get_flat_string(args[0]);
     if (!pat) sea_vm_error_noreturn(vm, "re.%s: pattern (string or regex) expected, got %s", fn, sea_type_name(args[0]));
+    if (rx_cache_get(pat->data, pat->len, r)) {
+        sea_obj_release(&pat->obj);
+        return;
+    }
     char msg[256];
     bool ok = compile_pattern(pat->data, pat->len, NULL, r, msg, sizeof msg);
+    if (ok) rx_cache_put(pat->data, pat->len, r);
     sea_obj_release(&pat->obj);
     if (!ok) sea_vm_error_noreturn(vm, "%s", msg);
 }
@@ -1256,9 +1510,6 @@ static int64_t int_opt(int argc, SeaValue *args, int i, int64_t def) {
 static SeaValue make_match(Rx *r, SeaString *s, const int *caps) {
     int ng = (int)r->pg.ngroups;
     SeaTable *m = sea_table_new(TABLE_MAP);
-    tset(m, "text", new_str(s->data + caps[0], (size_t)(caps[1] - caps[0])));
-    tset(m, "start", sea_int_val(caps[0] + 1));
-    tset(m, "stop", sea_int_val(caps[1]));
     SeaArray *groups = sea_array_new((uint32_t)ng + 1);
     SeaArray *spans = sea_array_new((uint32_t)ng + 1);
     for (int g = 0; g <= ng; g++) {
@@ -1266,10 +1517,11 @@ static SeaValue make_match(Rx *r, SeaString *s, const int *caps) {
         if (a >= 0 && b >= a) {
             SeaValue t = new_str(s->data + a, (size_t)(b - a));
             sea_array_push(groups, t);
+            if (g == 0) sea_table_set_str(m, "text", t);   /* the same string as groups[0] (retained) */
             sea_obj_release(sea_as_obj(t));
-            SeaTable *sp = sea_table_new(TABLE_MAP);
-            sea_table_set(sp, sea_int_val(0), sea_int_val(a + 1));
-            sea_table_set(sp, sea_int_val(1), sea_int_val(b));
+            SeaArray *sp = sea_array_new(2);   /* [start, stop] */
+            sea_array_push(sp, sea_int_val(a + 1));
+            sea_array_push(sp, sea_int_val(b));
             sea_array_push(spans, sea_obj_val(&sp->obj));
             sea_obj_release(&sp->obj);
         } else {
@@ -1277,6 +1529,8 @@ static SeaValue make_match(Rx *r, SeaString *s, const int *caps) {
             sea_array_push(spans, SEA_NIL_VAL);
         }
     }
+    tset(m, "start", sea_int_val(caps[0] + 1));
+    tset(m, "stop", sea_int_val(caps[1]));
     tset(m, "groups", sea_obj_val(&groups->obj));
     tset(m, "spans", sea_obj_val(&spans->obj));
     SeaTable *named = sea_table_new(TABLE_MAP);

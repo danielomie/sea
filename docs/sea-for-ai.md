@@ -77,7 +77,8 @@ says what to write instead (`undefined variable 'pairs' (iterate with
 11. **Errors are values.** Functions return `error("msg")` instead of
     throwing; callers test `is_error(v)` and read `v.message`, or propagate
     with the postfix `?` operator: `local x = f()?` returns the error from
-    the current function if `f()` returned one. There is no `pcall`,
+    the current function if `f()` returned one; `fs.write(p, s)?` alone on a
+    line does the same and drops the value. There is no `pcall`,
     `try/catch` or `throw`.
 12. **`panic`/`recover` work like Go.** `recover()` only works inside a
     deferred function. Runtime errors (indexing `nil`, calling `nil`,
@@ -137,6 +138,11 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     `t["default"]` for a key that must be spelled so.
 28. **`string.join(list, sep)`** joins an array or a positional table;
     `table.concat` does not exist.
+29. **Regexes in long strings:** `[[...]]` ends at the first `]]`, which a
+    pattern like `[^\]]+\]` contains. Write such patterns as `[=[...]=]`
+    (or a normal string with doubled backslashes: `"\\d+"`).
+30. **`print(a, b)` separates with a tab** (Python uses a space). For exact
+    output use a template: `` print(`${a} ${b}`) `` or `printf`.
 
 ---
 

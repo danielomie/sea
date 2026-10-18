@@ -1,0 +1,51 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: the regex backtracker (short texts, windows over long ones) finds the
+-- same matches as the Pike VM (forced with SEA_RE_PIKE=1), for many patterns
+-- and texts, including matches that cross the backtracker's window edges.
+local SEA = fs.realpath("./bin/sea")
+local dir = fs.tempdir("reeng-")
+
+local patterns = [
+    "a+", "a*b", "(a|ab)(c|bcd)(d*)", "[a-z]+", "\\w+@\\w+\\.com", "(\\d+)-(\\d+)?",
+    "x*", "(a*)*", "(a|b)*?c", "^\\s*(\\S+)\\s*=\\s*(.*?)\\s*$", "(?i)hello|world", "\\bfoo\\b",
+    "[^,]*,", "(?m)^\\w+$", "(?s)<.+?>", "a{2,5}", "(?U)a+", "é+|ü", "(x)(y)?(z)?", ".*",
+    "[[:digit:]]{3}", "(?P<k>\\w+): (?P<v>[^;]*);?", "\\d{4}-\\d\\d-\\d\\d", "(ab|a)(bc|c)*",
+]
+local texts = [
+    "", "a", "aaab", "abcd", "xx ana@site.com yy bob@mail.com", "12-34 5- 678-9",
+    "hello World HELLO", "foo food foo.bar", "a,bb,,ccc,", "one\ntwo words\nthree",
+    "<a><b>c</b></a>", "aaaaaaa", "ééüü", "key = value  ", "xyz xy x", "2026-10-18 and 1999-01-01",
+    "name: ana; age: 31; city: Recife",
+]
+-- long texts: matches crossing every window size the backtracker tries
+local long = []
+for i = 1, 3000 do long[] = (i % 7 == 0) and "aaaa ab-12 foo@bar.com" or "xyz-" .. i end
+texts[] = string.join(long, " ")
+texts[] = string.rep("a", 5000) .. "b" .. string.rep("ab", 2000) .. "c"
+texts[] = string.rep("word ", 3000) .. "end"
+
+local prog = [==[
+local pats = json.decode(os.args[1])
+local texts = json.decode(fs.read(os.args[2]))
+local out = []
+for _, p in pats do
+    local rx = re.compile(p)
+    for _, t in texts do
+        local m = rx:match(t)
+        out[] = m == nil and "-" or `${m.start}:${m.stop}:${string.join(list.map(m.groups, function(g) return g or "~" end), "|")}`
+        out[] = tostring(len(rx:all(t)))
+        out[] = rx:gsub(t, "<$0>")
+    end
+end
+print(hash.sha256(string.join(out, "\n")), len(out))
+]==]
+fs.write(path.join(dir, "prog.sea"), prog)
+fs.write(path.join(dir, "texts.json"), json.encode(texts))
+local args = [SEA, path.join(dir, "prog.sea"), json.encode(patterns), path.join(dir, "texts.json")]
+local bt = process.run(args)
+local pike = process.run(args, {env = {SEA_RE_PIKE = "1"}})
+print(bt.ok, pike.ok, bt.stdout == pike.stdout, string.sub(bt.stdout, -6))
+if bt.stdout ~= pike.stdout then print(bt.stdout, pike.stdout, bt.stderr, pike.stderr) end
+fs.remove(dir, {recursive = true})
