@@ -785,7 +785,7 @@ static bool esc_is_struct_table(SeaNode *n) {
 /* Returns true if n is an empty array literal `[]` (no explicit capacity),
  * the only form eligible for arena-header allocation. */
 static bool esc_is_array_lit(SeaNode *n) {
-    return n && n->type == NODE_ARRAY_LIT && n->array_lit.cap == NULL;
+    return n && n->type == NODE_ARRAY_LIT && n->array_lit.count == 0;
 }
 
 /* Returns false if any field value would set reg_owned=1 in compile_expr,
@@ -887,7 +887,8 @@ static void esc_walk_captures(SeaEscapeInfo *ei, SeaNode *n, bool mark_idents) {
         }
         break;
     case NODE_ARRAY_LIT:
-        esc_walk_captures(ei, n->array_lit.cap, mark_idents);
+        for (int i = 0; i < n->array_lit.count; i++)
+            esc_walk_captures(ei, n->array_lit.elems[i], mark_idents);
         break;
     case NODE_PROPAGATE:
         esc_walk_captures(ei, n->propagate, mark_idents);
@@ -1014,7 +1015,8 @@ static void esc_scan(SeaEscapeInfo *ei, SeaNode *n) {
         }
         break;
     case NODE_ARRAY_LIT:
-        esc_scan(ei, n->array_lit.cap);
+        for (int i = 0; i < n->array_lit.count; i++)
+            esc_scan(ei, n->array_lit.elems[i]);
         break;
     case NODE_PROPAGATE:
         esc_scan(ei, n->propagate);
@@ -1944,20 +1946,35 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
 
         case NODE_ARRAY_LIT: {
             if (dst < 0) dst = alloc_reg(c);
-            if (node->array_lit.cap == NULL) {
-                /* []: no explicit capacity. If escape analysis proved this local
-                 * array never escapes the frame, arena-allocate its header (saving
-                 * one malloc); the heap data buffer is freed by the arena-aware
-                 * OP_RELEASE at scope exit. Otherwise use the sentinel B==A form. */
+            if (node->array_lit.count == 0) {
+                /* []: if escape analysis proved this local array never escapes
+                 * the frame, arena-allocate its header (saving one malloc); the
+                 * heap data buffer is freed by the arena-aware OP_RELEASE at scope
+                 * exit. Otherwise use the sentinel B==A form. */
                 if (esc_is_arena_candidate(&c->escape_info, node)) {
                     emit_abc(c, OP_NEW_ARRAY_LOCAL, dst, 8, 0, line);  /* B = initial cap hint */
                 } else {
                     emit_abc(c, OP_NEW_ARRAY, dst, dst, 0, line);
                 }
             } else {
-                int cap_reg = compile_expr(c, node->array_lit.cap, -1);
+                /* [e1, e2, ...]: a new array with room for them, then one push each
+                 * (a call yields one value here, as in any expression list) */
+                int n = node->array_lit.count;
+                int cap_reg = alloc_reg(c);
+                emit_asbx(c, OP_LOAD_INT, cap_reg, n < 30000 ? n : 30000, line);  /* a capacity hint */
                 emit_abc(c, OP_NEW_ARRAY, dst, cap_reg, 0, line);
                 free_reg(c, cap_reg);
+                for (int i = 0; i < n; i++) {
+                    int v = compile_expr(c, node->array_lit.elems[i], -1);
+                    if (can_move_from(c, v)) {
+                        emit_abc(c, OP_ARRAY_PUSH_MOVE, dst, v, 0, line);
+                        c->reg_meta[v].is_owned = 0;
+                    } else {
+                        emit_abc(c, OP_ARRAY_PUSH, dst, v, 0, line);
+                    }
+                    drop_temp(c, v, line);
+                    if (!reg_is_named_local(c, v)) free_reg(c, v);
+                }
             }
             reg_clear_int(c, dst);
             c->reg_meta[dst].is_owned = 1;

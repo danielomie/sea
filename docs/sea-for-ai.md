@@ -46,12 +46,12 @@ says what to write instead (`undefined variable 'pairs' (iterate with
 
 1. **Arrays are 0-indexed.** `a[0]` is the first element, `a[-1]` the last.
    Loop over indexes with `for i = 0, len(a) - 1 do`.
-2. **`[]` makes an empty array, and you append with `a[] = v`.** There is no
-   array literal with elements: `[1, 2, 3]` is a syntax error. There is no
-   `array()`, `push()`, `table.insert`, `append` or `#`.
+2. **Arrays are `[1, 2, 3]` (or `[]` empty), and you append with `a[] = v`.**
+   There is no `array()`, `push()`, `table.insert`, `append` or `#`.
+   **Nested arrays need a space after the first bracket**: `[ [1, 2], [3] ]`,
+   because `[[` starts a long string (as in Lua). `sea fmt` writes it so.
 3. **`{1, 2, 3}` is a positional *table*** (keys 0, 1, 2), not an array.
-   It works with `len`, indexing and `for-in`, but for a list you build
-   incrementally use `[]` and `a[] = v`.
+   It works with `len`, indexing and `for-in`, but use `[...]` for lists.
 4. **`len(x)`, not `#x`.** `#` is not an operator. `len(nil)` is 0.
 5. **`for k, v in t do`** iterates arrays (index, value), tables and maps
    (key, value), structs (field, value) and channels (value). There is no
@@ -203,10 +203,8 @@ print(f, f > 1e20)                    -- → 15511210043330985984000000  true
 ## 4. Collections
 
 ```sea
--- array: 0-indexed, grows with a[] = v
-local a = []
-a[] = "x"
-a[] = "y"
+-- array: 0-indexed, written [a, b, c], grows with a[] = v
+local a = ["x", "y"]
 a[] = "z"
 print(a[0], a[-1], len(a))            -- → x  z  3
 del a[1]                              -- remove and shift down
@@ -239,9 +237,9 @@ print(list[0], len(list))             -- → a  3
 
 -- nested data
 local cfg = {}
-cfg.servers = []
-cfg.servers[] = {host = "a.example", port = 80}
-print(cfg.servers[0].host)            -- → a.example
+cfg.servers = [{host = "a.example", port = 80}, {host = "b.example", port = 8080}]
+local grid = [ [1, 2], [3, 4] ]       -- a space after "[": "[[" starts a long string
+print(cfg.servers[1].port, grid[1][0])   -- → 8080  3
 
 -- sorting
 local words = string.split("pear apple fig", " ")
@@ -677,7 +675,8 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 
 | Lua / Python / Go / JS | Sea |
 |------------------------|-----|
-| `t = {1, 2, 3}` (Lua list), `[1, 2, 3]`, `[]int{1, 2, 3}` | `local t = []` then `t[] = 1` ... (or the positional table `{1, 2, 3}`, keys from 0) |
+| `t = {1, 2, 3}` (Lua list), `[1, 2, 3]`, `[]int{1, 2, 3}` | `local t = [1, 2, 3]` (indexes from 0) |
+| `[[1, 2], [3, 4]]` | `[ [1, 2], [3, 4] ]` (`[[` would start a long string) |
 | `table.insert(t, v)`, `t.append(v)`, `append(t, v)`, `t.push(v)` | `t[] = v` |
 | `table.remove(t, i)`, `del t[i]` | `del t[i]` (0-based) |
 | `#t`, `len(t)`, `t.length` | `len(t)` |

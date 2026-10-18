@@ -14,7 +14,7 @@ print(type(nil), type(true), type(42), type(3.14), type("hi"))
 -- nil  bool  int  number  string
 
 print(7 // 2, 7 / 2, 2 ^ 10, 0xFF)   -- 3  3.5  1024  255
-print(-7 // 2, -7 % 3)               -- -3  2   (// truncates; % is floored)
+print(-7 // 2, -7 % 3)               -- -4  2   (// and % floor)
 print(1 == 1.0, 10 .. "px")          -- true  10px
 ```
 
@@ -27,11 +27,10 @@ print(1 == 1.0, 10 .. "px")          -- true  10px
 
 ```sea
 -- array: 0-indexed, dynamic
-local a = []
-a[] = 10                 -- append
-a[] = 20
-a[] = 30
+local a = [10, 20]
+a[] = 30                     -- append
 print(a[0], a[-1], len(a))   -- 10  30  3
+local grid = [ [1, 2], [3] ] -- nested: a space after "[" ("[[" starts a long string)
 del a[0]                     -- remove and shift
 print(a[0], len(a))          -- 20  2
 
@@ -77,9 +76,7 @@ end
 for i = 1, 3 do print(i) end           -- inclusive: 1 2 3
 for i = 10, 1, -4 do print(i) end      -- 10 6 2
 
-local words = []
-words[] = "sea"
-words[] = "vm"
+local words = ["sea", "vm"]
 for i, w in words do print(i, w) end   -- 0 sea / 1 vm
 
 local count = 0
@@ -247,5 +244,5 @@ native `.so` libraries.
 ---
 
 Next: the [reference](reference.md) has every operator and built-in, the
-[examples](../examples/) directory has 29 runnable programs, and
+[examples](../examples/) directory has 30 runnable programs, and
 [architecture](architecture.md) explains how the VM works.

@@ -80,7 +80,7 @@ void sea_node_free(SeaNode *n) {
         case NODE_MAP_LIT:
             break;
         case NODE_ARRAY_LIT:
-            sea_node_free(n->array_lit.cap);
+            free_node_array(n->array_lit.elems, n->array_lit.count);
             break;
         case NODE_BLOCK:
             free_node_array(n->block.stmts, n->block.count);

@@ -7,9 +7,9 @@
 0	x
 1	y
 2	z
-2
+3
+10
 1
-2
 z
 y
 42
@@ -17,3 +17,11 @@ y
 2
 a
 c
+6	two	true	nil	1
+3	2
+2	ab
+x,x
+60
+array_lit	3	call	2
+local q = [ [1, 2], [3] ]
+

@@ -381,9 +381,13 @@ static SeaValue node_to_val(SeaNode *n, const SrcIndex *ix) {
             break;
         }
 
-        case NODE_ARRAY_LIT:
-            tset(t, "cap", node_to_val(n->array_lit.cap, ix));
+        case NODE_ARRAY_LIT: {
+            SeaArray *elems = sea_array_new(n->array_lit.count);
+            for (int i = 0; i < n->array_lit.count; i++) apush(elems, node_to_val(n->array_lit.elems[i], ix));
+            tset(t, "elems", sea_obj_val(&elems->obj));
+            tset(t, "end_line", sea_int_val(n->array_lit.end_line));
             break;
+        }
 
         case NODE_CHAN_RECV:
             tset(t, "channel", node_to_val(n->unop.expr, ix));
@@ -707,7 +711,7 @@ static const struct { const char *type; const char *fields[4]; } CHILD_FIELDS[] 
     {"method_call", {"object", "args*"}},
     {"func",        {"body"}},
     {"table",       {"fields%"}},
-    {"array_lit",   {"cap"}},
+    {"array_lit",   {"elems*"}},
     {"chan_recv",   {"channel"}},
     {"chan_send",   {"channel", "value"}},
     {"propagate",   {"expr"}},
@@ -1235,6 +1239,10 @@ static bool ends_multiline(Obj *n) {
         SeaArray *f = tget_arr(n, "fields");
         return f && f->len && max_line(n, 0) > node_line(n);
     }
+    if (is_type(n, "array_lit")) {
+        SeaArray *e = tget_arr(n, "elems");
+        return e && e->len && max_line(n, 0) > node_line(n);
+    }
     return false;
 }
 
@@ -1396,6 +1404,63 @@ static void print_table(Printer *P, Obj *t) {
     outc(P, '}');
 }
 
+/* An array literal: one line, or (when the source had several) one row per
+ * source line, as table literals do. */
+static void print_array(Printer *P, Obj *t) {
+    SeaArray *elems = tget_arr(t, "elems");
+    uint32_t n = elems ? elems->len : 0;
+    if (n == 0) { outs(P, "[]"); return; }
+    int tline = node_line(t);
+    bool multi = tline > 0 && node_end(t) > tline;
+    for (uint32_t i = 0; i < n && !multi; i++) {
+        Obj *e = as_node(elems->data[i]);
+        if (is_type(e, "func") && !one_line(e)) multi = true;
+    }
+    /* "[[" would open a long string: [ [1, 2], [3] ] keeps a space */
+    Obj *first = as_node(elems->data[0]);
+    bool pad = false;
+    if (is_type(first, "array_lit") || is_type(first, "map_lit")) pad = true;
+    if (is_type(first, "string")) {
+        const char *raw = tget_str(first, "raw");
+        if (raw && raw[0] == '[') pad = true;
+    }
+    if (!multi) {
+        outs(P, pad ? "[ " : "[");
+        print_list(P, elems);
+        outs(P, pad ? " ]" : "]");
+        return;
+    }
+    outc(P, '[');
+    attach_trailing(P, tline, tline);
+    outc(P, '\n');
+    P->depth++;
+    P->at_start = true;
+    for (uint32_t i = 0; i < n && !P->failed; ) {
+        Obj *e = as_node(elems->data[i]);
+        int line = e ? min_line(e, 0) : 0;
+        if (line > 0) flush_before(P, line);
+        begin_item(P, line);
+        print_expr(P, elems->data[i]);
+        uint32_t j = i + 1;
+        while (j < n && line > 0 && !is_type(e, "func")) {
+            Obj *next = as_node(elems->data[j]);
+            if (!next || min_line(next, 0) != line || is_type(next, "func")) break;
+            outs(P, ", ");
+            print_expr(P, elems->data[j]);
+            j++;
+        }
+        outc(P, ',');
+        attach_trailing(P, line, line);
+        outc(P, '\n');
+        note_line(P, line);
+        i = j;
+    }
+    if (node_end(t) > 0) flush_before(P, node_end(t));   /* comments before `]` */
+    P->depth--;
+    indent(P);
+    outc(P, ']');
+}
+
 static void print_string_node(Printer *P, Obj *n) {
     SeaValue v = tget(n, "value");
     size_t len;
@@ -1432,9 +1497,7 @@ static void print_expr(Printer *P, SeaValue v) {
     else if (strcmp(type, "ident") == 0) print_name(P, tget_str(n, "name"), "variable");
     else if (strcmp(type, "map_lit") == 0) outs(P, "[=]");
     else if (strcmp(type, "array_lit") == 0) {
-        outc(P, '[');
-        if (as_node(tget(n, "cap"))) print_expr(P, tget(n, "cap"));
-        outc(P, ']');
+        print_array(P, n);
     } else if (strcmp(type, "table") == 0) {
         print_table(P, n);
     } else if (strcmp(type, "unop") == 0 || strcmp(type, "chan_recv") == 0) {

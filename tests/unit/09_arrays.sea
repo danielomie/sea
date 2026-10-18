@@ -29,13 +29,13 @@ end
 -- 1	y
 -- 2	z
 
--- pre-allocated array
+-- array literal with elements: [10] is a one-element array
 local c = [10]
 c[] = 1
 c[] = 2
-print(len(c))   -- 2
-print(c[0])     -- 1
-print(c[1])     -- 2
+print(len(c))   -- 3
+print(c[0])     -- 10
+print(c[1])     -- 1
 
 -- negative index access
 print(b[-1])    -- z
@@ -56,3 +56,21 @@ del d[1]
 print(len(d))   -- 2
 print(d[0])     -- a
 print(d[1])     -- c
+
+-- array literals with elements
+local lit = [1, "two", 3.5, true, nil, {k = 1}]
+print(len(lit), lit[1], lit[3], lit[4], lit[5].k)
+local grid = [ [1, 2], [3, 4] ]          -- "[[" would start a long string
+print(grid[1][0], len(grid[0]))
+local trailing = ["a", "b",]
+print(len(trailing), string.join(trailing, ""))
+local function pair() return "x", "y" end
+local first_only = [pair(), pair()]     -- a call gives one value in a list
+print(string.join(first_only, ","))
+local total = 0
+for _, v in [10, 20, 30] do total = total + v end
+print(total)
+local p = require("sea/parser")
+local node = p.parse("local q = [1, f(x), [2]]").stmts[0].values[0]
+print(node.type, len(node.elems), node.elems[1].type, node.elems[2].elems[0].value)
+print(p.format("local q=[ [1,2],[ 3 ] ]"))

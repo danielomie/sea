@@ -1384,13 +1384,14 @@ print(h:digest(), encoding.base64_encode(hash.sha256(data, true), {url = true}))
 |--------|------|-------------|
 | `{}` | table (struct-mode) | Fixed-layout struct; field names set at compile time with `{ k = v }` |
 | `[]` | array | Empty dynamic array |
-| `[n]` | array | Pre-allocated array with capacity `n` |
+| `[a, b, c]` | array | Array with these elements (a trailing comma is allowed). Write nested arrays with a space after the first bracket, `[ [1, 2], [3] ]`: `[[` starts a long string |
 | `[=]` | map | Swiss-table hash map (any-type keys) |
 
 ### Array operations
 
 ```sea
 local a = []
+local b = [1, 2, 3]   -- with elements (a call in the list gives one value)
 a[] = v          -- append
 a[i] = v         -- set at index i (0-based; negative: from end, -1 = last)
 v = a[i]         -- get (negative indices work)
@@ -1694,7 +1695,8 @@ once can stall the other goroutines.
 |-------|-------|
 | expecting `for k, v in arr` to yield 1-based keys | it yields `(index, value)` with 0-based indexes; `for i = 0, len(arr)-1 do` is equivalent |
 | `#arr` | `len(arr)` |
-| `{1, 2, 3}` as array | `local a = []; a[]=1; a[]=2; a[]=3` |
+| `{1, 2, 3}` as array | `[1, 2, 3]` (`{1, 2, 3}` is a positional table) |
+| `[[1, 2], [3]]` | `[ [1, 2], [3] ]` (`[[` starts a long string) |
 | `1 == 1.0` is `false` | it is `true`: `==` compares int and float numerically (they remain distinct types: `type(1)` is `"int"`, `type(1.0)` is `"number"`) |
 | `!=` | `~=` |
 | `string.sub(s, 0, 2)` | `string.sub(s, 1, 2)` (1-based) |

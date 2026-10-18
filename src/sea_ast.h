@@ -147,8 +147,12 @@ struct SeaNode {
             int       end_line;  // line of the '}'
         } table;
 
-        // Array literal: [] or [cap_expr]
-        struct { SeaNode *cap; } array_lit;   // cap=NULL for [], cap=expr for [n]
+        // Array literal: [] or [e1, e2, ...]
+        struct {
+            SeaNode **elems;
+            int       count;
+            int       end_line;  // line of the ']'
+        } array_lit;
 
         // Block of statements (end_line: line of the token that ends it:
         // end, else, elseif, case or the end of the input)

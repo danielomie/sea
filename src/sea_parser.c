@@ -350,13 +350,29 @@ static SeaNode* parse_primary(SeaParser *p) {
                 expect(p, TK_RBRACKET);
                 return node_new(NODE_MAP_LIT, line, col);
             }
-            // [] or [cap_expr] → array literal
+            // [] or [e1, e2, ...] → array literal (a trailing comma is allowed)
             SeaNode *n = node_new(NODE_ARRAY_LIT, line, col);
-            if (check(p, TK_RBRACKET)) {
-                n->array_lit.cap = NULL;
-            } else {
-                n->array_lit.cap = parse_expr(p);
+            SeaNode **elems = NULL;
+            int count = 0, cap = 0;
+            while (!check(p, TK_RBRACKET) && !check(p, TK_EOF)) {
+                SeaNode *e = parse_expr(p);
+                if (!e || p->had_error) {
+                    sea_node_free(e);
+                    break;
+                }
+                if (count >= cap) {
+                    int old = cap;
+                    cap = old < 8 ? 8 : old * 2;
+                    elems = SEA_REALLOC_N(elems, SeaNode*, old, cap);
+                }
+                elems[count++] = e;
+                if (!match(p, TK_COMMA)) break;
             }
+            if (elems && count < cap) elems = SEA_REALLOC_N(elems, SeaNode*, cap, count);
+            if (elems && count == 0) { sea_free(elems, sizeof(SeaNode*) * (size_t)cap); elems = NULL; }
+            n->array_lit.elems = elems;
+            n->array_lit.count = count;
+            n->array_lit.end_line = cur(p).line;
             expect(p, TK_RBRACKET);
             return n;
         }
