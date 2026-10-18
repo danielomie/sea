@@ -94,6 +94,16 @@ builtin["sea/parser"] = true
 builtin["sea/test"] = true
 builtin["sea/check"] = true
 
+-- The libraries installed with the sea binary (make install): lib/sea next to
+-- its bin/ directory, as require looks; nil when there is none
+local function sea_libdir()
+    local exe = fs.realpath("/proc/self/exe")
+    if is_error(exe) then return nil end
+    local d = path.join(path.dirname(path.dirname(exe)), "lib", "sea")
+    if fs.isdir(d) then return d end
+    return nil
+end
+
 -- Where require(name) from a file in dir finds its module (as the VM looks)
 local function resolve(name, dir)
     local function try(base)
@@ -124,6 +134,14 @@ local function resolve(name, dir)
             for _, d in string.split(sp, ":") do
                 if found == nil and d ~= "" then found = try(path.join(d, name)) end
             end
+        end
+    end
+    local lib = sea_libdir()
+    if found == nil and lib ~= nil and not string.starts_with(name, ".") then
+        found = try(path.join(lib, name))
+        local own = path.join(lib, name, path.basename(name))
+        for _, ext in {".sea", ".so"} do
+            if found == nil and fs.isfile(own .. ext) then found = path.normalize(own .. ext) end
         end
     end
     return found

@@ -452,7 +452,8 @@ print(geometry.area(3, 4))
 - Paths are relative to the requiring file; `.sea` is added (a native
   `.so` library is found the same way). Modules are loaded once and cached.
 - Then the current directory, then `sea_modules/` (packages installed by
-  `sea get`), then `SEA_PATH`.
+  `sea get`), then `SEA_PATH`, then the libraries installed by
+  `make install` (`require("json")` works by name with an installed `sea`).
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
   sort bigint`. `require("sea/parser")`, `require("sea/test")` and
@@ -561,8 +562,9 @@ collector; you rarely need these.
 
 ## 10. External libraries (`libs/`)
 
-Required by path (relative to the requiring file). Native ones need a build
-first: `make -C libs/<name>`.
+Required by path (relative to the requiring file), or by name
+(`require("json")`) when Sea was installed with `make install`. Native ones
+need a build first: `make -C libs/<name>`.
 
 | Library | Path from the repo root | What |
 |---------|-------------------------|------|

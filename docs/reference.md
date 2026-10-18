@@ -1722,3 +1722,9 @@ is:
    in any directory above it (`sea_modules/name.sea`, `name/init.sea`,
    `name.so`, or `name/name.sea`)
 4. Each directory in `SEA_PATH` (colon-separated environment variable)
+5. For a name that does not start with `.`: the libraries installed by
+   `make install`, in `lib/sea/` next to the `bin/` directory of the running
+   `sea` binary (`/usr/local/lib/sea` for `/usr/local/bin/sea`):
+   `lib/sea/name.sea`, `name/init.sea`, `name.so`, `name/name.sea` or
+   `name/name.so`. So an installed `sea` loads `require("json")`,
+   `require("http")` or `require("sqlite")` from anywhere

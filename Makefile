@@ -28,7 +28,7 @@ JIT_OBJ_DIR = obj-jit
 JIT_OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(JIT_OBJ_DIR)/%.o)
 JIT_TARGET  = $(BIN_DIR)/sea-jit
 
-.PHONY: all clean test test-jit test-seac test-build test-dwe test-format test-license asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
+.PHONY: all clean test test-jit test-seac test-build test-dwe test-format test-license install uninstall asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
 
 all: $(TARGET)
 
@@ -163,3 +163,44 @@ test-asan: clean
 
 clean:
 	rm -rf $(OBJ_DIR) $(JIT_OBJ_DIR) $(BIN_DIR) $(GEN_DIR)
+
+# make install [PREFIX=/usr/local] [DESTDIR=...]: bin/sea (and bin/sea-jit
+# when built) into $(PREFIX)/bin, and the libraries into $(PREFIX)/lib/sea/<lib>/
+# keeping their layout (their requires are relative). require() looks in
+# <dir of the executable>/../lib/sea, so require("json") then works anywhere.
+# Native libraries are installed when built (make -C libs/<lib>), with the
+# shared libraries they load from their vendor/ (libduckdb); libs/test is
+# skipped (built in as sea/test).
+PREFIX  ?= /usr/local
+BINDIR   = $(DESTDIR)$(PREFIX)/bin
+SEALIB   = $(DESTDIR)$(PREFIX)/lib/sea
+
+install: $(TARGET)
+	install -d $(BINDIR) $(SEALIB)
+	install -m 755 $(TARGET) $(BINDIR)/sea
+	@if [ -x $(JIT_TARGET) ]; then install -m 755 $(JIT_TARGET) $(BINDIR)/sea-jit && echo "installed sea-jit"; fi
+	@for d in libs/*/; do \
+	    lib=$$(basename $$d); \
+	    [ "$$lib" = test ] && continue; \
+	    files=$$(cd $$d && ls *.sea *.so 2>/dev/null | grep -v '^test\.sea$$'); \
+	    [ -z "$$files" ] && continue; \
+	    if ls $$d/*.c >/dev/null 2>&1 && ! ls $$d/*.so >/dev/null 2>&1; then \
+	        echo "skipped $$lib (not built: make -C libs/$$lib)"; continue; \
+	    fi; \
+	    install -d $(SEALIB)/$$lib; \
+	    for f in $$files; do \
+	        case $$f in *.so) m=755;; *) m=644;; esac; \
+	        install -m $$m $$d$$f $(SEALIB)/$$lib/$$f; \
+	    done; \
+	    for f in $$d/vendor/*.so*; do \
+	        [ -f "$$f" ] || continue; \
+	        install -d $(SEALIB)/$$lib/vendor; \
+	        install -m 755 $$f $(SEALIB)/$$lib/vendor/; \
+	    done; \
+	    echo "installed $$lib"; \
+	done
+	@echo "sea installed in $(BINDIR); libraries in $(SEALIB)"
+
+uninstall:
+	rm -f $(BINDIR)/sea $(BINDIR)/sea-jit
+	rm -rf $(SEALIB)

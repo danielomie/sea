@@ -28,6 +28,8 @@ pure-Sea libraries work out of the box.
 | `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
+After `make install` (see the README), an installed `sea` also finds the
+libraries by name from anywhere: `require("json")`, `require("http")`.
 
 Writing a native library: see `src/sea.h` for the module convention and
 [memory.md](memory.md#writing-native-functions) for the ownership rules. In

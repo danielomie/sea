@@ -227,3 +227,8 @@ true
 true
 {"jsonrpc":"2.0","id":10,"result":null}
 0
+-- installed libraries (make install): <prefix>/lib/sea next to <prefix>/bin/sea
+HI SEA	X
+	
+0	
+1	true

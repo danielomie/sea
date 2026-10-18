@@ -231,6 +231,20 @@ static int require_try_native(const char *dir, const char *name,
     return REQUIRE_NONE;
 }
 
+/* The directory of installed libraries: <dir of the executable>/../lib/sea,
+ * when it exists. */
+static bool require_libdir(char *out, size_t outsz) {
+    char exe[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) return false;
+    exe[n] = '\0';
+    char *slash = strrchr(exe, '/');
+    if (!slash) return false;
+    *slash = '\0';                         /* .../bin */
+    if ((size_t)snprintf(out, outsz, "%s/../lib/sea", exe) >= outsz) return false;
+    return access(out, X_OK) == 0;
+}
+
 /* Parse, compile and run a module's source; cache its value under key
  * (consumed). name is its source name (a path, or sea/... when built in). */
 static SeaValue require_run_source(SeaVM *vm, SeaString *key, const char *src,
@@ -442,6 +456,24 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
             while (tok && !found) {
                 TRY_DIR(tok);
                 tok = strtok(NULL, ":");
+            }
+        }
+    }
+    /* The libraries installed with the binary (make install): lib/sea next
+     * to its bin/ directory, found from the executable so that any PREFIX
+     * works. Bare names only: "json" is lib/sea/json/json.so */
+    if (!found && !absolute && name[0] != '.') {
+        char libdir[PATH_MAX];
+        if (require_libdir(libdir, sizeof libdir)) {
+            TRY_DIR(libdir);
+            if (!found) {
+                const char *last = strrchr(name, '/');
+                last = last ? last + 1 : name;
+                char sub[PATH_MAX];
+                if (snprintf(sub, sizeof sub, "%s/%s", libdir, name) < (int)sizeof sub) {
+                    found = require_try_dir(sub, last, path, sizeof(path));
+                    if (!found) found = require_try_native(sub, last, path, sizeof(path));
+                }
             }
         }
     }

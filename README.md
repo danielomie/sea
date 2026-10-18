@@ -81,6 +81,19 @@ bin/sea utils/license/license.sea -l BSD-3-Clause -c "The Sea Authors"       # p
 
 Native libraries are built per library, e.g. `make -C libs/json`.
 
+### Installing
+
+```sh
+make -C libs/json && make -C libs/http ...   # the native libraries you want (optional)
+sudo make install                 # /usr/local/bin/sea (+ sea-jit if built), /usr/local/lib/sea/<lib>/
+make install PREFIX=$HOME/.local  # or anywhere else; DESTDIR=... for packaging
+sudo make uninstall               # same PREFIX / DESTDIR as the install
+```
+
+`make install` copies the binary and the libraries (the pure Sea ones, and
+the native ones that are built). An installed `sea` finds them by name from
+any directory: `require("json")`, `require("http")`, `require("sqlite")`.
+
 ## Documentation
 
 | Document | Contents |

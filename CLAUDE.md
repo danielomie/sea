@@ -9,6 +9,8 @@ make                  # Build bin/sea (optimized, -O2)
 make debug            # Debug build (-g -O0 -DSEA_DEBUG)
 make asan             # AddressSanitizer build
 make clean            # Remove bin/ and obj/
+make install          # bin/sea (+ sea-jit) to $(PREFIX)/bin, built libs to $(PREFIX)/lib/sea/<lib>/
+                      # (PREFIX=/usr/local, DESTDIR); make uninstall removes them
 make sea-jit          # Build bin/sea-jit (optional JIT, needs libgccjit headers)
 bin/sea fmt -l .      # sea fmt / doc / test: Sea scripts in tools/, embedded at build
                       # time (tools/embed.sh -> gen/sea_tools.h, included by sea_main.c);
@@ -93,6 +95,9 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
 2. Current working directory + path
 3. Bare names: `sea_modules/` (packages from `sea get`) next to the requiring file or above
 4. Each directory in `SEA_PATH` (colon-separated env var)
+5. Bare names: `<dir of the sea binary>/../lib/sea/` (the libraries `make install` puts
+   there: `require("json")` → `lib/sea/json/json.so`). tools/lib/check.sea, tools/build.sea and
+   tools/lsp.sea repeat this search: keep them in sync with `src/sea_stdlib.c`
 
 Before the search: built-in modules, the embedded `sea/test`/`sea/check`, then (in a
 `sea build` executable) the bundled modules.

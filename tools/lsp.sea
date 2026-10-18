@@ -449,6 +449,16 @@ local function returned_table(ast)
     return nil
 end
 
+-- The libraries installed with the sea binary (make install): lib/sea next to
+-- its bin/ directory, as require looks; nil when there is none
+local function sea_libdir()
+    local exe = fs.realpath("/proc/self/exe")
+    if is_error(exe) then return nil end
+    local d = path.join(path.dirname(path.dirname(exe)), "lib", "sea")
+    if fs.isdir(d) then return d end
+    return nil
+end
+
 -- A required module's file, as require would find it from dir (Sea files only)
 local function module_file(name, dir)
     local function try(base)
@@ -472,6 +482,12 @@ local function module_file(name, dir)
             if d == "/" then break end
             d = path.dirname(d)
         end
+    end
+    local lib = sea_libdir()
+    if found == nil and lib ~= nil and not string.starts_with(name, ".") then
+        found = try(path.join(lib, name))
+        local own = path.join(lib, name, path.basename(name) .. ".sea")
+        if found == nil and fs.isfile(own) then found = own end
     end
     return found
 end
