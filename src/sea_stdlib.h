@@ -22,6 +22,7 @@ void sea_lib_string_register(SeaVM *vm);
 void sea_lib_io_register(SeaVM *vm);
 void sea_lib_os_register(SeaVM *vm);
 void sea_lib_os_set_args(SeaVM *vm, int argc, char **argv);
+void sea_lib_os_set_script(const char *path);
 void sea_lib_sync_register(SeaVM *vm);
 void sea_lib_map_register(SeaVM *vm);
 void sea_lib_time_register(SeaVM *vm);

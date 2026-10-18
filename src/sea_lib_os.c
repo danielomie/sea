@@ -182,6 +182,13 @@ void sea_lib_os_set_args(SeaVM *vm, int argc, char **argv) {
     g_os_argv = argv;
 }
 
+/* os.script: the running script's path (nil for sea -e and standard input) */
+static const char *g_os_script = NULL;
+
+void sea_lib_os_set_script(const char *path) {
+    g_os_script = path;
+}
+
 /* ---- secure random bytes (getrandom, else /dev/urandom) ---- */
 
 static bool fill_random(unsigned char *buf, size_t n) {
@@ -280,6 +287,11 @@ void sea_lib_os_register(SeaVM *vm) {
     }
     sea_table_set_str(mod, "args", sea_obj_val(&arr->obj));
     sea_obj_release(&arr->obj);
+    if (g_os_script && access(g_os_script, R_OK) == 0) {
+        SeaString *s = sea_string_from_cstr(g_os_script);
+        sea_table_set_str(mod, "script", sea_obj_val(&s->obj));
+        sea_obj_release(&s->obj);
+    }
 
     sea_vm_register_module(vm, "os", mod);
     sea_obj_release(&mod->obj);

@@ -813,7 +813,9 @@ When a `.sea` file is run with `sea file.sea arg1 arg2 ...`, the arguments are a
 | `os.args[1]` | First argument after the script filename |
 | `os.args[N]` | Nth argument |
 
-Use `len(os.args) - 1` to get the count of arguments passed.
+Use `len(os.args) - 1` to get the count of arguments passed. `os.script` is the
+running script's path as given on the command line (`nil` for `sea -e` and
+standard input), to find files that come with it.
 
 ```sea
 -- sea myscript.sea hello world

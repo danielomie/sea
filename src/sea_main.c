@@ -153,6 +153,7 @@ static void cmd_run_ex(const char *path, const char *embedded) {
     SeaVM *vm = sea_vm_new();
     vm->shared->jit_enabled = g_jit_enabled; vm->jit_enabled = g_jit_enabled;
     sea_lib_os_set_args(vm, g_script_argc, g_script_argv);
+    sea_lib_os_set_script(path);
     sea_stdlib_register(vm);
     vm->source_name = path;
 

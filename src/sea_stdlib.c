@@ -280,7 +280,9 @@ static SeaValue require_run_source(SeaVM *vm, SeaString *key, const char *src,
     }
     sea_parser_free(&parser);
 
-    SeaChunk *chunk = sea_compile(program, name);
+    /* the chunk keeps its source name: the interned key's bytes outlive it
+     * (name may be the caller's buffer) */
+    SeaChunk *chunk = sea_compile(program, key->data);
     sea_node_free(program);
 
     if (!chunk) {
@@ -377,6 +379,14 @@ static SeaValue require_bundled(SeaVM *vm, const SeaBundleEntry *e) {
 static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !sea_is_string(args[0])) return SEA_NIL_VAL;
     const char *name = SEA_AS_STRING(args[0])->data;
+    /* the requiring file: the source of the function that calls require (a
+     * module's function may require later, while another file is running) */
+    const char *requiring = vm->source_name;
+    if (vm->frame_count > 0) {
+        SeaCallFrame *f = &vm->frames[vm->frame_count - 1];
+        if (f->closure && !f->closure->is_native && f->closure->chunk && f->closure->chunk->source)
+            requiring = f->closure->chunk->source;
+    }
 
     /* 1. Built-in / pre-registered modules (math, string, map, …) */
     SeaValue mod = SEA_NIL_VAL;
@@ -397,7 +407,7 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     }
 
     /* 1c. The modules of a program bundled by `sea build` */
-    const SeaBundleEntry *be = sea_bundle_find(vm->source_name, name);
+    const SeaBundleEntry *be = sea_bundle_find(requiring, name);
     if (be) return require_bundled(vm, be);
 
     /* 2. Resolve file path
@@ -419,9 +429,9 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     bool absolute = name[0] == '/';
     if (absolute) TRY_DIR(NULL);
 
-    if (!found && !absolute && vm->source_name) {
+    if (!found && !absolute && requiring) {
         char dir[PATH_MAX];
-        strncpy(dir, vm->source_name, sizeof(dir) - 1);
+        strncpy(dir, requiring, sizeof(dir) - 1);
         dir[sizeof(dir) - 1] = '\0';
         char *slash = strrchr(dir, '/');
         if (slash) *slash = '\0'; else strcpy(dir, ".");
@@ -434,7 +444,7 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
      * directory or any directory above it (bare names only) */
     if (!found && !absolute && name[0] != '.') {
         char start[PATH_MAX], dir[PATH_MAX];
-        const char *src = vm->source_name ? vm->source_name : "./x";
+        const char *src = requiring ? requiring : "./x";
         const char *slash = strrchr(src, '/');
         if (slash) snprintf(start, sizeof start, "%.*s", (int)(slash - src), src);
         else snprintf(start, sizeof start, ".");
