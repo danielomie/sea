@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) 2026 Daniel
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: BSD-3-Clause
 
 # Turn Sea sources into a C header: one byte array per file and a table
 # { name, src } named TABLE. An argument is name=file, or a file whose

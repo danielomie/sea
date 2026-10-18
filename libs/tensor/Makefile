@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Daniel
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: BSD-3-Clause
 
 CC     = gcc
 CFLAGS = -std=c11 -O3 -march=native -ffast-math -fno-finite-math-only -Wall -Wextra \

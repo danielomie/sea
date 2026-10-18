@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Daniel
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: BSD-3-Clause
 
 # Download the DuckDB C library (libduckdb.so + duckdb.h) into vendor/.
 # The version and the SHA-256 of each release archive are pinned here.

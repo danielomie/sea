@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Test: escape analysis arena allocation for local arrays (Etapa 5)
 -- A `local arr = []` that never escapes gets an arena-allocated header.

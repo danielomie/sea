@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- client_get.sea — HTTP GET example
 -- Usage: bin/sea libs/http/examples/client_get.sea

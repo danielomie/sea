@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Daniel
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 /* sea_prof.c — the sampling profiler behind `sea prof` (see sea_prof.h) */

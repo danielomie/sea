@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Test: copy propagation (Etapa 3)
 -- local y = x skips the MOVE and reads x's register directly

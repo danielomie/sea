@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Test: libs/websocket (needs make -C libs/websocket, libs/http, libs/ssl): an echo
 -- server through http.listen and ws.upgrade, and clients with ws.connect

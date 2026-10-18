@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Test: x = nil on an owned local emits OP_RELEASE (no leak, no double-free)
 

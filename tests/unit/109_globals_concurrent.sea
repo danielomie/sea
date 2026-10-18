@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Globals written and read from many goroutines at once: new globals force
 -- the globals table to grow while other goroutines look up builtins.

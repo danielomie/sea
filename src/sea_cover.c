@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026 Daniel
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
 /* sea_cover.c — line coverage records (see sea_cover.h) */

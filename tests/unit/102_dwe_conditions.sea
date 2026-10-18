@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Conditions must test the right register. The dead-write eliminator used to
 -- drop the copy of a condition into a temporary, because it did not know that

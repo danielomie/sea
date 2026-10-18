@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- Test: util/license.sea (license headers), run as ./bin/sea from the repo root
 local SEA = fs.realpath("./bin/sea")
@@ -35,6 +35,7 @@ print(fs.read(dir .. "/src/a.c"))
 print(fs.read(dir .. "/run.sh"))
 print(fs.read(dir .. "/m.sea"))
 print(fs.stat(dir .. "/run.sh").mode == 493, string.sub(fs.read(dir .. "/LICENSE"), 1, 41))
+print(string.contains(fs.read(dir .. "/LICENSE"), "COPYRIGHT HOLDERS BE LIABLE"))
 print(run({"-l", "MIT", "-c", "Ana Silva", "-y", "2026", "-check"}))
 print(run({"-l", "MIT", "-c", "Ana Silva", "-y", "2026"}))
 print(run({"-l", "Apache-2.0", "-c", "Ana Silva", "-y", "2025-2026", "-check"}))

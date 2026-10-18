@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- examples/client.sea — TLS client example using the ssl lib
 -- Run from project root: bin/sea libs/ssl/examples/client.sea

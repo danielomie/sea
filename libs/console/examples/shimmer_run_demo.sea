@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- shimmer_run_demo.sea — demonstra console.shimmer_run
 -- Usage: bin/sea libs/console/examples/shimmer_run_demo.sea

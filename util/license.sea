@@ -1,5 +1,5 @@
 -- Copyright (c) 2026 Daniel
--- SPDX-License-Identifier: MIT
+-- SPDX-License-Identifier: BSD-3-Clause
 
 -- util/license.sea — put a license header in the project's source files
 --
@@ -284,7 +284,7 @@ for _, f in skipped do io.write_err("license: skipped " .. f .. " (it has anothe
 local TEXTS = {}
 TEXTS["MIT"] = [==[MIT License
 
-Copyright (c) YEAR HOLDER
+Copyright (c) <YEAR> <HOLDER>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -306,7 +306,7 @@ SOFTWARE.
 ]==]
 TEXTS["ISC"] = [==[ISC License
 
-Copyright (c) YEAR HOLDER
+Copyright (c) <YEAR> <HOLDER>
 
 Permission to use, copy, modify, and/or distribute this software for any
 purpose with or without fee is hereby granted, provided that the above
@@ -322,7 +322,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ]==]
 TEXTS["0BSD"] = [==[Zero-Clause BSD
 
-Copyright (C) YEAR HOLDER
+Copyright (C) <YEAR> <HOLDER>
 
 Permission to use, copy, modify, and/or distribute this software for any
 purpose with or without fee is hereby granted.
@@ -362,8 +362,8 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ]==]
-TEXTS["BSD-2-Clause"] = "BSD 2-Clause License\n\nCopyright (c) YEAR, HOLDER\n\n" .. BSD_BODY .. BSD_DISCLAIMER
-TEXTS["BSD-3-Clause"] = "BSD 3-Clause License\n\nCopyright (c) YEAR, HOLDER\n\n" .. BSD_BODY .. BSD3_CLAUSE .. BSD_DISCLAIMER
+TEXTS["BSD-2-Clause"] = "BSD 2-Clause License\n\nCopyright (c) <YEAR>, <HOLDER>\n\n" .. BSD_BODY .. "\n" .. BSD_DISCLAIMER
+TEXTS["BSD-3-Clause"] = "BSD 3-Clause License\n\nCopyright (c) <YEAR>, <HOLDER>\n\n" .. BSD_BODY .. "\n" .. BSD3_CLAUSE .. "\n" .. BSD_DISCLAIMER
 TEXTS["Unlicense"] = [==[This is free and unencumbered software released into the public domain.
 
 Anyone is free to copy, modify, publish, use, compile, sell, or
@@ -395,7 +395,7 @@ if write_file and mode ~= "remove" and mode ~= "check" then
     if text == nil then
         io.write_err("license: no built-in text for " .. license .. "; get it from https://spdx.org/licenses/" .. license .. ".txt and save it as LICENSE\n")
     else
-        text = string.replace(string.replace(text, "YEAR", year), "HOLDER", holder)
+        text = string.replace(string.replace(text, "<YEAR>", year), "<HOLDER>", holder)
         local target = fs.isdir(paths[0]) and path.join(paths[0], "LICENSE") or "LICENSE"
         if dry then
             print("would write " .. target)

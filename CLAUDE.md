@@ -16,7 +16,7 @@ bin/sea fmt -l .      # sea fmt / doc / test: Sea scripts in tools/, embedded at
                       # (sea/test = libs/test/test.sea, sea/check = tools/lib/check.sea)
                       # into gen/sea_modules.h
 
-bin/sea util/license.sea -l MIT -check   # license headers in .c/.h/.sea/.sh/Makefile
+bin/sea util/license.sea -l BSD-3-Clause -check   # license headers in .c/.h/.sea/.sh/Makefile
                       # (-n dry run, -update, -remove; skips vendor/, gen/, obj/)
 
 # Native libraries under libs/ (e.g. json, yaml, toml, csv, compress, xml, console, http, ssl, jwt, tensor, duckdb)
@@ -30,7 +30,7 @@ make -C libs/sqlite test  # sqlite: first build downloads the SQLite amalgamatio
 ```sh
 # Core VM tests (tests/unit/*.sea vs *.expected)
 make test                        # Build + run all unit tests, then the license header check
-make test-license                # Only the MIT header check (util/license.sea -check)
+make test-license                # Only the BSD-3-Clause header check (util/license.sea -check)
 make test-dwe                    # Unit tests with dead-write-elimination checks
 make test-seac                   # Unit tests run as compiled .seac bytecode
 make test-build                  # Unit tests run as `sea build` executables (src/sea_bundle.c)

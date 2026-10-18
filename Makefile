@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Daniel
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: BSD-3-Clause
 
 CC     = gcc
 CFLAGS = -std=c11 -O3 -march=native -mtune=native -Wall -Wextra -Wno-unused-parameter \
@@ -144,11 +144,11 @@ endif
 
 test: all
 	@$(TARGET) tests/run_tests.sea
-	@$(TARGET) util/license.sea -l MIT -check
+	@$(TARGET) util/license.sea -l BSD-3-Clause -check
 
-# every source file has the MIT header (fix with: bin/sea util/license.sea -l MIT)
+# every source file has the BSD-3-Clause header (fix with: bin/sea util/license.sea -l BSD-3-Clause)
 test-license: $(TARGET)
-	@$(TARGET) util/license.sea -l MIT -check
+	@$(TARGET) util/license.sea -l BSD-3-Clause -check
 
 # sea/parser's format round trip over every .sea file (see the script)
 test-format: $(TARGET)

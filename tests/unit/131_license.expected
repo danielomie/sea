@@ -41,6 +41,7 @@ return {}
 true	MIT License
 
 Copyright (c) 2026 Ana Silva
+true
 [0] all 5 files have the header (1 skipped) | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
 [0] changed 0 of 6 files | license: skipped src/other.c (it has another copyright notice; -force to add anyway)
 [1] Makefile: header differs
