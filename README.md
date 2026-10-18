@@ -86,6 +86,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 | Document | Contents |
 |----------|----------|
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
+| [Sea for AI assistants](docs/sea-for-ai.md) | One file for Claude, Gemini, GPT...: the rules they get wrong, syntax, stdlib, translations (also [llms.txt](llms.txt), [AGENTS.md](AGENTS.md)) |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
 | [Libraries](docs/libs.md) | `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `websocket`, `test`, `template` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |

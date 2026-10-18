@@ -163,6 +163,9 @@ at that point. Natives should still report failures as error values.
 
 ## Sea Language — Key Gotchas
 
+`docs/sea-for-ai.md` is the complete guide for writing Sea (rules, syntax, stdlib, translations;
+its examples are checked by `tests/unit/132_ai_guide`): keep it in sync when the language changes.
+
 - **Arrays are 0-indexed.** Create them with `[]` and append with `arr[] = v` (there is no `array()`/`push()`); `[a, b]` with elements is not valid syntax. `{1, 2, 3}` is a positional *table* with keys 0, 1, 2, not an array. Use `len()`, not `#`.
 - **`for-in`** works on arrays (`for i, v in arr do` → 0-based index, value), maps/tables/structs (key, value) and channels (value until closed).
 - **Numeric for is inclusive on both ends:** `for i = 0, n-1 do` iterates n times. When n=0 this becomes `for i = 0, -1 do` — correctly executes zero iterations (fixed 2026-05; no guard needed).

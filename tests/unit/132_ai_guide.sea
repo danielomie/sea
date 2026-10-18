@@ -1,0 +1,87 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: the code in docs/sea-for-ai.md (run as ./bin/sea from the repo root).
+-- Every ```sea block not starting with "-- sketch" must run, and its output
+-- must match its "-- → expected" comments, in order (tabs printed by print
+-- compare as two spaces; trailing spaces are ignored). Sketch blocks must
+-- still parse.
+
+local parser = require("sea/parser")
+
+local SEA = fs.realpath("./bin/sea")
+local doc = fs.read("docs/sea-for-ai.md")
+local dir = fs.tempdir("aiguide-")
+
+local blocks = []
+local lines = string.split(doc, "\n")
+local i = 0
+while i < len(lines) do
+    if lines[i] == "```sea" then
+        local start = i + 2 -- 1-based line of the first code line
+        local body = []
+        i = i + 1
+        while i < len(lines) and lines[i] ~= "```" do
+            body[] = lines[i]
+            i = i + 1
+        end
+        local b = {}
+        b.line = start
+        b.code = string.join(body, "\n") .. "\n"
+        blocks[] = b
+    end
+    i = i + 1
+end
+
+local function expected_of(code)
+    local want = []
+    for _, l in string.split(code, "\n") do
+        local m = re.match("--\\s*→\\s?(.*)$", l)
+        if m ~= nil then want[] = re.gsub("\\s+$", m.groups[1], "") end
+    end
+    return want
+end
+
+local function output_lines(out)
+    local res = []
+    for _, l in string.split(out, "\n") do res[] = re.gsub("\\s+$", string.replace(l, "\t", "  "), "") end
+    while len(res) > 0 and res[len(res) - 1] == "" do del res[len(res) - 1] end
+    return res
+end
+
+local ran = 0
+local sketches = 0
+local failures = 0
+for n, b in blocks do
+    local where = "docs/sea-for-ai.md:" .. b.line
+    if string.starts_with(b.code, "-- sketch") then
+        sketches = sketches + 1
+        local d = parser.check(b.code, {name = where})
+        if d ~= nil then
+            print("FAIL " .. d.text)
+            failures = failures + 1
+        end
+    else
+        ran = ran + 1
+        local file = path.join(dir, "block" .. n .. ".sea")
+        fs.write(file, b.code)
+        local r = process.run({SEA, file}, {timeout = 20000})
+        local got = output_lines(r.stdout)
+        local want = expected_of(b.code)
+        local same = r.ok and len(got) == len(want)
+        if same then
+            for k = 0, len(want) - 1 do
+                if got[k] ~= want[k] then same = false end
+            end
+        end
+        if not same then
+            failures = failures + 1
+            print("FAIL " .. where .. " (exit " .. tostring(r.code) .. ")")
+            print("  want: " .. string.join(want, " | "))
+            print("  got:  " .. string.join(got, " | "))
+            if r.stderr ~= "" then print("  stderr: " .. string.trim(r.stderr)) end
+        end
+    end
+end
+fs.remove(dir, {recursive = true})
+print("blocks run:", ran, "sketches parsed:", sketches, "failures:", failures)
