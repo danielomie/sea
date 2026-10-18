@@ -1320,7 +1320,9 @@ touches the file system except `path.abs`, which reads the working directory.
 ## Module: `re`
 
 Regular expressions with RE2's syntax and guarantees: matching takes time
-linear in the input for **every** pattern (a Pike VM: no backtracking, so
+linear in the input for **every** pattern (a bounded backtracker that never
+revisits a state for short texts, a Pike VM for long ones: no exponential
+backtracking, so
 `(a*)*b` on a long string is as fast as any other), and the first match is the
 leftmost, preferring earlier alternatives and greedy repeats (as in Perl, Go,
 Python). There are no backreferences and no lookaround. Patterns and subjects
@@ -1338,7 +1340,7 @@ character. Results are checked against Go's `regexp` (same semantics).
 | `re.split` | `split(p, s [, n]) → array` | The pieces between matches (`n > 0`: at most `n` pieces, the last holding the rest; `n = 0`: none), like Go's `regexp.Split`: `split("x*", "axbc")` is `{"a", "b", "c"}` |
 | `re.escape` | `escape(s) → string` | `s` with the metacharacters `\ . + * ? ( ) \| [ ] { } ^ $` escaped, to match it literally |
 
-`p` is a pattern string (compiled for that call) or a regex from `re.compile`,
+`p` is a pattern string (compiled once and kept in a small per-thread cache) or a regex from `re.compile`,
 whose methods are the same functions: `rx:test(s)`, `rx:match(s [, init])`,
 `rx:all`, `rx:findall`, `rx:gsub`, `rx:split`. A regex also has `pattern`,
 `flags`, `groups` (number of capture groups) and `names` (`{name = index}`).
@@ -1347,7 +1349,7 @@ A pattern string that does not compile is a runtime error in these functions.
 A **match** is a table: `text` (the matched text), `start`/`stop` (1-based
 byte positions, inclusive, like `string.find`), `groups` (array: `[0]` the
 whole match, `[i]` group `i`, `nil` when it did not take part), `spans`
-(`[i] = {start, stop}` or `nil`) and `named` (`{name = text}`).
+(`[i] = [start, stop]` or `nil`) and `named` (`{name = text}`).
 
 **Syntax:**
 
