@@ -1,9 +1,9 @@
 -- Copyright (c) 2026 The Sea Authors
 -- SPDX-License-Identifier: BSD-3-Clause
 
--- Test: util/license.sea (license headers), run as ./bin/sea from the repo root
+-- Test: utils/license/license.sea (license headers), run as ./bin/sea from the repo root
 local SEA = fs.realpath("./bin/sea")
-local TOOL = fs.realpath("./util/license.sea")
+local TOOL = fs.realpath("./utils/license/license.sea")
 local dir = fs.tempdir("sealic-")
 
 local function run(args)

@@ -1,9 +1,9 @@
 -- Copyright (c) 2026 The Sea Authors
 -- SPDX-License-Identifier: BSD-3-Clause
 
--- util/license.sea — put a license header in the project's source files
+-- utils/license/license.sea — put a license header in the project's source files
 --
---   bin/sea util/license.sea -l MIT [flags] [path ...]
+--   bin/sea utils/license/license.sea -l MIT [flags] [path ...]
 --
 -- Each file gets a short header in its own comment style, after a #! line
 -- if it has one:
@@ -38,7 +38,7 @@
 --                  BSD-3-Clause, 0BSD, Unlicense; for others, where to get it)
 
 local function usage()
-    print("usage: bin/sea util/license.sea -l ID [-c NAME] [-y YEAR] [-check | -n | -update | -remove] [-force] [-x TEXT] [-license-file] [path ...]")
+    print("usage: bin/sea utils/license/license.sea -l ID [-c NAME] [-y YEAR] [-check | -n | -update | -remove] [-force] [-x TEXT] [-license-file] [path ...]")
     print("")
     print("Puts a copyright + SPDX license header in .c, .h, .sea, .sh files and Makefiles.")
 end
