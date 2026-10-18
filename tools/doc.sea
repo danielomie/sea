@@ -14,6 +14,11 @@
 --   -f, --format F   text (default), markdown, html or json
 --   -o FILE          write to FILE instead of stdout
 --   --all            include local (private) functions
+--   -http [HOST]:PORT serve the documentation as web pages (an index of the
+--                    modules, a page per module, the source with line numbers,
+--                    search, the built-in modules); HOST defaults to 127.0.0.1.
+--                    Files are read again on each request: edit and reload.
+--   -open            with -http, open the index in the browser (xdg-open)
 
 local parser = require("sea/parser")
 
@@ -24,14 +29,18 @@ local BUILTINS = {
 
 local function usage()
     print("usage: sea doc [-f text|markdown|html|json] [-o file] [--all] [path ...] [name]")
+    print("       sea doc -http [host]:port [-open] [--all] [path ...]")
     print("")
     print("Prints the documentation in the comments of Sea source files: the comment")
-    print("at the top of a file, and the comment right above each function.")
+    print("at the top of a file, and the comment right above each function; -http serves")
+    print("them as web pages (e.g. sea doc -http :6060 -open).")
 end
 
 local format = "text"
 local outfile = nil
 local show_all = false
+local http_addr = nil
+local open_browser = false
 local args = []
 local i = 1
 while i <= len(os.args) - 1 do
@@ -44,6 +53,13 @@ while i <= len(os.args) - 1 do
         outfile = os.args[i]
     elseif a == "--all" then
         show_all = true
+    elseif a == "-http" or a == "--http" then
+        i = i + 1
+        http_addr = os.args[i] or ""
+    elseif string.starts_with(a, "-http=") or string.starts_with(a, "--http=") then
+        http_addr = string.sub(a, string.find(a, "=") + 1)
+    elseif a == "-open" or a == "--open" then
+        open_browser = true
     elseif a == "-h" or a == "--help" then
         usage()
         os.exit(0)
@@ -440,6 +456,53 @@ local function anchor(s)
     return re.gsub("[^A-Za-z0-9_.-]", s, "-")
 end
 
+-- A path as it goes in a URL: bytes other than letters, digits and _ . / - as %XX.
+local function url_path(s)
+    local res = []
+    for k = 1, len(s) do
+        local c = string.sub(s, k, k)
+        if re.test("^[A-Za-z0-9_./-]$", c) then res[] = c else res[] = string.format("%%%02X", string.byte(c)) end
+    end
+    return string.join(res, "")
+end
+
+-- Set by the server: the href of a module page and of a source line (nil in a static page).
+local module_href = nil
+local source_href = nil
+
+local CSS = [==[
+:root{--bg:#fff;--fg:#1d2330;--muted:#5d6675;--line:#e3e6eb;--code:#f4f6f8;--link:#1f5fbf;--kw:#8839ef;--str:#2a7d3f;--num:#b35900;--com:#7a8290}
+@media (prefers-color-scheme: dark){:root{--bg:#14171c;--fg:#e4e7ec;--muted:#9aa3af;--line:#2a2f37;--code:#1d2128;--link:#7fb0ff;--kw:#c79bff;--str:#8fd19e;--num:#f0a35e;--com:#8a929e}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,sans-serif;display:flex}
+a{color:var(--link)}
+nav{width:250px;flex:none;border-right:1px solid var(--line);padding:16px;height:100vh;position:sticky;top:0;overflow:auto;box-sizing:border-box}
+nav a{display:block;color:var(--fg);text-decoration:none;padding:2px 0;font-size:14px;overflow-wrap:anywhere}nav a.sub{padding-left:12px;color:var(--muted)}
+nav .home{font-weight:600;margin-bottom:8px}
+nav form{margin:0 0 12px}nav input{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
+main{flex:1;min-width:0;max-width:900px;padding:24px 32px}h1{margin-top:0;overflow-wrap:anywhere}h2{border-bottom:1px solid var(--line);padding-bottom:4px;margin-top:32px}
+h3{font-size:16px;margin:22px 0 6px}h3 a{color:var(--link);text-decoration:none}code,pre{font-family:ui-monospace,monospace;font-size:13.5px}
+pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto}p{white-space:pre-line;margin:6px 0}.file{color:var(--muted)}
+.tag{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+a.src{font-size:12px;font-weight:normal;margin-left:8px;color:var(--muted)}
+table.index{border-collapse:collapse;width:100%}table.index td{padding:6px 12px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+table.index td:first-child{white-space:nowrap}
+table.index th{text-align:left;font-weight:600;padding:18px 0 4px;border-bottom:1px solid var(--line);color:var(--muted);font-size:13px}
+nav .dir{color:var(--muted);font-size:12px;margin-top:10px;overflow-wrap:anywhere}td.summary{color:var(--muted)}
+.source{display:flex;background:var(--code);border-radius:6px;overflow:auto}.source pre{margin:0;background:none;border-radius:0;overflow:visible}
+.source .ln{text-align:right;color:var(--muted);user-select:none;border-right:1px solid var(--line);padding-right:10px}
+.source .ln a{color:inherit;text-decoration:none}.source .ln a:target{color:var(--link);font-weight:700}
+.k{color:var(--kw)}.s{color:var(--str)}.n{color:var(--num)}.c{color:var(--com);font-style:italic}
+@media (max-width:700px){body{display:block}nav{width:auto;height:auto;position:static;border-right:0;border-bottom:1px solid var(--line)}main{padding:16px}}
+]==]
+
+local function html_head(title)
+    emit("<!doctype html>")
+    emit("<html lang=\"en\"><head><meta charset=\"utf-8\">")
+    emit("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+    emit("<title>" .. esc(title) .. "</title>")
+    emit("<style>" .. CSS .. "</style></head><body>")
+end
+
 local function html_doc(doc)
     for _, b in blocks(doc) do
         if b.kind == "code" then
@@ -450,58 +513,220 @@ local function html_doc(doc)
     end
 end
 
+-- The heading of an entry and the doc below it. When the doc starts with the
+-- signature written by hand ("store:login(email, password) → token | error"),
+-- that line is the heading: it says more than the parameter names.
+local function entry_heading(e)
+    local lines = string.split(e.doc, "\n")
+    local first = lines[0] or ""
+    local short = re.gsub("^.*[.:]", e.name, "")
+    if e.params ~= nil and re.test("^([A-Za-z_][A-Za-z0-9_]*[.:])*" .. re.escape(short) .. "\\(", first) then
+        local rest = []
+        for k = 1, len(lines) - 1 do rest[] = lines[k] end
+        return first, string.trim(string.join(rest, "\n"))
+    end
+    return signature(e), e.doc
+end
+
 local function html_entries(mod, list)
     for _, e in list do
         local id = anchor(mod.name .. "--" .. e.name)
+        local src = ""
+        if source_href ~= nil and e.line > 0 then
+            src = "<a class=\"src\" href=\"" .. source_href(mod, e.line) .. "\">source</a>"
+        end
+        local head, doc = entry_heading(e)
         emit("<section class=\"entry\" id=\"" .. id .. "\">")
-        emit("<h3><a href=\"#" .. id .. "\"><code>" .. esc(signature(e)) .. "</code></a>" ..
-            (e.kind == "local" and " <span class=\"tag\">local</span>" or "") .. "</h3>")
-        if e.doc ~= "" then html_doc(e.doc) end
+        emit("<h3><a href=\"#" .. id .. "\"><code>" .. esc(head) .. "</code></a>" ..
+            (e.kind == "local" and " <span class=\"tag\">local</span>" or "") .. src .. "</h3>")
+        if doc ~= "" then html_doc(doc) end
         emit("</section>")
     end
 end
 
+local function html_nav_entries(mod)
+    emit("<a href=\"#" .. anchor(mod.name) .. "\"><strong>" .. esc(mod.name) .. "</strong></a>")
+    for _, e in mod.entries do
+        emit("<a class=\"sub\" href=\"#" .. anchor(mod.name .. "--" .. e.name) .. "\">" .. esc(e.name) .. "</a>")
+    end
+end
+
+local function html_module(mod)
+    emit("<h1 id=\"" .. anchor(mod.name) .. "\">" .. esc(mod.name) .. "</h1>")
+    local file = esc(mod.file)
+    if source_href ~= nil and mod.file ~= "built in" then
+        file = "<a href=\"" .. source_href(mod, nil) .. "\">" .. file .. "</a>"
+    end
+    emit("<div class=\"file\">" .. file .. "</div>")
+    if mod.doc ~= "" then html_doc(mod.doc) end
+    local fns, groups, order = sections(mod)
+    if len(fns) > 0 then
+        emit("<h2>Functions</h2>")
+        html_entries(mod, fns)
+    end
+    for _, g in order do
+        emit("<h2>" .. esc(g) .. "</h2>")
+        html_entries(mod, groups[g])
+    end
+end
+
+-- One page with every module (sea doc -f html).
 local function render_html(mods)
-    emit("<!doctype html>")
-    emit("<html lang=\"en\"><head><meta charset=\"utf-8\">")
-    emit("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
-    local title = len(mods) == 1 and mods[0].name or "Sea documentation"
-    emit("<title>" .. esc(title) .. "</title>")
-    emit("<style>")
-    emit(":root{--bg:#fff;--fg:#1d2330;--muted:#5d6675;--line:#e3e6eb;--code:#f4f6f8;--link:#1f5fbf}")
-    emit("@media (prefers-color-scheme: dark){:root{--bg:#14171c;--fg:#e4e7ec;--muted:#9aa3af;--line:#2a2f37;--code:#1d2128;--link:#7fb0ff}}")
-    emit("body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,sans-serif;display:flex}")
-    emit("nav{width:240px;flex:none;border-right:1px solid var(--line);padding:16px;height:100vh;position:sticky;top:0;overflow:auto;box-sizing:border-box}")
-    emit("nav a{display:block;color:var(--fg);text-decoration:none;padding:2px 0;font-size:14px}nav a.sub{padding-left:12px;color:var(--muted)}")
-    emit("main{flex:1;min-width:0;max-width:860px;padding:24px 32px}h1{margin-top:0}h2{border-bottom:1px solid var(--line);padding-bottom:4px;margin-top:32px}")
-    emit("h3{font-size:16px;margin:22px 0 6px}h3 a{color:var(--link);text-decoration:none}code,pre{font-family:ui-monospace,monospace;font-size:13.5px}")
-    emit("pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto}p{white-space:pre-line;margin:6px 0}.file{color:var(--muted)}")
-    emit(".tag{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 4px}")
-    emit("@media (max-width:700px){body{display:block}nav{width:auto;height:auto;position:static;border-right:0;border-bottom:1px solid var(--line)}main{padding:16px}}")
-    emit("</style></head><body>")
+    html_head(len(mods) == 1 and mods[0].name or "Sea documentation")
     emit("<nav>")
-    for _, mod in mods do
-        emit("<a href=\"#" .. anchor(mod.name) .. "\"><strong>" .. esc(mod.name) .. "</strong></a>")
-        for _, e in mod.entries do
-            emit("<a class=\"sub\" href=\"#" .. anchor(mod.name .. "--" .. e.name) .. "\">" .. esc(e.name) .. "</a>")
-        end
-    end
+    for _, mod in mods do html_nav_entries(mod) end
     emit("</nav><main>")
+    for _, mod in mods do html_module(mod) end
+    emit("</main></body></html>")
+end
+
+-- ---- html: the pages of the server (sea doc -http) -------------------------------------------
+
+local function summary(mod)
+    local first = string.split(mod.doc, "\n")[0] or ""
+    -- "name — what it is": keep what it is
+    local m = re.match("^\\S+\\s+(—|--|-)\\s+(.*)$", first)
+    if m ~= nil then return m.groups[2] end
+    return first
+end
+
+local function server_nav(extra)
+    emit("<nav><a class=\"home\" href=\"/\">Sea documentation</a>")
+    emit("<form action=\"/search\"><input name=\"q\" placeholder=\"Search\" aria-label=\"Search\"></form>")
+    if extra ~= nil then extra() end
+    emit("</nav><main>")
+end
+
+-- The modules by directory: the directories in order, and the modules of each.
+local function by_dir(mods)
+    local order = []
+    local groups = [=]
     for _, mod in mods do
-        emit("<h1 id=\"" .. anchor(mod.name) .. "\">" .. esc(mod.name) .. "</h1>")
-        emit("<div class=\"file\">" .. esc(mod.file) .. "</div>")
-        if mod.doc ~= "" then html_doc(mod.doc) end
-        local fns, groups, order = sections(mod)
-        if len(fns) > 0 then
-            emit("<h2>Functions</h2>")
-            html_entries(mod, fns)
+        local d = path.dirname(mod.file)
+        if groups[d] == nil then
+            groups[d] = []
+            order[] = d
         end
-        for _, g in order do
-            emit("<h2>" .. esc(g) .. "</h2>")
-            html_entries(mod, groups[g])
+        groups[d][] = mod
+    end
+    return order, groups
+end
+
+local function page_index(mods, title)
+    local order, groups = by_dir(mods)
+    html_head(title)
+    server_nav(function()
+        for _, d in order do
+            emit("<div class=\"dir\">" .. esc(d) .. "</div>")
+            for _, mod in groups[d] do
+                emit("<a class=\"sub\" href=\"" .. module_href(mod) .. "\" title=\"" .. esc(mod.file) .. "\">" ..
+                    esc(mod.name) .. "</a>")
+            end
+        end
+    end)
+    emit("<h1>" .. esc(title) .. "</h1>")
+    if len(mods) > 0 then
+        emit("<table class=\"index\">")
+        for _, d in order do
+            emit("<tr><th colspan=\"2\">" .. esc(d) .. "</th></tr>")
+            for _, mod in groups[d] do
+                emit("<tr><td><a href=\"" .. module_href(mod) .. "\" title=\"" .. esc(mod.file) .. "\">" .. esc(mod.name) ..
+                    "</a></td><td class=\"summary\">" .. esc(summary(mod)) .. "</td></tr>")
+            end
+        end
+        emit("</table>")
+    else
+        emit("<p>No documented Sea code found.</p>")
+    end
+    emit("<h2>Built-in modules</h2><table class=\"index\">")
+    for _, b in BUILTINS do
+        emit("<tr><td><a href=\"/builtin/" .. url_path(b) .. "\">" .. esc(b) .. "</a></td><td class=\"summary\">" ..
+            "require(\"" .. esc(b) .. "\")" .. "</td></tr>")
+    end
+    emit("</table></main></body></html>")
+end
+
+local function page_module(mod)
+    html_head(mod.name)
+    server_nav(function() html_nav_entries(mod) end)
+    html_module(mod)
+    emit("</main></body></html>")
+end
+
+-- The source of a file with line numbers and highlighting (tokens from sea/parser).
+local function page_source(mod, src)
+    html_head(mod.file)
+    server_nav(function()
+        emit("<a href=\"" .. module_href(mod) .. "\"><strong>" .. esc(mod.name) .. "</strong></a>")
+    end)
+    emit("<h1>" .. esc(mod.file) .. "</h1>")
+    local nlines = len(string.split(src, "\n"))
+    if string.ends_with(src, "\n") then nlines = nlines - 1 end
+    local nums = []
+    for n = 1, nlines do nums[] = "<a id=\"L" .. n .. "\" href=\"#L" .. n .. "\">" .. n .. "</a>" end
+    -- byte offset of each line start, to place the tokens
+    local starts_list = []
+    starts_list[] = 0
+    local pos = string.find(src, "\n")
+    while pos ~= nil do
+        starts_list[] = pos
+        pos = string.find(src, "\n", pos + 1)
+    end
+    local code = []
+    local toks = parser.tokenize(src, {comments = true})
+    if is_error(toks) then
+        code[] = esc(src)
+    else
+        local at = 0           -- bytes of src already written
+        for _, tk in toks do
+            local off = starts_list[tk.line - 1] + tk.col - 1
+            if off >= at then
+                code[] = esc(string.sub(src, at + 1, off))
+                local cls = nil
+                if tk.kind == "keyword" then cls = "k"
+                elseif tk.kind == "string" then cls = "s"
+                elseif tk.kind == "number" then cls = "n"
+                elseif tk.kind == "comment" then cls = "c" end
+                local text = string.sub(src, off + 1, off + len(tk.text))
+                code[] = cls == nil and esc(text) or "<span class=\"" .. cls .. "\">" .. esc(text) .. "</span>"
+                at = off + len(tk.text)
+            end
+        end
+        code[] = esc(string.sub(src, at + 1))
+    end
+    emit("<div class=\"source\"><pre class=\"ln\">" .. string.join(nums, "\n") .. "</pre><pre><code>" ..
+        string.join(code, "") .. "</code></pre></div>")
+    emit("</main></body></html>")
+end
+
+local function page_search(mods, q)
+    html_head("Search: " .. q)
+    server_nav(nil)
+    emit("<h1>Search: " .. esc(q) .. "</h1>")
+    local needle = string.lower(q)
+    local hits = 0
+    emit("<table class=\"index\">")
+    for _, mod in mods do
+        for _, e in mod.entries do
+            local in_name = string.contains(string.lower(e.name), needle)
+            if in_name or string.contains(string.lower(e.doc), needle) then
+                hits = hits + 1
+                local first = string.split(e.doc, "\n")[0] or ""
+                emit("<tr><td><a href=\"" .. module_href(mod) .. "#" .. anchor(mod.name .. "--" .. e.name) .. "\"><code>" ..
+                    esc(signature(e)) .. "</code></a></td><td class=\"summary\">" .. esc(mod.file) .. " — " ..
+                        esc(first) .. "</td></tr>")
+            end
         end
     end
+    emit("</table>")
+    if hits == 0 then emit("<p>Nothing found.</p>") end
     emit("</main></body></html>")
+end
+
+local function page_not_found(what)
+    html_head("Not found")
+    server_nav(nil)
+    emit("<h1>Not found</h1><p>" .. esc(what) .. "</p></main></body></html>")
 end
 
 -- ---- json -------------------------------------------------------------------------------------
@@ -553,12 +778,11 @@ for _, a in args do
         end
     end
 end
+if len(paths) == 0 then paths[] = "." end
 
-local mods = []
-if builtin ~= nil then
-    mods[] = builtin_module(builtin)
-else
-    if len(paths) == 0 then paths[] = "." end
+-- The documented modules under the paths, read now (the server calls it on each request,
+-- so edits show up on reload).
+local function load_modules()
     local files = []
     for _, p in paths do
         if fs.isdir(p) then
@@ -570,9 +794,11 @@ else
                 if not hidden and path.ext(f) == ".sea" then files[] = path.normalize(f) end
             end
         else
-            files[] = p
+            files[] = path.normalize(p)
         end
     end
+    sort.sort(files)
+    local mods = []
     for _, f in files do
         local m = read_module(f)
         if is_error(m) then
@@ -581,6 +807,166 @@ else
             mods[] = m
         end
     end
+    return mods
+end
+
+-- ---- the server (sea doc -http) ----------------------------------------------------------------
+
+local function url_decode(s)
+    s = string.replace(s, "+", " ")
+    return re.gsub("%([0-9A-Fa-f][0-9A-Fa-f])", s, function(m)
+        return string.char(tonumber("0x" .. m.groups[1]))
+    end)
+end
+
+local REASONS = {}
+REASONS[200] = "OK"
+REASONS[302] = "Found"
+REASONS[404] = "Not Found"
+REASONS[405] = "Method Not Allowed"
+
+local function respond(fd, status, ctype, body, extra)
+    local head = "HTTP/1.1 " .. status .. " " .. REASONS[status] .. "\r\nContent-Type: " .. ctype ..
+        "\r\nContent-Length: " .. len(body) .. "\r\nConnection: close\r\nCache-Control: no-cache\r\n" ..
+            (extra or "") .. "\r\n"
+    local _ = net.write(fd, head .. body, 10000)
+end
+
+-- The page for one request path (and query), as {status, body}.
+local function route(target)
+    local q = nil
+    local p = target
+    local qpos = string.find(target, "?")
+    if qpos ~= nil then
+        p = string.sub(target, 1, qpos - 1)
+        q = string.sub(target, qpos + 1)
+    end
+    p = url_decode(p)
+    out = []
+    local mods = load_modules()
+    local by_file = [=]
+    for _, m in mods do by_file[m.file] = m end
+
+    local res = {}
+    res.status = 200
+    if p == "/" then
+        page_index(mods, "Sea documentation")
+    elseif string.starts_with(p, "/m/") then
+        local m = by_file[string.sub(p, 4)]
+        if m == nil then
+            res.status = 404
+            page_not_found("No documented module " .. string.sub(p, 4))
+        else
+            page_module(m)
+        end
+    elseif string.starts_with(p, "/src/") then
+        -- only the files the index lists: no other path of the disk is served
+        local m = by_file[string.sub(p, 6)]
+        local src = m ~= nil and fs.read(m.file) or nil
+        if src == nil or is_error(src) then
+            res.status = 404
+            page_not_found("No source " .. string.sub(p, 6))
+        else
+            page_source(m, src)
+        end
+    elseif string.starts_with(p, "/builtin/") then
+        local name = string.sub(p, 10)
+        local known = false
+        for _, b in BUILTINS do
+            if b == name then known = true end
+        end
+        if known then
+            page_module(builtin_module(name))
+        else
+            res.status = 404
+            page_not_found("No built-in module " .. name)
+        end
+    elseif p == "/search" then
+        local term = ""
+        for _, kv in string.split(q or "", "&") do
+            if string.starts_with(kv, "q=") then term = string.trim(url_decode(string.sub(kv, 3))) end
+        end
+        page_search(mods, term)
+    else
+        res.status = 404
+        page_not_found(p)
+    end
+    res.body = string.join(out, "\n") .. "\n"
+    return res
+end
+
+local function handle(fd)
+    local req = ""
+    while not string.contains(req, "\r\n\r\n") and len(req) < 65536 do
+        local chunk = net.read(fd, 8192, 5000)
+        if is_error(chunk) or chunk == "" then return end
+        req = req .. chunk
+    end
+    local m = re.match("^([A-Z]+) (\\S+) HTTP/", req)
+    if m == nil then return end
+    if m.groups[1] ~= "GET" and m.groups[1] ~= "HEAD" then
+        respond(fd, 405, "text/plain", "only GET\n", "Allow: GET, HEAD\r\n")
+        return
+    end
+    local r = route(m.groups[2])
+    respond(fd, r.status, "text/html; charset=utf-8", m.groups[1] == "HEAD" and "" or r.body)
+end
+
+local function serve(addr)
+    local host = "127.0.0.1"
+    local port_text = addr
+    local colon = nil
+    for k = len(addr), 1, -1 do
+        if colon == nil and string.sub(addr, k, k) == ":" then colon = k end
+    end
+    if colon ~= nil then
+        port_text = string.sub(addr, colon + 1)
+        if colon > 1 then host = string.sub(addr, 1, colon - 1) end
+    end
+    local port = tonumber(port_text)
+    if port == nil then
+        io.write_err("sea doc: -http wants [host]:port, got " .. addr .. "\n")
+        os.exit(2)
+    end
+    module_href = function(mod) return "/m/" .. url_path(mod.file) end
+    source_href = function(mod, line)
+        return "/src/" .. url_path(mod.file) .. (line ~= nil and "#L" .. line or "")
+    end
+    local lfd = net.listen(port, host)
+    if is_error(lfd) then
+        io.write_err("sea doc: listen on " .. addr .. ": " .. lfd.message .. "\n")
+        os.exit(1)
+    end
+    local shown = host == "0.0.0.0" and "localhost" or host
+    local url = "http://" .. shown .. ":" .. net.local_port(lfd) .. "/"
+    print("sea doc: serving " .. string.join(paths, " ") .. " at " .. url .. "  (Ctrl-C stops)")
+    if open_browser then
+        go (function()
+            local r = process.run({"xdg-open", url})
+            if is_error(r) or not r.ok then io.write_err("sea doc: could not open a browser; visit " .. url .. "\n") end
+        end)()
+    end
+    -- one request at a time: the pages are built in the shared output buffer
+    while true do
+        local fd = net.accept(lfd)
+        if not is_error(fd) then
+            handle(fd)
+            net.close(fd)
+        end
+    end
+end
+
+if http_addr ~= nil then
+    serve(http_addr)
+end
+
+-- ---- one shot ----------------------------------------------------------------------------------
+
+local mods = []
+if builtin ~= nil then
+    mods[] = builtin_module(builtin)
+else
+    mods = load_modules()
 end
 
 -- only the entries matching a name

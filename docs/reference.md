@@ -95,6 +95,22 @@ functions. The name of a built-in module (`sea doc fs`) lists its functions.
 | `-f`, `--format F` | `text` (default), `markdown`, `html` (one page with an index, light and dark) or `json` |
 | `-o FILE` | Write to a file instead of stdout |
 | `--all` | Include local functions |
+| `-http [HOST]:PORT` | Serve the documentation as web pages instead (see below) |
+| `-open` | With `-http`, open the index in the browser (`xdg-open`) |
+
+When a doc comment starts with the signature written by hand (`greet.hello(name)
+→ ...`), the HTML pages use that line as the heading instead of the bare
+parameter names.
+
+`sea doc -http :6060 [path ...]` is a documentation server, like the old
+`godoc -http`: an index of the modules grouped by directory (with the first
+line of each module comment), a page per module with links to the source,
+the source with line numbers and highlighting (`/src/file.sea#L42`), search
+over names and comments (`/search?q=login`) and the built-in modules
+(`/builtin/fs`). Files are read again on each request, so editing a comment
+and reloading shows it. The host defaults to `127.0.0.1` (`-http 0.0.0.0:6060`
+to serve the network); port `0` picks a free one, printed on start. Only the
+`.sea` files under the given paths are served.
 
 ### `sea test`
 

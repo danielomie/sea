@@ -67,6 +67,7 @@ bin/sea-jit --jit examples/nbody/nbody.sea        # run with the JIT
 
 bin/sea fmt src/                      # format .sea files in place (-l, -d, --check)
 bin/sea doc libs/http/http.sea        # documentation from comments (-f markdown|html|json)
+bin/sea doc -http :6060 -open .       # the same as web pages: index, modules, source, search
 bin/sea test                          # run the *_test.sea files (-run, -bench, -v)
 bin/sea check                         # undefined/unused variables, bad calls, ... without running
 bin/sea build -o app main.sea         # standalone executable (program + modules + natives)

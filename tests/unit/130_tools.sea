@@ -75,8 +75,38 @@ print(run({"doc", "-f", "markdown", "mylib.sea", "join"}))
 print(run({"doc", "-f", "json", "mylib.sea", "size"}))
 print(run({"doc", "mylib.sea", "nothing"}))
 local html = run({"doc", "-f", "html", "-o", "out.html", "mylib.sea"})
-print(html, string.contains(fs.read(dir .. "/out.html"), "<code>mylib.add(a, b)</code>"))
+print(html, string.contains(fs.read(dir .. "/out.html"), "<code>m.add(a, b) → the sum</code>"))
 print(string.sub(run({"doc", "re"}), 1, 40))
+
+-- sea doc -http: a server on a free port, a few pages, then stop it
+local srv = process.spawn({SEA, "doc", "-http", "127.0.0.1:0", "."}, {cwd = dir})
+local banner = srv:read_line(5000)
+local port = tonumber(re.match(":(\\d+)/", banner).groups[1])
+print(string.sub(banner, 1, 22), port > 0)
+local function get(target)
+    local fd = net.connect("127.0.0.1", port, 2000)
+    net.write(fd, "GET " .. target .. " HTTP/1.1\r\nHost: x\r\n\r\n")
+    local resp = ""
+    while true do
+        local chunk = net.read(fd, 65536, 5000)
+        if is_error(chunk) or chunk == "" then break end
+        resp = resp .. chunk
+    end
+    net.close(fd)
+    return resp
+end
+local function status(resp) return string.sub(resp, 10, 12) end
+local page = get("/")
+print(status(page), string.contains(page, "href=\"/m/mylib.sea\""), string.contains(page, "a small library"))
+page = get("/m/mylib.sea")
+print(status(page), string.contains(page, "<code>m.add(a, b) → the sum</code>"), string.contains(page, "href=\"/src/mylib.sea#L"))
+page = get("/src/mylib.sea")
+print(status(page), string.contains(page, "id=\"L12\""), string.contains(page, "<span class=\"k\">function</span>"))
+page = get("/search?q=sum")
+print(status(page), string.contains(page, "mylib.add"))
+print(status(get("/builtin/fs")), status(get("/src/../../etc/passwd")), status(get("/nope")))
+srv:kill()
+srv:wait(2000)
 
 print("-- sea test")
 local function untimed(s)

@@ -60,6 +60,12 @@ m.join(...) → the values joined with ", "
 [0] RE  (built in)
 
     Built-in module 
+sea doc: serving . at 	true
+200	true	true
+200	true	true
+200	true	true
+200	true
+200	404	404
 -- sea test
 [1] ok    t/lib_test.sea  2 passed (T)
 === t/z_test.sea
