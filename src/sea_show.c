@@ -29,6 +29,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* sea_lib_time.c: a Time value as text, or NULL */
+SeaString *sea_time_show(SeaValue v);
+
 #define SHOW_MAX_ITEMS 100
 #define SHOW_MAX_STACK 64
 
@@ -177,6 +180,14 @@ static void show(Show *S, SeaValue v, int depth, bool nested) {
         t != OBJ_INT_ARRAY && t != OBJ_FLOAT_ARRAY) {
         show_plain(S, v, nested);
         return;
+    }
+    if (t == OBJ_TABLE) {   /* a Time of module time: time(2026-10-18T14:30:00-03:00) */
+        SeaString *ts = sea_time_show(v);
+        if (ts) {
+            out_n(S, ts->data, ts->len);
+            sea_obj_release(&ts->obj);
+            return;
+        }
     }
     for (int i = 0; i < S->sp; i++)
         if (S->stack[i] == o) { out(S, "<cycle>"); return; }

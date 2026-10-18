@@ -547,13 +547,17 @@ nil; count with `len(os.args) - 1`), `exit([code])`, `getenv(name)`,
 `read_line`, `wait`, `kill`), `pid()`, `kill(pid[,sig])`. opts: `cwd`,
 `env`, `stdin`, `stdout`, `stderr`, `timeout` (ms).
 
-**time** (durations are int **nanoseconds**): constants `Nanosecond
-Microsecond Millisecond Second Minute Hour`; `now() → Time`, `unix(sec[,ns])`,
-`time() → unix seconds`, `sleep(ns)`, `since(t) → ns`, `until(t)`,
-`clock()`, `seconds(ns)`, `milliseconds(ns)`... A Time has methods
-`t:unix() t:year() t:month() t:day() t:hour() t:minute() t:second()
-t:weekday() t:add(ns) t:sub(t2) t:before(t2) t:after(t2)
-t:format("2006-01-02 15:04:05") t:string()` (Go layouts).
+**time** (durations are int **nanoseconds**, at most ~39 hours in an int):
+constants `Nanosecond Microsecond Millisecond Second Minute Hour Day`;
+`now() → Time`, `date(y,m,d[,h,min,s][,zone])`, `parse(s[,layout[,zone]]) →
+Time|error` (ISO 8601 by default: `"2026-10-18"`, `"2026-10-18 14:30"`,
+`"...T14:30:00Z"`), `unix(sec[,ns])`, `time() → unix seconds`, `sleep(ns)`,
+`since(t) → ns`, `days(ns)`, `seconds(ns)`... A Time has methods
+`t:year() t:month() t:day() t:hour() t:minute() t:second() t:weekday()
+t:add_date(y,m,d) t:add_seconds(s) t:add(ns) t:sub(t2) → ns
+t:before(t2) t:after(t2) t:utc() t:in_zone("+03:00") t:iso()
+t:format("02/01/2006 15:04")` (Go layouts; also for parse). `print(t)` shows
+`time(2026-10-18T14:30:00-03:00)`.
 
 **sync**: `mutex()` (`acquire release try_lock`), `waitgroup()` (`add(n)
 done wait`), `once()` (`do_once(fn)`).
@@ -727,6 +731,8 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | `go f()` | the same |
 | `ch <- v`, `v := <-ch` | `ch <- v`, `local v = <-ch` |
 | `time.Sleep(100 * time.Millisecond)` | `time.sleep(100 * time.Millisecond)` |
+| `datetime.strptime(s, "%d/%m/%Y")`, `datetime.fromisoformat(s)` | `time.parse(s, "02/01/2006")`, `time.parse(s)` |
+| `d + timedelta(days=30)`, `t.AddDate(0, 1, 0)` | `t:add_date(0, 0, 30)`, `t:add_date(0, 1, 0)` |
 | `sleep(0.1)` (seconds) | `time.sleep(100 * time.Millisecond)` (nanoseconds) |
 | `os.exit(1)`, `sys.exit(1)` | `os.exit(1)` |
 | `io.read("*l")` | `io.read("l")` |

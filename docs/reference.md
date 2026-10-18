@@ -886,14 +886,30 @@ Higher-level: `libs/ssl` (TLS over these sockets) and `libs/http` — see [libs.
 | `time.Minute` | 60 000 000 000 |
 | `time.Hour` | 3 600 000 000 000 |
 
-> **Warning:** `time.add(t, ns)` takes nanoseconds as a 48-bit signed integer. Max safe value ≈ 140 737 s ≈ 39 hours. For larger offsets (days, weeks) use `time.unix(sec, 0)` directly.
+| `time.Day` | 86 400 000 000 000 |
+
+> **Durations are int nanoseconds**, and Sea's int holds 48 bits: about 39
+> hours (`time.Day` fits, `2 * time.Day` does not). For longer spans use
+> `t:add_seconds(s)`, `t:add_date(years, months, days)`, or pass a number
+> (`t:add(30 * 86400 * 1e9)`).
+
+```sea
+local t = time.parse("2026-10-18 14:30")?            -- ISO 8601, local zone
+local d = time.parse("18/10/2026", "02/01/2006", "UTC")?   -- a Go layout
+print(t:add_date(0, 1, 0), t:add_seconds(7 * 86400))   -- a month / a week later
+print(t:iso(), t:utc():iso(), t:in_zone("+09:00"):format("15:04 MST"))
+print(time.date(2026, 12, 25, "UTC"), time.days(time.date(2026, 12, 25):sub(time.now())))
+```
 
 ### Module functions
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `time.now` | `now() → Time` | Current wall-clock time |
+| `time.now` | `now() → Time` | Current wall-clock time (local zone) |
 | `time.unix` | `unix(sec [, ns]) → Time` | Construct a Time from Unix seconds + optional nanoseconds |
+| `time.date` | `date(year, month, day [, hour, min, sec] [, zone]) → Time` | A Time from its fields (out-of-range ones are normalized: month 13 is January of the next year) |
+| `time.parse` | `parse(s [, layout [, zone]]) → Time\|error` | Without a layout, ISO 8601 / RFC 3339: `2026-10-18`, `2026-10-18 14:30`, `2026-10-18T14:30:05.25Z`, `...-03:00`. With a Go layout (tokens below): `parse("18/10/2026", "02/01/2006")`. A text without a zone is in `zone` (default local). A date that does not exist (`2026-02-30`) is an error |
+| `time.days` | `days(ns) → number` | Convert a nanosecond duration to days |
 | `time.time` | `time() → int` | Current Unix timestamp in seconds (raw integer) |
 | `time.sleep` | `sleep(ns)` | Sleep for `ns` nanoseconds. In a goroutine it parks only that goroutine (the scheduler thread keeps running others); on the main thread it blocks |
 | `time.clock` | `clock() → number` | CPU time in seconds since program start |
@@ -923,12 +939,18 @@ Returned by `time.now()`, `time.unix()`, etc. All methods take the Time object a
 | `t.nanosecond(t)` | `() → int` | Sub-second nanoseconds |
 | `t.weekday(t)` | `() → int` | Day of week 0=Sunday…6=Saturday |
 | `t.yearday(t)` | `() → int` | Day of year 1–366 |
-| `t.add(t, ns)` | `(ns) → Time` | New Time shifted by `ns` nanoseconds |
+| `t.add(t, ns)` | `(ns) → Time` | New Time shifted by `ns` nanoseconds (an int up to ~39 h, or a number) |
+| `t.add_seconds(t, s)` | `(s) → Time` | Shifted by `s` seconds (any size, may be fractional) |
+| `t.add_date(t, years, months, days)` | `(...) → Time` | Calendar arithmetic in the time's zone, keeping the time of day (Jan 31 + 1 month is Mar 3, as in Go) |
+| `t.utc(t)`, `t.local_time(t)`, `t.in_zone(t, zone)` | `() → Time` | The same instant in UTC, the local zone, or a fixed offset (`"+03:00"`, `"-0530"`, `"UTC"`, `"local"`) |
+| `t.zone(t)` | `() → string` | `"local"`, `"UTC"` or the offset (`"-03:00"`) |
+| `t.offset(t)` | `() → int` | Seconds east of UTC at that instant |
+| `t.iso(t [, nanos])` | `() → string` | RFC 3339: `2026-10-18T14:30:00-03:00` (`Z` in UTC); with `true`, the fraction of a second |
 | `t.sub(t, other)` | `(other) → number` | Duration between two Times in nanoseconds |
 | `t.before(t, other)` | `(other) → bool` | True if `t` is earlier than `other` |
 | `t.after(t, other)` | `(other) → bool` | True if `t` is later than `other` |
 | `t.equal(t, other)` | `(other) → bool` | True if the two Times are equal |
-| `t.format(t, layout)` | `(layout) → string` | Format using Go reference-time tokens (`2006`, `01`, `02`, `15`, `04`, `05`, etc.) |
+| `t.format(t, layout)` | `(layout) → string` | Format with Go's reference time `Mon Jan 2 15:04:05 MST 2006`: `2006` `06` (year), `01` `1` `Jan` `January` (month), `02` `2` `_2` (day), `15` `03` `3` (hour), `04` `4`, `05` `5`, `PM` `pm`, `Mon` `Monday`, `MST`, `-0700` `-07:00` `Z07:00` (offset; `Z` for UTC), `.000` / `.999` (fraction, trailing zeros dropped with 9s). `time.parse` takes the same tokens |
 | `t.string(t)` | `() → string` | Format as `"YYYY-MM-DD HH:MM:SS"` |
 
 ---
