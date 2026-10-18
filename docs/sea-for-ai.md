@@ -456,8 +456,8 @@ print(geometry.area(3, 4))
   `make install` (`require("json")` works by name with an installed `sea`).
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
-  sort bigint`. `require("sea/parser")`, `require("sea/test")` and
-  `require("sea/check")` are built in too.
+  sort bigint`. `require("sea/parser")`, `require("sea/test")`,
+  `require("sea/check")` and `require("sea/stream")` are built in too.
 - Doc comments: a comment block at the top of the file documents the
   module; `--` lines right above a function document it, by convention
   starting with the signature (`-- name(args) → result`). `sea doc` reads
@@ -554,6 +554,16 @@ bytes), `hmac(alg,key,data[,raw])`, `new(alg)` (`h:update(s)`,
 **bigint**: `new(v[,base])`, `add sub mul div mod pow neg abs cmp
 tostring(a[,base]) toint tonumber`. Comparisons, `==`, `..`, `tostring`
 and `print` accept bigints; `+ - *` do not.
+
+**sea/stream** (`local stream = require("sea/stream")`; buffered I/O like
+Go's bufio, over sockets, processes, files, stdin, strings):
+`stream.reader(src[,{size,timeout}])` → `r:read_line()`, `r:read_until(delim)`,
+`r:read_full(n)`, `r:read([max])`, `r:peek(n)`, `r:read_all()`;
+`stream.writer(dst)` → `w:write(...)`, `w:flush()`;
+`stream.scanner(src[,{split}])` → `while sc:scan() do sc:text() end`
+(split `"lines"`, `"words"`, `"bytes"`, `"chars"` or a function);
+`stream.open(path[,mode])`, `stream.stdin()`, `stream.stdout()`,
+`stream.string(s)`, `stream.buffer()`. The end of input is `nil`.
 
 **gc**: `collect()`, `stats()`. Memory is reference counted with a cycle
 collector; you rarely need these.

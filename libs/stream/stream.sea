@@ -1,0 +1,503 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- stream — buffered readers, writers and scanners (like Go's bufio)
+--
+--   local stream = require("sea/stream")
+--
+--   local r = stream.reader(fd)               -- a socket from net.connect / net.accept
+--   local status = r:read_line()               -- "HTTP/1.1 200 OK"
+--   local head = r:read_until("\r\n\r\n")
+--   local body = r:read_full(42)
+--
+--   local w = stream.writer(fd)
+--   w:write("GET / HTTP/1.1\r\n", "Host: x\r\n\r\n")
+--   w:flush()
+--
+--   local sc = stream.scanner(stream.open("words.txt")?)
+--   sc:split("words")
+--   while sc:scan() do print(sc:text()) end
+--
+-- A source is anything that can be read in pieces: a socket (an int fd of
+-- module net), a process from process.spawn, a file (stream.open), standard
+-- input (stream.stdin), a string (stream.string), a TLS connection
+-- (ssl.stream(conn)) or any table with read(self, max, timeout) returning a
+-- string, "" at the end, or an error value. A destination is a socket, a
+-- process, a file, a function(data), or a table with write(self, data,
+-- timeout). Reading through the netpoller (sockets, processes) parks only
+-- the goroutine that waits.
+--
+-- Failures are error values, returned as they happen (a timeout is the
+-- error "timeout"; the reader stays usable). The end of the input is nil.
+
+local M = {}
+
+M.SIZE = 65536        -- default buffer size (bytes)
+M.MAX_TOKEN = 1048576 -- default longest line / token a scanner accepts
+
+-- ---- sources and destinations ----
+
+local function is_obj(v)
+    local t = type(v)
+    return t == "table" or t == "struct" or t == "map"
+end
+
+-- The read function of a source: read(max) → string | "" | error
+local function source_reader(src, timeout)
+    if type(src) == "int" then
+        return function(max) return net.read(src, max, timeout) end
+    end
+    if is_obj(src) and src.read ~= nil then
+        return function(max) return src:read(max, timeout) end
+    end
+    return nil
+end
+
+-- The write function of a destination: write(data) → anything | error
+local function dest_writer(dst, timeout)
+    if type(dst) == "int" then
+        return function(data) return net.write(dst, data, timeout) end
+    end
+    if type(dst) == "function" then return dst end
+    if is_obj(dst) and dst.write ~= nil then
+        return function(data) return dst:write(data, timeout) end
+    end
+    return nil
+end
+
+-- ---- Reader ----
+
+local Reader = {}
+
+-- stream.reader(src [, opts]) → reader
+-- opts: size (buffer bytes, default stream.SIZE), timeout (ms for each read
+-- of the source; default: wait). A reader passed in is returned as it is.
+function M.reader(src, opts)
+    if is_obj(src) and src.__stream == "reader" then return src end
+    opts = opts or {}
+    local fill = source_reader(src, opts.timeout)
+    if fill == nil then panic("stream.reader: not a source: " .. type(src)) end
+    local r = {}
+    r.__stream = "reader"
+    r.src = src
+    r.fill_fn = fill
+    r.size = opts.size or M.SIZE
+    r.buf = ""
+    r.pos = 1 -- next unread byte of buf
+    r.eof = false
+    for k, f in Reader do r[k] = f end
+    return r
+end
+
+-- Read more from the source into the buffer: true, false at the end, or an error.
+function Reader.fill(self)
+    if self.eof then return false end
+    if self.pos > 1 then
+        self.buf = string.sub(self.buf, self.pos)
+        self.pos = 1
+    end
+    local chunk = self.fill_fn(self.size)
+    if is_error(chunk) then return chunk end
+    if chunk == nil or chunk == "" then
+        self.eof = true
+        return false
+    end
+    self.buf = self.buf .. chunk
+    return true
+end
+
+-- reader:buffered() → the number of bytes read from the source but not yet consumed
+function Reader.buffered(self)
+    return len(self.buf) - self.pos + 1
+end
+
+local function take(self, n)
+    local s = string.sub(self.buf, self.pos, self.pos + n - 1)
+    self.pos = self.pos + n
+    return s
+end
+
+-- reader:read([max]) → up to max bytes (default: the buffer size) | nil at the end | error
+-- Returns what is buffered, or reads the source once when the buffer is empty.
+function Reader.read(self, max)
+    max = max or self.size
+    if self:buffered() == 0 then
+        local ok = self:fill()
+        if is_error(ok) then return ok end
+        if not ok then return nil end
+    end
+    local n = self:buffered()
+    if n > max then n = max end
+    return take(self, n)
+end
+
+-- reader:read_full(n) → exactly n bytes | error ("unexpected end of input" when the
+-- input ends first; nil when it had already ended)
+function Reader.read_full(self, n)
+    while self:buffered() < n do
+        local ok = self:fill()
+        if is_error(ok) then return ok end
+        if not ok then
+            if self:buffered() == 0 then return nil end
+            return error("stream: unexpected end of input (wanted " .. n .. " bytes, got " .. self:buffered() .. ")")
+        end
+    end
+    return take(self, n)
+end
+
+-- reader:peek(n) → the next n bytes (fewer at the end) without consuming them | error
+function Reader.peek(self, n)
+    while self:buffered() < n do
+        local ok = self:fill()
+        if is_error(ok) then return ok end
+        if not ok then break end
+    end
+    local have = self:buffered()
+    if have > n then have = n end
+    return string.sub(self.buf, self.pos, self.pos + have - 1)
+end
+
+-- reader:skip(n) → the number of bytes skipped (fewer at the end) | error
+function Reader.skip(self, n)
+    local done = 0
+    while done < n do
+        if self:buffered() == 0 then
+            local ok = self:fill()
+            if is_error(ok) then return ok end
+            if not ok then break end
+        end
+        local k = self:buffered()
+        if k > n - done then k = n - done end
+        self.pos = self.pos + k
+        done = done + k
+    end
+    return done
+end
+
+-- reader:read_until(delim [, max]) → the text up to and including delim | error
+-- At the end of the input: what is left (without delim), then nil. With max,
+-- more than max bytes without delim is the error "stream: delimiter not found
+-- within N bytes" (the data stays in the reader).
+function Reader.read_until(self, delim, max)
+    local from = self.pos
+    while true do
+        local at = string.find(self.buf, delim, from)
+        if at ~= nil then return take(self, at - self.pos + len(delim)) end
+        if max ~= nil and self:buffered() > max then
+            return error("stream: delimiter not found within " .. max .. " bytes")
+        end
+        -- search again only where delim could now start
+        local seen = self:buffered()
+        local ok = self:fill()
+        if is_error(ok) then return ok end
+        if not ok then
+            if self:buffered() == 0 then return nil end
+            return take(self, self:buffered())
+        end
+        from = self.pos + seen - len(delim) + 1
+        if from < self.pos then from = self.pos end
+    end
+end
+
+-- reader:read_line([max]) → the next line without "\n" or "\r\n" | nil at the end | error
+-- The last line may lack its newline.
+function Reader.read_line(self, max)
+    local s = self:read_until("\n", max)
+    if s == nil or is_error(s) then return s end
+    if string.ends_with(s, "\n") then
+        s = string.sub(s, 1, len(s) - 1)
+        if string.ends_with(s, "\r") then s = string.sub(s, 1, len(s) - 1) end
+    end
+    return s
+end
+
+-- reader:read_all() → everything up to the end ("" when nothing is left) | error
+function Reader.read_all(self)
+    while true do
+        local ok = self:fill()
+        if is_error(ok) then return ok end
+        if not ok then break end
+    end
+    return take(self, self:buffered())
+end
+
+-- reader:close() → closes the source when it can be closed (a socket, a file, a process's stdin)
+function Reader.close(self)
+    local src = self.src
+    if type(src) == "int" then
+        net.close(src)
+    elseif is_obj(src) and src.close ~= nil then
+        src:close()
+    end
+end
+
+-- ---- Writer ----
+
+local Writer = {}
+
+-- stream.writer(dst [, opts]) → writer
+-- opts: size (bytes buffered before a write to dst, default stream.SIZE),
+-- timeout (ms for each write to dst). Call flush when done.
+function M.writer(dst, opts)
+    if is_obj(dst) and dst.__stream == "writer" then return dst end
+    opts = opts or {}
+    local put = dest_writer(dst, opts.timeout)
+    if put == nil then panic("stream.writer: not a destination: " .. type(dst)) end
+    local w = {}
+    w.__stream = "writer"
+    w.dst = dst
+    w.put = put
+    w.size = opts.size or M.SIZE
+    w.parts = []
+    w.pending = 0
+    for k, f in Writer do w[k] = f end
+    return w
+end
+
+-- writer:write(...) → true | error
+-- Buffers the values (strings as they are, others through tostring) and
+-- writes to the destination when more than size bytes are waiting.
+function Writer.write(self, ...)
+    for _, v in {...} do
+        local s = type(v) == "string" and v or tostring(v)
+        self.parts[] = s
+        self.pending = self.pending + len(s)
+    end
+    if self.pending >= self.size then return self:flush() end
+    return true
+end
+
+-- writer:buffered() → the number of bytes waiting for flush
+function Writer.buffered(self)
+    return self.pending
+end
+
+-- writer:flush() → true | error (the data stays buffered after an error)
+function Writer.flush(self)
+    if self.pending == 0 then return true end
+    local data = string.join(self.parts, "")
+    local r = self.put(data)
+    if is_error(r) then
+        self.parts = []
+        self.parts[] = data
+        return r
+    end
+    self.parts = []
+    self.pending = 0
+    if is_obj(self.dst) and self.dst.flush ~= nil then
+        local f = self.dst:flush()
+        if is_error(f) then return f end
+    end
+    return true
+end
+
+-- writer:close() → flushes, then closes the destination when it can be closed | error
+function Writer.close(self)
+    local r = self:flush()
+    local dst = self.dst
+    if type(dst) == "int" then
+        net.close(dst)
+    elseif is_obj(dst) and dst.close ~= nil then
+        dst:close()
+    end
+    return r
+end
+
+-- ---- files, standard streams, strings ----
+
+local function file_source(h, can_close)
+    local s = {}
+    s.read = function(self, max) return io.read_some(h, max) end
+    s.write = function(self, data)
+        io.write_string(h, data)
+        return true
+    end
+    s.flush = function(self)
+        io.flush(h)
+        return true
+    end
+    s.close = function(self)
+        if can_close then io.close(h) end
+    end
+    return s
+end
+
+-- stream.open(path [, mode [, opts]]) → reader ("r", default) | writer ("w", "a") | error
+function M.open(path, mode, opts)
+    mode = mode or "r"
+    local h = io.open(path, mode == "r" and "rb" or (mode == "a" and "ab" or "wb"))
+    if h == nil then return error("stream.open: cannot open " .. path) end
+    local f = file_source(h, true)
+    if mode == "r" then return M.reader(f, opts) end
+    return M.writer(f, opts)
+end
+
+-- stream.stdin([opts]) → a reader of standard input
+function M.stdin(opts)
+    local h = io.stdin()
+    if h == nil then return error("stream.stdin: no standard input") end
+    return M.reader(file_source(h, true), opts)
+end
+
+-- stream.stdout([opts]) → a writer to standard output (flush it, or it is flushed by size)
+function M.stdout(opts)
+    return M.writer(function(data) io.write(data) end, opts)
+end
+
+-- stream.stderr([opts]) → a writer to standard error
+function M.stderr(opts)
+    return M.writer(function(data) io.write_err(data) end, opts)
+end
+
+-- stream.string(s) → a reader over the string s
+function M.string(s)
+    local r = M.reader({read = function(self, max) return "" end})
+    r.buf = s
+    return r
+end
+
+-- stream.buffer() → a writer that keeps what is written: buf:string() returns it
+function M.buffer()
+    local parts = []
+    local w = M.writer(function(data) parts[] = data end, {size = 1})
+    w.string = function(self)
+        local _ = self:flush()
+        return string.join(parts, "")
+    end
+    return w
+end
+
+-- ---- Scanner ----
+
+-- Split functions: split(data, at_eof) → advance, token. advance is the number
+-- of bytes consumed (0: need more data), token the piece found (nil: none yet).
+
+local function split_lines(data, at_eof)
+    local at = string.find(data, "\n")
+    if at ~= nil then
+        local line = string.sub(data, 1, at - 1)
+        if string.ends_with(line, "\r") then line = string.sub(line, 1, len(line) - 1) end
+        return at, line
+    end
+    if at_eof and data ~= "" then return len(data), data end
+    return 0, nil
+end
+
+local function split_words(data, at_eof)
+    local m = re.match("\\S+", data)
+    if m == nil then
+        if at_eof then return len(data), nil end
+        return len(data), nil -- only spaces: drop them
+    end
+    if m.stop < len(data) or at_eof then return m.stop, m.text end
+    -- the word may go on in the next piece: drop the spaces before it
+    return m.start - 1, nil
+end
+
+local function split_bytes(data, at_eof)
+    if data == "" then return 0, nil end
+    return 1, string.sub(data, 1, 1)
+end
+
+local function split_chars(data, at_eof)
+    if data == "" then return 0, nil end
+    local b = string.byte(data, 1)
+    local n = 1
+    if b >= 0xF0 then
+        n = 4
+    elseif b >= 0xE0 then
+        n = 3
+    elseif b >= 0xC0 then
+        n = 2
+    end
+    if n > len(data) then
+        if at_eof then return len(data), data end
+        return 0, nil
+    end
+    return n, string.sub(data, 1, n)
+end
+
+M.SPLITS = {lines = split_lines, words = split_words, bytes = split_bytes, chars = split_chars}
+
+local Scanner = {}
+
+-- stream.scanner(src [, opts]) → scanner over a source or a reader
+-- opts: split ("lines" (default), "words", "bytes", "chars" or a split
+-- function), max (longest token, default stream.MAX_TOKEN), and the reader's
+-- size and timeout.
+function M.scanner(src, opts)
+    opts = opts or {}
+    local s = {}
+    s.reader = M.reader(src, opts)
+    s.max = opts.max or M.MAX_TOKEN
+    s.token = nil
+    s.error = nil
+    s.done = false
+    for k, f in Scanner do s[k] = f end
+    s:split(opts.split or "lines")
+    return s
+end
+
+-- scanner:split(mode) — "lines", "words", "bytes", "chars", or a function(data, at_eof) → advance, token
+function Scanner.split(self, mode)
+    if type(mode) == "function" then
+        self.split_fn = mode
+    else
+        self.split_fn = M.SPLITS[mode]
+        if self.split_fn == nil then panic("stream: unknown split mode " .. tostring(mode)) end
+    end
+end
+
+-- scanner:scan() → true when a token was read (scanner:text()), false at the end or on an error (scanner:err())
+function Scanner.scan(self)
+    if self.done then return false end
+    local r = self.reader
+    while true do
+        local data = string.sub(r.buf, r.pos)
+        if data ~= "" or r.eof then
+            local advance, token = self.split_fn(data, r.eof)
+            if is_error(advance) then
+                self.error = advance
+                self.done = true
+                return false
+            end
+            if advance > 0 then r.pos = r.pos + advance end
+            if token ~= nil then
+                self.token = token
+                return true
+            end
+            if r.eof and r:buffered() == 0 then
+                self.done = true
+                return false
+            end
+            if advance > 0 then continue end
+            if r.eof then
+                self.done = true
+                return false
+            end
+        end
+        if r:buffered() > self.max then
+            self.error = error("stream: token longer than " .. self.max .. " bytes")
+            self.done = true
+            return false
+        end
+        local ok = r:fill()
+        if is_error(ok) then
+            self.error = ok
+            self.done = true
+            return false
+        end
+    end
+end
+
+-- scanner:text() → the token the last scan read
+function Scanner.text(self)
+    return self.token
+end
+
+-- scanner:err() → the error that stopped the scanner, or nil (the end of the input is not an error)
+function Scanner.err(self)
+    return self.error
+end
+
+return M

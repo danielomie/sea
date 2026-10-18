@@ -15,7 +15,8 @@ make sea-jit          # Build bin/sea-jit (optional JIT, needs libgccjit headers
 bin/sea fmt -l .      # sea fmt / doc / test: Sea scripts in tools/, embedded at build
                       # time (tools/embed.sh -> gen/sea_tools.h, included by sea_main.c);
                       # MODULES in the Makefile embeds Sea modules for require("sea/...")
-                      # (sea/test = libs/test/test.sea, sea/check = tools/lib/check.sea)
+                      # (sea/test = libs/test/test.sea, sea/check = tools/lib/check.sea,
+                      # sea/stream = libs/stream/stream.sea)
                       # into gen/sea_modules.h
 
 bin/sea utils/license/license.sea -l BSD-3-Clause -c "The Sea Authors" -check # license headers in .c/.h/.sea/.sh/Makefile
@@ -99,10 +100,10 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
    there: `require("json")` → `lib/sea/json/json.so`). tools/lib/check.sea, tools/build.sea and
    tools/lsp.sea repeat this search: keep them in sync with `src/sea_stdlib.c`
 
-Before the search: built-in modules, the embedded `sea/test`/`sea/check`, then (in a
+Before the search: built-in modules, the embedded `sea/test`/`sea/check`/`sea/stream`, then (in a
 `sea build` executable) the bundled modules.
 
-Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `websocket`, `duckdb`, `sqlite` (Sea + native) and `flags`, `test`, `template` (pure Sea) — see `docs/libs.md`.
+Native libraries are `.so` files exposing a `sea_open_<name>` entry point. The `libs/` directory contains: `console`, `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `websocket`, `duckdb`, `sqlite` (Sea + native) and `flags`, `test`, `template`, `stream` (pure Sea; `test` and `stream` are embedded as `sea/test`, `sea/stream`) — see `docs/libs.md`.
 TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.
 The parser is also exposed to Sea code as the built-in `sea/parser` module (`src/sea_lib_parser.c`:
 parse, tokenize, check, walk, format). Changing the AST (`sea_ast.h`) or the parser means updating

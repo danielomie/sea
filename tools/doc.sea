@@ -21,6 +21,7 @@
 --   -open            with -http, open the index in the browser (xdg-open)
 
 local parser = require("sea/parser")
+local stream = require("sea/stream")
 
 local BUILTINS = {
     "math", "string", "utf8", "re", "encoding", "hash", "io", "os", "fs", "path",
@@ -901,12 +902,8 @@ local function route(target)
 end
 
 local function handle(fd)
-    local req = ""
-    while not string.contains(req, "\r\n\r\n") and len(req) < 65536 do
-        local chunk = net.read(fd, 8192, 5000)
-        if is_error(chunk) or chunk == "" then return end
-        req = req .. chunk
-    end
+    local req = stream.reader(fd, {timeout = 5000}):read_until("\r\n\r\n", 65536)
+    if req == nil or is_error(req) then return end
     local m = re.match("^([A-Z]+) (\\S+) HTTP/", req)
     if m == nil then return end
     if m.groups[1] ~= "GET" and m.groups[1] ~= "HEAD" then

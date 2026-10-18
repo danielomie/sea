@@ -3,6 +3,7 @@
 
 -- Test: the built-in tools `sea fmt` and `sea doc` (run as ./bin/sea from the repo root)
 local SEA = "./bin/sea"
+local stream = require("sea/stream")
 
 local dir = fs.tempdir("seatools-")
 local function run(args, stdin)
@@ -86,12 +87,7 @@ print(string.sub(banner, 1, 22), port > 0)
 local function get(target)
     local fd = net.connect("127.0.0.1", port, 2000)
     net.write(fd, "GET " .. target .. " HTTP/1.1\r\nHost: x\r\n\r\n")
-    local resp = ""
-    while true do
-        local chunk = net.read(fd, 65536, 5000)
-        if is_error(chunk) or chunk == "" then break end
-        resp = resp .. chunk
-    end
+    local resp = stream.reader(fd, {timeout = 5000}):read_all()
     net.close(fd)
     return resp
 end

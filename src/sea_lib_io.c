@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 /* ---- stdin helpers (original io.read / io.write) ------------------------- */
 
@@ -203,6 +204,36 @@ static SeaValue io_read_bytes(SeaVM *vm, int argc, SeaValue *args) {
     return r;
 }
 
+/* ---- io.read_some(handle, max) → string | error -------------------------- */
+/*
+ * One read(2) on the handle's file descriptor: whatever is available, up to
+ * max bytes, without waiting for more (a pipe, a terminal, stdin); "" at the
+ * end of the file. It bypasses the handle's stdio buffer, so don't mix it
+ * with read_line / read_bytes on the same handle (sea/stream uses it).
+ */
+static SeaValue io_read_some(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 2 || !sea_is_int(args[0])) return sea_make_error_str(vm, "io.read_some: not a handle");
+    IoFile *h = as_file(args[0]);
+    if (!h || h->tag != TAG_FILE) return sea_make_error_str(vm, "io.read_some: not a file handle");
+    int64_t n = sea_is_int(args[1]) ? sea_as_int(args[1]) : (int64_t)sea_as_number(args[1]);
+    if (n <= 0) return sea_obj_val(&sea_string_new("", 0)->obj);
+    if (n > (1 << 24)) n = 1 << 24;
+    char *buf = (char*)sea_malloc((size_t)n);
+    ssize_t got;
+    do {
+        got = read(fileno(h->fp), buf, (size_t)n);
+    } while (got < 0 && errno == EINTR);
+    if (got < 0) {
+        char msg[256];
+        snprintf(msg, sizeof msg, "io.read_some: %s", strerror(errno));
+        sea_free(buf, (size_t)n);
+        return sea_make_error_str(vm, msg);
+    }
+    SeaValue r = sea_obj_val(&sea_string_new(buf, (size_t)got)->obj);
+    sea_free(buf, (size_t)n);
+    return r;
+}
+
 /* ---- io.read_all(handle) → string --------------------------------------- */
 static SeaValue io_read_all(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
@@ -367,6 +398,7 @@ void sea_lib_io_register(SeaVM *vm) {
     mod_set(vm, mod, "close",        io_close);
     mod_set(vm, mod, "read_line",    io_read_line);
     mod_set(vm, mod, "read_bytes",   io_read_bytes);
+    mod_set(vm, mod, "read_some",    io_read_some);
     mod_set(vm, mod, "read_all",     io_read_all);
     mod_set(vm, mod, "write_string", io_write_string);
     mod_set(vm, mod, "write_line",   io_write_line);

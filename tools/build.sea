@@ -93,6 +93,7 @@ for _, g in parser.globals() do builtin[g] = true end
 builtin["sea/parser"] = true
 builtin["sea/test"] = true
 builtin["sea/check"] = true
+builtin["sea/stream"] = true
 
 -- The libraries installed with the sea binary (make install): lib/sea next to
 -- its bin/ directory, as require looks; nil when there is none

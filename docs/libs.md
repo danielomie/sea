@@ -21,6 +21,7 @@ pure-Sea libraries work out of the box.
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
 | `flags` | `libs/flags/flags` | pure Sea | — |
 | `test` | `libs/test/test` | pure Sea | — |
+| `stream` | built in: `require("sea/stream")` (`libs/stream/stream.sea`) | pure Sea | — |
 | `template` | `libs/template/template` | pure Sea | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
@@ -838,6 +839,7 @@ TLS runs over sockets from the built-in `net` module (see `docs/reference.md`): 
 | `ssl.read_request` | `read_request(conn [, timeout]) → string\|nil` | Read one full HTTP request (headers + Content-Length body). Prefer `libs/http` for real servers |
 | `ssl.write` | `write(conn, data [, timeout]) → n\|nil` | Write all of `data` |
 | `ssl.send` | `send(conn, data [, timeout]) → n\|error` | As `write`, with an error value on failure |
+| `ssl.stream` | `stream(conn) → source` | The connection as a source/destination for `sea/stream`: `stream.reader(ssl.stream(conn))`, `stream.writer(ssl.stream(conn))` |
 | `ssl.close` | `close(conn)` | Send close_notify (without waiting) and close the socket; wakes any goroutine waiting on it |
 | `ssl.peer_cert` | `peer_cert(conn) → cert\|nil` | Peer certificate handle (inspect with `cert_info`, free with `cert_free`) |
 | `ssl.version` | `version(conn) → string` | Negotiated TLS version, e.g. `"TLSv1.3"` |
@@ -1256,6 +1258,92 @@ run the benchmarks whose full name contains it, `"."` for all; default
 b)` (the deep equality as a bool), `t.show(v)` (a value as readable text),
 `t.has_run()` (whether `run`/`main` ran) and `t.reset()` (forget the tests
 defined so far).
+
+---
+
+## `stream`
+
+Buffered readers, writers and scanners, like Go's `bufio`: read lines,
+read up to a delimiter, exactly n bytes, peek; batch small writes; split an
+input into lines, words or your own tokens. Pure Sea, built into the `sea`
+binary as `require("sea/stream")` (the file is `libs/stream/stream.sea`).
+
+```sea
+local stream = require("sea/stream")
+
+local fd = net.connect("example.com", 80, 5000)
+local w = stream.writer(fd)
+w:write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+w:flush()
+local r = stream.reader(fd, {timeout = 5000})
+print(r:read_line())                       -- HTTP/1.0 200 OK
+local head = r:read_until("\r\n\r\n")
+local body = r:read_all()
+
+local sc = stream.scanner(stream.open("access.log")?)
+while sc:scan() do
+    if string.contains(sc:text(), " 500 ") then print(sc:text()) end
+end
+if sc:err() then print(sc:err().message) end
+```
+
+**Sources and destinations.** A reader reads from a *source*: a socket (an
+int fd from `net`), a process from `process.spawn` (its stdout), a file
+(`stream.open`), standard input (`stream.stdin()`), a string
+(`stream.string(s)`), a TLS connection (`ssl.stream(conn)`), or any table
+with `read(self, max, timeout)` returning a string, `""` at the end, or an
+error value. A writer writes to a *destination*: a socket, a process (its
+stdin), a file, a function `fn(data)`, or a table with
+`write(self, data, timeout)`. Sockets and processes wait through the
+netpoller, so in a goroutine a read parks only that goroutine.
+
+| Function | Description |
+|----------|-------------|
+| `stream.reader(src [, opts]) → reader` | `opts`: `size` (buffer, default `stream.SIZE` = 64 KB), `timeout` (ms for each read of the source) |
+| `stream.writer(dst [, opts]) → writer` | `opts`: `size` (bytes kept before writing to `dst`), `timeout` |
+| `stream.scanner(src [, opts]) → scanner` | Over a source or a reader. `opts`: `split` (below), `max` (longest token, default 1 MB), `size`, `timeout` |
+| `stream.open(path [, mode [, opts]]) → reader\|writer\|error` | `"r"` (default) a reader; `"w"`, `"a"` a writer |
+| `stream.stdin([opts])`, `stream.stdout([opts])`, `stream.stderr([opts])` | Standard input as a reader; standard output / error as writers |
+| `stream.string(s) → reader` | A reader over a string |
+| `stream.buffer() → writer` | A writer that keeps what is written: `buf:string()` |
+
+**Reader** (the end of the input is `nil`; failures are error values — a
+timeout is the error `"timeout"` and the reader stays usable):
+
+| Method | Description |
+|--------|-------------|
+| `r:read_line([max]) → string\|nil\|error` | The next line without `\n` / `\r\n` (the last one may lack it) |
+| `r:read_until(delim [, max]) → string\|nil\|error` | Up to and including `delim`; at the end, what is left without it. More than `max` bytes without `delim` is an error (the data stays) |
+| `r:read([max]) → string\|nil\|error` | What is buffered (up to `max`), or one read of the source when the buffer is empty |
+| `r:read_full(n) → string\|nil\|error` | Exactly `n` bytes; the error `unexpected end of input` when it ends first |
+| `r:peek(n) → string\|error` | The next `n` bytes (fewer at the end) without consuming them |
+| `r:skip(n) → int\|error` | Discard `n` bytes; returns how many |
+| `r:read_all() → string\|error` | Everything up to the end |
+| `r:buffered() → int` | Bytes read from the source and not consumed yet |
+| `r:close()` | Close the source (socket, file, ...) |
+
+**Writer:** `w:write(...) → true|error` (strings as they are, other values
+through `tostring`; written to the destination when `size` bytes are
+waiting), `w:flush() → true|error` (after an error the data stays
+buffered), `w:buffered()`, `w:close()` (flush, then close the destination).
+Call `flush` when done: nothing flushes by itself at exit.
+
+**Scanner:** `while sc:scan() do ... sc:text() ... end`, then `sc:err()`
+(`nil` when the input simply ended). `split` is `"lines"` (default; without
+`\n` / `\r\n`), `"words"` (separated by whitespace), `"bytes"`, `"chars"`
+(UTF-8 characters), or a function `split(data, at_eof) → advance, token`:
+`advance` bytes are consumed (`0` asks for more data) and a non-nil `token`
+is the next result. `sc:split(mode)` changes it.
+
+```sea
+local function commas(data, at_eof)
+    local at = string.find(data, ",")
+    if at ~= nil then return at, string.sub(data, 1, at - 1) end
+    if at_eof and data ~= "" then return len(data), data end
+    return 0, nil
+end
+local sc = stream.scanner(stream.string("a,b,c"), {split = commas})
+```
 
 ---
 

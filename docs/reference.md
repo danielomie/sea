@@ -729,6 +729,7 @@ Handles are opaque integer values returned by `io.open` and `io.scanner`. Close 
 | `io.close` | `close(handle)` | Close a file or scanner handle and free its resources |
 | `io.read_line` | `read_line(handle) → string\|nil` | Read one line, stripping the trailing newline. Returns `nil` on EOF |
 | `io.read_bytes` | `read_bytes(handle, n) → string\|nil` | Read up to `n` bytes. Returns `nil` on immediate EOF |
+| `io.read_some` | `read_some(handle, max) → string\|error` | One `read(2)`: what is available now, up to `max` bytes, without waiting for more (pipes, terminals, stdin); `""` at the end. It bypasses the handle's buffer: don't mix it with `read_line`/`read_bytes` on one handle (`sea/stream` uses it) |
 | `io.read_all` | `read_all(handle) → string` | Read the entire remaining contents of the file as a string |
 | `io.write_string` | `write_string(handle, s)` | Write string `s` to the file (no newline appended) |
 | `io.write_line` | `write_line(handle, s)` | Write string `s` followed by a newline |
@@ -1710,7 +1711,7 @@ local http = require("./libs/http/http")
 
 Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
 `os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
-`sea/parser`, and the Sea modules `sea/test` and `sea/check`) are found
+`sea/parser`, and the Sea modules `sea/test`, `sea/check` and `sea/stream`) are found
 first, then, in an executable made by `sea build`, the modules bundled in
 it. An absolute path (`require("/opt/sea/libs/yaml/yaml")`) names the file
 itself, tried as `.sea`, `/init.sea`, then `.so`. Otherwise the search order

@@ -56,7 +56,7 @@ $(JIT_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(JIT_OBJ_DIR)
 # that `require("sea/...")` finds without a file: gen/sea_modules.h, included
 # by sea_stdlib.c (name=file).
 TOOLS = $(wildcard tools/*.sea)
-MODULES = sea/test=libs/test/test.sea sea/check=tools/lib/check.sea
+MODULES = sea/test=libs/test/test.sea sea/check=tools/lib/check.sea sea/stream=libs/stream/stream.sea
 GEN_DIR = gen
 CFLAGS += -I$(GEN_DIR)
 
@@ -181,7 +181,7 @@ install: $(TARGET)
 	@if [ -x $(JIT_TARGET) ]; then install -m 755 $(JIT_TARGET) $(BINDIR)/sea-jit && echo "installed sea-jit"; fi
 	@for d in libs/*/; do \
 	    lib=$$(basename $$d); \
-	    [ "$$lib" = test ] && continue; \
+	    case $$lib in test|stream) continue;; esac; \
 	    files=$$(cd $$d && ls *.sea *.so 2>/dev/null | grep -v '^test\.sea$$'); \
 	    [ -z "$$files" ] && continue; \
 	    if ls $$d/*.c >/dev/null 2>&1 && ! ls $$d/*.so >/dev/null 2>&1; then \

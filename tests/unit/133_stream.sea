@@ -1,0 +1,163 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: sea/stream — buffered readers, writers and scanners over strings,
+-- files, sockets and processes (run as ./bin/sea from the repo root)
+local stream = require("sea/stream")
+
+print("-- reader over a string")
+local r = stream.string("first\r\nsecond\nthird")
+print(r:read_line(), r:read_line(), r:read_line(), r:read_line())
+r = stream.string("HEAD\r\nA: 1\r\n\r\nBODY12345")
+print(r:peek(4), r:read_until("\r\n\r\n") == "HEAD\r\nA: 1\r\n\r\n", r:buffered())
+print(r:read_full(4), r:skip(2), r:read(10), r:read(10))
+r = stream.string("abc")
+print(r:read_full(5), r:read_full(1))
+print(stream.string("x;y"):read_until(";"), stream.string("xyz"):read_until(";"))
+print(stream.string("aaaaaaaa"):read_until(";", 4))
+
+print("-- small buffer: delimiters split across reads")
+local pieces = {"ab", "c\r", "\nde", "f\r\n", "\r\nrest"}
+local k = -1
+local src = {}
+src.read = function(self, max)
+    k = k + 1
+    return pieces[k] or ""
+end
+r = stream.reader(src, {size = 2})
+print(r:read_line(), r:read_until("\r\n\r\n"), r:read_all(), r:read_line())
+
+print("-- scanner")
+local function scan_all(s, mode)
+    local sc = stream.scanner(stream.string(s), {split = mode})
+    local out = []
+    while sc:scan() do out[] = "[" .. sc:text() .. "]" end
+    return string.join(out, ""), sc:err()
+end
+print(scan_all("one\ntwo\r\n\nlast", "lines"))
+print(scan_all("  the quick\n\tbrown   fox ", "words"))
+print(scan_all("añ€", "chars"))
+print(scan_all("ab", "bytes"))
+-- words split across reads of a tiny buffer
+local wsrc = {}
+local wparts = {"hel", "lo wo", "rld", "  x"}
+local wi = -1
+wsrc.read = function(self, max)
+    wi = wi + 1
+    return wparts[wi] or ""
+end
+local sc = stream.scanner(wsrc, {split = "words", size = 3})
+local ws = []
+while sc:scan() do ws[] = sc:text() end
+print(string.join(ws, ","))
+-- a custom split: comma-separated fields
+local function commas(data, at_eof)
+    local at = string.find(data, ",")
+    if at ~= nil then return at, string.sub(data, 1, at - 1) end
+    if at_eof and data ~= "" then return len(data), data end
+    return 0, nil
+end
+print(scan_all("a,b,,c", commas))
+-- a token over the limit
+sc = stream.scanner(stream.string(string.rep("x", 100)), {max = 10, size = 4})
+print(sc:scan(), sc:err())
+
+print("-- writer")
+local buf = stream.buffer()
+buf:write("a", 1, true, nil)
+buf:write("!")
+print(buf:string())
+local got = []
+local w = stream.writer(function(data) got[] = data end, {size = 8})
+w:write("1234")
+w:write("5678") -- reaches 8: written as one piece
+w:write("9")
+print(len(got), got[0], w:buffered())
+w:flush()
+print(len(got), got[1], w:buffered())
+
+print("-- files")
+local dir = fs.tempdir("stream-")
+local file = path.join(dir, "lines.txt")
+local fw = stream.open(file, "w")
+for i = 1, 1000 do fw:write("line ", i, "\n") end
+fw:close()
+local fr = stream.open(file)
+local n = 0
+local last = nil
+local line = fr:read_line()
+while line ~= nil do
+    n = n + 1
+    last = line
+    line = fr:read_line()
+end
+fr:close()
+print(n, last)
+local fa = stream.open(file, "a")
+fa:write("appended\n")
+fa:close()
+sc = stream.scanner(stream.open(file))
+local count = 0
+while sc:scan() do count = count + 1 end
+print(count, sc:text(), sc:err())
+print(is_error(stream.open(path.join(dir, "missing/x.txt"))))
+
+print("-- sockets")
+local lfd = net.listen(0, "127.0.0.1")
+local port = net.local_port(lfd)
+go (function()
+    local c = net.accept(lfd, 5000)
+    local cr = stream.reader(c, {timeout = 5000})
+    local cw = stream.writer(c)
+    -- a line protocol: answer each line until QUIT
+    local l = cr:read_line()
+    while l ~= nil and l ~= "QUIT" do
+        cw:write("echo: ", l, "\n")
+        cw:flush()
+        l = cr:read_line()
+    end
+    cw:write("bye\n")
+    cw:close()
+end)()
+local fd = net.connect("127.0.0.1", port, 2000)
+local cw = stream.writer(fd)
+local cr = stream.reader(fd, {timeout = 5000})
+cw:write("hello\nworld\n")
+cw:flush()
+print(cr:read_line(), cr:read_line())
+cw:write("QUIT\n")
+cw:flush()
+print(cr:read_line(), cr:read_line())
+net.close(fd)
+net.close(lfd)
+-- a timeout is an error value, and the reader stays usable
+local lfd2 = net.listen(0, "127.0.0.1")
+local fd2 = net.connect("127.0.0.1", net.local_port(lfd2), 2000)
+local peer = net.accept(lfd2, 2000)
+local tr = stream.reader(fd2, {timeout = 50})
+local t = tr:read_line()
+print(is_error(t), t.message)
+net.write(peer, "late\n")
+print(tr:read_line())
+net.close(peer)
+net.close(fd2)
+net.close(lfd2)
+
+print("-- processes")
+local p = process.spawn({"sh", "-c", "printf 'b\\na\\nc\\n' | sort"})
+sc = stream.scanner(p)
+local sorted = []
+while sc:scan() do sorted[] = sc:text() end
+p:wait()
+print(string.join(sorted, ","))
+p = process.spawn({"cat"})
+local pw = stream.writer(p)
+local pr = stream.reader(p)
+pw:write("through cat\n")
+pw:flush()
+print(pr:read_line())
+p:close_stdin()
+print(pr:read_line())
+print(p:wait().ok)
+
+fs.remove(dir, {recursive = true})

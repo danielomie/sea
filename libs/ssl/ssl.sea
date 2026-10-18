@@ -10,6 +10,7 @@
 -- Usage:  local ssl = require("./libs/ssl/ssl")
 
 local native = require("ssl_native")
+local stream = require("sea/stream")
 
 local M = {}
 
@@ -98,32 +99,34 @@ function M.recv(conn, max, timeout)
     return native.tls_recv(conn, max or 65536, timeout)
 end
 
+-- ssl.stream(conn) → a source and destination for sea/stream:
+--   local r = stream.reader(ssl.stream(conn), {timeout = 5000})
+--   local w = stream.writer(ssl.stream(conn))
+function M.stream(conn)
+    local s = {}
+    s.conn = conn
+    s.read = function(self, max, timeout) return native.tls_recv(conn, max or 65536, timeout) end
+    s.write = function(self, data, timeout) return native.tls_send(conn, data, timeout) end
+    s.close = function(self) native.tls_close(conn) end
+    return s
+end
+
 -- ssl.read_request(conn [, timeout_ms]) → string|nil
 -- Reads one HTTP request over TLS: headers, then the body by Content-Length.
 function M.read_request(conn, timeout)
-    local buf = ""
-    local head_end = nil
-    while head_end == nil do
-        if len(buf) > 1048576 then return buf end
-        local chunk = native.tls_recv(conn, 65536, timeout)
-        if is_error(chunk) or chunk == "" then return buf end
-        buf = buf .. chunk
-        head_end = string.find(buf, "\r\n\r\n")
-    end
-    local head = string.lower(string.sub(buf, 1, head_end))
+    local r = stream.reader(M.stream(conn), {timeout = timeout})
+    local head = r:read_until("\r\n\r\n", 1048576)
+    if head == nil then return nil end
+    -- no blank line within 1 MB, or the peer stopped early: what came
+    if is_error(head) then return r:read(r:buffered()) end
+    if not string.ends_with(head, "\r\n\r\n") then return head end
     local need = 0
-    local cl = string.find(head, "\r\ncontent-length:")
-    if cl then
-        local line_end = string.find(head, "\r\n", cl + 2) or len(head)
-        need = tonumber(string.trim(string.sub(head, cl + 17, line_end - 1))) or 0
-    end
-    local total = head_end + 3 + need
-    while len(buf) < total do
-        local chunk = native.tls_recv(conn, total - len(buf), timeout)
-        if is_error(chunk) or chunk == "" then break end
-        buf = buf .. chunk
-    end
-    return buf
+    local m = re.match("(?i)\r\ncontent-length:[ \t]*([0-9]+)", head)
+    if m ~= nil then need = tonumber(m.groups[1]) end
+    if need == 0 then return head end
+    local body = r:read_full(need)
+    if body == nil or is_error(body) then return head .. r:read_all() end
+    return head .. body
 end
 
 -- ssl.write(conn, data [, timeout_ms]) → bytes written | nil

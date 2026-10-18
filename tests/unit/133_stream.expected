@@ -1,0 +1,37 @@
+-- reader over a string
+first	second	third	nil
+HEAD	true	9
+BODY	2	345	nil
+error(stream: unexpected end of input (wanted 5 bytes, got 3))	a
+x;	xyz
+error(stream: delimiter not found within 4 bytes)
+-- small buffer: delimiters split across reads
+abc	def
+
+	rest	nil
+-- scanner
+[one][two][][last]
+[the][quick][brown][fox]
+[a][ñ][€]
+[a][b]
+hello,world,x
+[a][b][][c]
+false	error(stream: token longer than 10 bytes)
+-- writer
+a1truenil!
+1	12345678	1
+2	9	0
+-- files
+1000	line 1000
+1001	appended	nil
+true
+-- sockets
+echo: hello	echo: world
+bye	nil
+true	timeout
+late
+-- processes
+a,b,c
+through cat
+nil
+true
