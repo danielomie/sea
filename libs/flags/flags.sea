@@ -1,296 +1,411 @@
 -- Copyright (c) 2026 The Sea Authors
 -- SPDX-License-Identifier: BSD-3-Clause
 
--- libs/flags/flags.sea — Flag parsing library (Go's flag package style)
+-- flags — command-line flags, in the style of Go's flag package
 --
--- Uso:
---   local flags = require("./libs/flags/flags")
+--   local flags = require("sea/flags")
 --
---   local host    = flags.string("host",    "localhost", "server host")
---   local port    = flags.int("port",       8080,        "server port")
---   local verbose = flags.bool("verbose",   false,       "verbose output")
---   local rate    = flags.number("rate",    1.0,         "request rate")
+--   local host    = flags.string("host", "localhost", "server host")
+--   local port    = flags.int("port", 8080, "server port", {alias = "p"})
+--   local verbose = flags.bool("v", false, "verbose output", {alias = "verbose"})
+--   local tags    = flags.list("tag", "a tag (repeat it)")
+--   local format  = flags.string("format", "text", "output format", {choices = {"text", "json"}})
 --
---   flags.parse()
+--   local paths = flags.parse()          -- the positional arguments (an array)
+--   print(host.value, port.value, verbose.value, len(tags.value))
 --
---   print(host.value, port.value, verbose.value)
---   local rest = flags.args()   -- argumentos posicionais restantes
+-- The functions above use one default set, over os.args. flags.new(name)
+-- makes a set of its own (a tool with its own usage line and messages):
 --
--- Sintaxe aceita (igual ao Go):
---   -flag value
---   -flag=value
---   --flag value
---   --flag=value
---   -bool         (boolean sem valor → true)
---   --            (encerra o parsing; resto vai para flags.args())
---   -h / --help   (imprime usage e sai com código 0)
+--   local f = flags.new("sea fmt", {usage = "[flags] [path ...]", about = "Formats Sea source."})
+--   local list = f:bool("l", false, "list the files whose formatting differs")
+--   local paths = f:parse()
+--
+-- Accepted syntax: -flag value, -flag=value, --flag value, --flag=value;
+-- -bool (true) and -bool=false; "--" ends the flags; "-" alone is a
+-- positional argument; flags and positional arguments may be mixed (unless
+-- the set was made with interspersed = false). -h / --help prints the usage
+-- on stdout and exits 0. A bad flag prints "name: message" and the usage on
+-- stderr and exits 2 (or, with exit_on_error = false, parse returns an error).
 
 local M = {}
 
--- ---- Estado interno --------------------------------------------------------
+local Set = {}
 
-local _defs    = {}     -- name → { typ, value, default, usage, set }
-local _order   = {}     -- lista ordenada de nomes (para usage)
-local _order_n = 0
-local _rest    = {}     -- argumentos posicionais após parse
-local _rest_n  = 0
-local _usage_fn = nil   -- função de usage customizável
+local KIND_ARG = {string = "string", int = "int", number = "number", list = "value"}
 
--- ---- Helpers privados ------------------------------------------------------
-
-local function list_push(t, n, v)
-    t[n] = v
-    return n + 1
+-- flags.new([name [, opts]]) → set
+-- name: the program, for messages and the usage line ("sea fmt"). opts:
+-- usage (what follows the name in the usage line, default "[flags]
+-- [arguments...]"), about (text printed under it), interspersed (default
+-- true), exit_on_error (default true), long (how the usage and messages
+-- write names longer than one letter: "--" (default) or "-", as Go does;
+-- both are accepted either way).
+function M.new(name, opts)
+    opts = opts or {}
+    local s = {}
+    s.name = name
+    s.usage_line = opts.usage or "[flags] [arguments...]"
+    s.about = opts.about
+    s.interspersed = opts.interspersed ~= false
+    s.exit_on_error = opts.exit_on_error ~= false
+    s.long = opts.long or "--"
+    s.defs = [=] -- name or alias → flag
+    s.order = []
+    s.rest = []
+    s.usage_fn = nil
+    for k, f in Set do s[k] = f end
+    return s
 end
 
-local function flagdef(typ, default_val, usage)
-    return { typ = typ, value = default_val, def = default_val,
-             usage = usage or "", set = false }
-end
+-- ---- defining flags ----
 
-local function register(name, typ, default_val, usage)
-    if _defs[name] then
-        error("flag redefinida: -" .. name)
+local function add(self, kind, name, initial, usage, opts)
+    opts = opts or {}
+    if self.defs[name] ~= nil then panic("flags: -" .. name .. " defined twice") end
+    local f = {}
+    f.kind = kind
+    f.name = name
+    f.set_of = self
+    f.value = initial
+    f.initial = initial
+    f.usage = usage or ""
+    f.set = false
+    f.arg = opts.arg or KIND_ARG[kind]
+    f.aliases = []
+    f.choices = nil
+    if opts.choices ~= nil then
+        f.choices = []
+        for _, c in opts.choices do f.choices[] = c end
     end
-    local f = flagdef(typ, default_val, usage)
-    _defs[name] = f
-    _order_n = list_push(_order, _order_n, name)
+    self.defs[name] = f
+    local alias = opts.alias
+    if type(alias) == "string" then
+        f.aliases[] = alias
+    elseif alias ~= nil then
+        for _, a in alias do f.aliases[] = a end
+    end
+    for _, a in f.aliases do
+        if self.defs[a] ~= nil then panic("flags: -" .. a .. " defined twice") end
+        self.defs[a] = f
+    end
+    self.order[] = f
     return f
 end
 
-local function die(msg)
-    io.write_err("flag: " .. msg .. "\n")
-    M.usage()
+-- set:string(name, default, usage [, opts]) → flag (flag.value after parse)
+-- opts: alias (a name or a list of names), arg (the value's name in the
+-- usage, e.g. "FILE"), choices (the values allowed).
+function Set.string(self, name, initial, usage, opts)
+    return add(self, "string", name, initial or "", usage, opts)
+end
+
+-- set:int(name, default, usage [, opts]) → flag
+function Set.int(self, name, initial, usage, opts)
+    return add(self, "int", name, initial or 0, usage, opts)
+end
+
+-- set:number(name, default, usage [, opts]) → flag
+function Set.number(self, name, initial, usage, opts)
+    return add(self, "number", name, initial or 0.0, usage, opts)
+end
+
+-- set:bool(name, default, usage [, opts]) → flag: -name sets it, -name=false clears it
+function Set.bool(self, name, initial, usage, opts)
+    return add(self, "bool", name, initial or false, usage, opts)
+end
+
+-- set:list(name, usage [, opts]) → flag whose value is an array: each -name v adds v
+function Set.list(self, name, usage, opts)
+    return add(self, "list", name, [], usage, opts)
+end
+
+-- ---- parsing ----
+
+local function fail(self, msg)
+    local prefix = self.name ~= nil and self.name or "flag"
+    if not self.exit_on_error then return error(prefix .. ": " .. msg) end
+    io.write_err(prefix .. ": " .. msg .. "\n")
+    self:usage(true)
     os.exit(2)
 end
 
-local function apply(f, name, val_str)
-    if f.typ == "string" then
-        f.value = val_str
+local function dashed(self, name)
+    return (len(name) == 1 and "-" or self.long) .. name
+end
 
-    elseif f.typ == "int" then
-        local n = tonumber(val_str)
-        if not n then die("valor inválido para -" .. name .. ": '" .. val_str .. "' (esperado inteiro)") end
-        f.value = math.floor(n)
+local function show(f)
+    return dashed(f.set_of, f.name)
+end
 
-    elseif f.typ == "number" then
-        local n = tonumber(val_str)
-        if not n then die("valor inválido para -" .. name .. ": '" .. val_str .. "' (esperado número)") end
+local function apply(self, f, text)
+    if f.kind == "string" or f.kind == "list" then
+        if f.choices ~= nil then
+            local ok = false
+            for _, c in f.choices do
+                if c == text then ok = true end
+            end
+            if not ok then
+                return fail(self, show(f) .. " must be one of " .. string.join(f.choices, ", ") .. " (got '" .. text .. "')")
+            end
+        end
+        if f.kind == "list" then
+            f.value[] = text
+        else
+            f.value = text
+        end
+    elseif f.kind == "int" then
+        local n = tonumber(text)
+        if n == nil or type(n) ~= "int" then return fail(self, show(f) .. " takes an integer (got '" .. text .. "')") end
         f.value = n
-
-    elseif f.typ == "bool" then
-        if val_str == "true" or val_str == "1" or val_str == "yes" then
+    elseif f.kind == "number" then
+        local n = tonumber(text)
+        if n == nil then return fail(self, show(f) .. " takes a number (got '" .. text .. "')") end
+        f.value = n
+    elseif f.kind == "bool" then
+        if text == "true" or text == "1" or text == "yes" then
             f.value = true
-        elseif val_str == "false" or val_str == "0" or val_str == "no" then
+        elseif text == "false" or text == "0" or text == "no" then
             f.value = false
         else
-            die("valor inválido para -" .. name .. ": '" .. val_str .. "' (esperado true/false)")
+            return fail(self, show(f) .. " takes true or false (got '" .. text .. "')")
         end
     end
-
     f.set = true
+    return nil
 end
 
--- ---- Definição de flags ----------------------------------------------------
-
--- flags.string(name, default, usage) → flagref
--- flagref.value contém o valor após flags.parse()
-function M.string(name, default_val, usage)
-    return register(name, "string", default_val or "", usage)
-end
-
--- flags.int(name, default, usage) → flagref
-function M.int(name, default_val, usage)
-    return register(name, "int", default_val or 0, usage)
-end
-
--- flags.bool(name, default, usage) → flagref
--- Pode ser passado como -flag (→ true) ou -flag=false
-function M.bool(name, default_val, usage)
-    return register(name, "bool", default_val or false, usage)
-end
-
--- flags.number(name, default, usage) → flagref  (float64 no Go)
-function M.number(name, default_val, usage)
-    return register(name, "number", default_val or 0.0, usage)
-end
-
--- ---- Parsing ---------------------------------------------------------------
-
--- flags.parse() — processa os.args[1..n]
--- Deve ser chamado após todas as definições de flags.
-function M.parse()
-    local nargs = len(os.args) - 1   -- os.args[0] é nil
-
-    local i = 1
-    while i <= nargs do
-        local arg = os.args[i]
-
-        -- Fim explícito do parsing de flags
-        if arg == "--" then
-            i = i + 1
-            break
-        end
-
-        -- Help
-        if arg == "-h" or arg == "--help" then
-            M.usage()
-            os.exit(0)
-        end
-
-        -- É uma flag?
-        if string.starts_with(arg, "-") then
-            -- Remove um ou dois traços
-            local stripped
-            if string.starts_with(arg, "--") then
-                stripped = string.sub(arg, 3)
-            else
-                stripped = string.sub(arg, 2)
-            end
-
-            if len(stripped) == 0 then
-                -- "-" sozinho é argumento posicional
-                _rest_n = list_push(_rest, _rest_n, arg)
-                i = i + 1
-            else
-                -- Verifica se há "=" embutido: --flag=value
-                local eq  = string.find(stripped, "=")
-                local name, val_str
-
-                if eq then
-                    name    = string.sub(stripped, 1, eq - 1)
-                    val_str = string.sub(stripped, eq + 1)
-                else
-                    name    = stripped
-                    val_str = nil
-                end
-
-                local f = _defs[name]
-                if not f then
-                    die("flag desconhecida: -" .. name)
-                end
-
-                if val_str then
-                    -- valor já está na mesma token (-flag=value)
-                    apply(f, name, val_str)
-                elseif f.typ == "bool" then
-                    -- booleano sem valor → true
-                    f.value = true
-                    f.set   = true
-                else
-                    -- próximo token é o valor
-                    i = i + 1
-                    if i > nargs then
-                        die("flag -" .. name .. " requer um valor")
-                    end
-                    apply(f, name, os.args[i])
-                end
-
-                i = i + 1
-            end
-        else
-            -- Argumento posicional
-            _rest_n = list_push(_rest, _rest_n, arg)
-            i = i + 1
-        end
+-- set:parse([args]) → the positional arguments (an array) | error
+-- args: an array of arguments (std: os.args from 1). Parsing again
+-- starts from the defaults.
+function Set.parse(self, args)
+    if args == nil then
+        args = []
+        for i = 1, len(os.args) - 1 do args[] = os.args[i] end
     end
-
-    -- Tudo após "--" vai para args posicionais
-    while i <= nargs do
-        _rest_n = list_push(_rest, _rest_n, os.args[i])
+    for _, f in self.order do
+        f.set = false
+        if f.kind == "list" then f.value = [] else f.value = f.initial end
+    end
+    self.rest = []
+    local i = 0
+    local n = len(args)
+    local flags_done = false
+    while i < n do
+        local a = args[i]
         i = i + 1
+        if flags_done or a == "-" or not string.starts_with(a, "-") then
+            self.rest[] = a
+            if not self.interspersed then flags_done = true end
+        elseif a == "--" then
+            flags_done = true
+        elseif (a == "-h" or a == "--help" or a == "-help") and self.defs["h"] == nil and self.defs["help"] == nil then
+            self:usage(false)
+            os.exit(0)
+        else
+            local body = string.sub(a, string.starts_with(a, "--") and 3 or 2)
+            local name = body
+            local text = nil
+            local eq = string.find(body, "=")
+            if eq ~= nil then
+                name = string.sub(body, 1, eq - 1)
+                text = string.sub(body, eq + 1)
+            end
+            local f = self.defs[name]
+            if f == nil then return fail(self, "unknown flag " .. a) end
+            if text == nil and f.kind == "bool" then
+                f.value = true
+                f.set = true
+            else
+                if text == nil then
+                    if i >= n then return fail(self, show(f) .. " needs a value") end
+                    text = args[i]
+                    i = i + 1
+                end
+                local bad = apply(self, f, text)
+                if bad ~= nil then return bad end
+            end
+        end
     end
+    return self.rest
 end
 
--- ---- Acesso aos resultados -------------------------------------------------
+-- ---- results ----
 
--- flags.get(name) → valor da flag (ou nil se não definida)
-function M.get(name)
-    local f = _defs[name]
-    return f and f.value or nil
+-- set:get(name) → the value of a flag (nil when there is no such flag)
+function Set.get(self, name)
+    local f = self.defs[name]
+    if f == nil then return nil end
+    return f.value
 end
 
--- flags.is_set(name) → true se a flag foi explicitamente passada
-function M.is_set(name)
-    local f = _defs[name]
-    return f and f.set or false
+-- set:is_set(name) → whether the flag was given on the command line
+function Set.is_set(self, name)
+    local f = self.defs[name]
+    return f ~= nil and f.set
 end
 
--- flags.args() → tabela com os argumentos posicionais restantes (0-indexed)
-function M.args()
-    return _rest
+-- set:args() → the positional arguments of the last parse (an array)
+function Set.args(self)
+    return self.rest
 end
 
--- flags.narg() → quantidade de argumentos posicionais
-function M.narg()
-    return _rest_n
+-- set:narg() → the number of positional arguments
+function Set.narg(self)
+    return len(self.rest)
 end
 
--- flags.nflag() → quantidade de flags definidas
-function M.nflag()
-    return _order_n
+-- set:nflag() → the number of flags defined
+function Set.nflag(self)
+    return len(self.order)
 end
 
--- ---- Usage -----------------------------------------------------------------
+-- ---- usage ----
 
--- flags.set_usage(fn) — substitui a função de usage padrão
-function M.set_usage(fn)
-    _usage_fn = fn
+-- set:set_usage(fn) — replace the usage text with fn() (called for -h and on errors)
+function Set.set_usage(self, fn)
+    self.usage_fn = fn
 end
 
--- flags.usage() — imprime ajuda no formato do Go flag package
-function M.usage()
-    if _usage_fn then
-        _usage_fn()
+-- set:help() → the usage text
+function Set.help(self)
+    local out = []
+    out[] = "usage: " .. (self.name or "program") .. " " .. self.usage_line
+    if self.about ~= nil and self.about ~= "" then
+        out[] = ""
+        out[] = self.about
+    end
+    if len(self.order) > 0 then
+        out[] = ""
+        out[] = "flags:"
+        local rows = []
+        local width = 0
+        for _, f in self.order do
+            -- the one-letter names first: -n, --name
+            local names = []
+            local all = []
+            all[] = f.name
+            for _, a in f.aliases do all[] = a end
+            for _, a in all do
+                if len(a) == 1 then names[] = dashed(self, a) end
+            end
+            for _, a in all do
+                if len(a) > 1 then names[] = dashed(self, a) end
+            end
+            local left = string.join(names, ", ")
+            if f.kind ~= "bool" then left = left .. " " .. string.upper(f.arg) end
+            if len(left) > width then width = len(left) end
+            local right = f.usage
+            if f.choices ~= nil and not string.contains(right, string.join(f.choices, ", ")) then
+                right = right .. " (" .. string.join(f.choices, ", ") .. ")"
+            end
+            local d = f.initial
+            local shown_default = nil
+            if f.kind == "string" and d ~= "" then
+                shown_default = "\"" .. d .. "\""
+            elseif (f.kind == "int" or f.kind == "number") and d ~= 0 then
+                shown_default = tostring(d)
+            elseif f.kind == "bool" and d == true then
+                shown_default = "true"
+            end
+            if shown_default ~= nil then right = right .. " (default " .. shown_default .. ")" end
+            local row = {}
+            row.left = left
+            row.right = right
+            rows[] = row
+        end
+        if width > 28 then width = 28 end
+        for _, r in rows do
+            if len(r.left) > width then
+                out[] = "  " .. r.left
+                out[] = "  " .. string.rep(" ", width) .. "  " .. r.right
+            else
+                out[] = "  " .. string.pad_right(r.left, width) .. "  " .. r.right
+            end
+        end
+    end
+    return string.join(out, "\n") .. "\n"
+end
+
+-- set:usage([to_stderr]) — print the usage (stdout for -h, stderr on errors)
+function Set.usage(self, to_stderr)
+    if self.usage_fn ~= nil then
+        self.usage_fn()
         return
     end
-
-    io.write_err("Usage:" .. "\n")
-    io.write_err("  [flags] [arguments...]" .. "\n")
-    io.write_err("" .. "\n")
-    io.write_err("Flags:" .. "\n")
-
-    if _order_n > 0 then
-        for i = 0, _order_n - 1 do
-            local name = _order[i]
-            local f    = _defs[name]
-
-            local type_label
-            if f.typ == "string" then type_label = "string"
-            elseif f.typ == "int" then type_label = "int"
-            elseif f.typ == "number" then type_label = "float"
-            elseif f.typ == "bool" then type_label = ""
-            else type_label = f.typ end
-
-            local flag_line
-            if type_label == "" then
-                flag_line = "  -" .. name
-            else
-                flag_line = "  -" .. name .. " " .. type_label
-            end
-
-            local default_str
-            if f.typ == "string" then
-                default_str = '"' .. tostring(f.def) .. '"'
-            else
-                default_str = tostring(f.def)
-            end
-
-            io.write_err(flag_line .. "\n")
-            io.write_err("    \t" .. f.usage .. " (default " .. default_str .. ")" .. "\n")
-        end
-    end
+    if to_stderr then io.write_err(self:help()) else io.write(self:help()) end
 end
 
--- ---- Reset (útil em testes) ------------------------------------------------
+-- set:reset() — forget the flags and arguments
+function Set.reset(self)
+    self.defs = [=]
+    self.order = []
+    self.rest = []
+    self.usage_fn = nil
+end
+
+-- ---- the default set (flags.string(...), flags.parse(), ...) ----
+
+local std = M.new(nil)
+
+function M.string(name, value, usage, opts)
+    return std:string(name, value, usage, opts)
+end
+
+function M.int(name, value, usage, opts)
+    return std:int(name, value, usage, opts)
+end
+
+function M.number(name, value, usage, opts)
+    return std:number(name, value, usage, opts)
+end
+
+function M.bool(name, value, usage, opts)
+    return std:bool(name, value, usage, opts)
+end
+
+function M.list(name, usage, opts)
+    return std:list(name, usage, opts)
+end
+
+function M.parse(args)
+    return std:parse(args)
+end
+
+function M.get(name)
+    return std:get(name)
+end
+
+function M.is_set(name)
+    return std:is_set(name)
+end
+
+function M.args()
+    return std:args()
+end
+
+function M.narg()
+    return std:narg()
+end
+
+function M.nflag()
+    return std:nflag()
+end
+
+function M.usage(to_stderr)
+    std:usage(to_stderr)
+end
+
+function M.help()
+    return std:help()
+end
+
+function M.set_usage(fn)
+    std:set_usage(fn)
+end
 
 function M.reset()
-    _defs    = {}
-    _order   = {}
-    _order_n = 0
-    _rest    = {}
-    _rest_n  = 0
-    _usage_fn = nil
+    std:reset()
 end
 
 return M

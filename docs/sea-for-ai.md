@@ -126,6 +126,15 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     characters. Any other backslash sequence drops the backslash: `"\1"` is
     the character `1`, not a byte. Write bytes as `"\x01"`.
 
+27. **Reserved words cannot be names**, not even field names: besides
+    Lua's (`and break do else elseif end false for function if in local nil
+    not or return then true while`), Sea reserves `const continue del go
+    defer panic select case default`. `t.default`, `{go = 1}` and
+    `local case = 1` are syntax errors; use other names, or
+    `t["default"]` for a key that must be spelled so.
+28. **`string.join(list, sep)`** joins an array or a positional table;
+    `table.concat` does not exist.
+
 ---
 
 ## 2. Syntax in one screen
@@ -457,7 +466,8 @@ print(geometry.area(3, 4))
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
   sort bigint`. `require("sea/parser")`, `require("sea/test")`,
-  `require("sea/check")` and `require("sea/stream")` are built in too.
+  `require("sea/check")`, `require("sea/stream")` and `require("sea/flags")`
+  are built in too.
 - Doc comments: a comment block at the top of the file documents the
   module; `--` lines right above a function document it, by convention
   starting with the signature (`-- name(args) → result`). `sea doc` reads
@@ -583,7 +593,7 @@ need a build first: `make -C libs/<name>`.
 | `http` | `libs/http/http` | Client (`http.get(url)`, `http.post(url, body, type)`, `resp.status`, `resp.body`, `resp:json()`) and server (`http.serve(port, function(req) return http.json(v) end)`, `http.router()`) |
 | `ssl`, `websocket`, `jwt` | `libs/<name>/<name>` | TLS, WebSockets, JSON Web Tokens |
 | `sqlite`, `duckdb` | `libs/<name>/<name>` | `local db = sqlite.open("app.db")?`, `db:exec(sql, params...)`, `db:query(sql, ...) → rows`, `db:row`, `db:value`, `db:transaction(fn)` |
-| `flags` | `libs/flags/flags` | Command-line flags |
+| `flags` | built in: `require("sea/flags")` | Command-line flags: `flags.string/int/number/bool/list(name, default, usage, {alias, choices})`, then `local files = flags.parse()`; `.value` holds each result |
 | `template` | `libs/template/template` | Text templates |
 | `console` | `libs/console/console` | Terminal colors, prompts, spinners |
 | `compress` | `libs/compress/compress` | gzip / zlib |

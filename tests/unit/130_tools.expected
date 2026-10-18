@@ -6,11 +6,19 @@ if x then print(x) end
 [0] local t = {a = 1}
 [0] a.sea	true
 [0] 
-[2] usage: sea fmt [-l | -d | -p | --check] [--indent N] [path ...]
+[2]  | sea fmt: unknown flag --bogus
+usage: sea fmt [-l | -d | -p | --check] [--indent N] [path ...]
 
 Formats Sea source in the canonical layout. Without flags, files are
 rewritten in place and the changed ones listed; without paths, stdin
-is formatted to stdout. | sea fmt: unknown flag --bogus
+is formatted to stdout.
+
+flags:
+  -l          list the files whose formatting differs; change nothing
+  -d          print a diff for each file that would change
+  -p          print the formatted code instead of writing files
+  --check     like -l, and exit with status 1 if any file would change
+  --indent N  spaces per level (default 4)
 -- sea doc
 [0] MYLIB  (mylib.sea)
 
@@ -148,10 +156,15 @@ hello: 3 files, N MB | sea build: note: app/main.sea:3: require with a computed 
 	main.sea:5: in main chunk
 sea panic: kaboom
 [1]  | sea build: bad.sea:1: module './missing' not found
-[2] usage: sea build [-o out] [-i path ...] [-v] file.sea
+[2]  | usage: sea build [-o out] [-i path ...] [-v] file.sea
 
 Makes a standalone executable: this sea binary with the program and the
 modules it requires (followed from require("...") calls) appended.
+
+flags:
+  -o FILE  the executable (default: the package or file name)
+  -i PATH  also include this module (for a computed require; may repeat)
+  -v       list the files included
 -- sea test -cover
 [0] ok    cv/mathx_test.sea  2 passed (T)
 

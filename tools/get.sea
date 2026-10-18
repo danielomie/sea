@@ -18,15 +18,6 @@
 -- sea.lock records the commit of every git package: commit it, so that
 -- `sea get` installs the same code everywhere.
 
-local function usage()
-    print("usage: sea get                     install the dependencies in sea.toml")
-    print("       sea get URL[@ref] [name]    add a git dependency")
-    print("       sea get -path DIR [name]    add a local dependency")
-    print("       sea get -u [name ...]       update to the newest commits")
-    print("       sea get -rm name ...        remove dependencies")
-    print("       sea get -l                  list them")
-end
-
 local function fail(msg)
     io.write_err("sea get: " .. msg .. "\n")
     os.exit(1)
@@ -34,34 +25,33 @@ end
 
 -- ---- arguments ----
 
+local flags = require("sea/flags")
+
+local cli = flags.new("sea get", {
+    long = "-",
+    usage = string.join({
+        "                    install the dependencies in sea.toml",
+        "       sea get URL[@ref] [name]    add a git dependency",
+        "       sea get -path DIR [name]    add a local dependency",
+        "       sea get -u [name ...]       update to the newest commits",
+        "       sea get -rm name ...        remove dependencies",
+        "       sea get -l                  list them",
+    }, "\n"),
+})
+local update_flag = cli:bool("u", false, "update dependencies to the newest commits of their refs")
+local remove_flag = cli:bool("rm", false, "remove the dependencies named")
+local list_flag = cli:bool("l", false, "list the dependencies and their locked commits")
+local path_flag = cli:string("path", "", "add a local dependency: a link to DIR", {arg = "dir"})
+local args = cli:parse()
+
 local mode = "install"
-local args = []
 local local_path = nil
-local i = 1
-while i <= len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "-u" then
-        mode = "update"
-    elseif a == "-rm" then
-        mode = "remove"
-    elseif a == "-l" then
-        mode = "list"
-    elseif a == "-path" then
-        i = i + 1
-        local_path = os.args[i]
-        if local_path == nil then fail("-path takes a directory") end
-        mode = "add_path"
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") then
-        io.write_err("sea get: unknown flag " .. a .. "\n")
-        usage()
-        os.exit(2)
-    else
-        args[] = a
-    end
-    i = i + 1
+if update_flag.value then mode = "update" end
+if remove_flag.value then mode = "remove" end
+if list_flag.value then mode = "list" end
+if path_flag.set then
+    local_path = path_flag.value
+    mode = "add_path"
 end
 if mode == "install" and len(args) > 0 then mode = "add" end
 

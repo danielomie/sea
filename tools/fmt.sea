@@ -20,46 +20,29 @@
 
 local parser = require("sea/parser")
 
-local function usage()
-    print("usage: sea fmt [-l | -d | -p | --check] [--indent N] [path ...]")
-    print("")
-    print("Formats Sea source in the canonical layout. Without flags, files are")
-    print("rewritten in place and the changed ones listed; without paths, stdin")
-    print("is formatted to stdout.")
-end
+local flags = require("sea/flags")
+
+local cli = flags.new("sea fmt", {
+    usage = "[-l | -d | -p | --check] [--indent N] [path ...]",
+    about = "Formats Sea source in the canonical layout. Without flags, files are\n" ..
+        "rewritten in place and the changed ones listed; without paths, stdin\n" .. "is formatted to stdout.",
+})
+local list = cli:bool("l", false, "list the files whose formatting differs; change nothing")
+local diff = cli:bool("d", false, "print a diff for each file that would change")
+local print_ = cli:bool("p", false, "print the formatted code instead of writing files")
+local check = cli:bool("check", false, "like -l, and exit with status 1 if any file would change")
+local indent_flag = cli:int("indent", 4, "spaces per level", {arg = "n"})
+local paths = cli:parse()
 
 local mode = "write"
-local indent = 4
-local paths = []
-local i = 1
-while i <= len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "-l" then
-        mode = "list"
-    elseif a == "-d" then
-        mode = "diff"
-    elseif a == "-p" then
-        mode = "print"
-    elseif a == "--check" then
-        mode = "check"
-    elseif a == "--indent" then
-        i = i + 1
-        indent = tonumber(os.args[i] or "")
-        if indent == nil or indent < 1 or indent > 16 then
-            io.write_err("sea fmt: --indent takes a number from 1 to 16" .. "\n")
-            os.exit(2)
-        end
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") and a ~= "-" then
-        io.write_err("sea fmt: unknown flag " .. a .. "\n")
-        usage()
-        os.exit(2)
-    else
-        paths[] = a
-    end
-    i = i + 1
+if list.value then mode = "list" end
+if diff.value then mode = "diff" end
+if print_.value then mode = "print" end
+if check.value then mode = "check" end
+local indent = indent_flag.value
+if indent < 1 or indent > 16 then
+    io.write_err("sea fmt: --indent takes a number from 1 to 16" .. "\n")
+    os.exit(2)
 end
 
 local opts = {}

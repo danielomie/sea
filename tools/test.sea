@@ -23,13 +23,6 @@
 --
 -- The exit status is 1 when a test fails, 0 otherwise.
 
-local function usage()
-    print("usage: sea test [-v] [-run TEXT] [-bench TEXT] [-benchtime S] [-j N] [-timeout S] [-cover] [-coverprofile F] [path ...]")
-    print("")
-    print("Runs the *_test.sea files under the paths (default: the current directory),")
-    print("each in its own process, and prints a summary.")
-end
-
 -- Inside the child process: load the test file, then run what it defined.
 if os.args[1] == "--exec" then
     local parser = require("sea/parser")
@@ -56,75 +49,39 @@ if os.args[1] == "--exec" then
     os.exit(0)
 end
 
-local verbose = false
-local run = nil
-local bench = nil
-local benchtime = nil
-local jobs = nil
-local timeout = 600
-local cover = false
-local coverprofile = nil
-local paths = []
+local flags = require("sea/flags")
 
-local function number_arg(i, flag)
-    local v = tonumber(os.args[i] or "")
-    if v == nil or v <= 0 then
-        io.write_err("sea test: " .. flag .. " takes a positive number\n")
+local cli = flags.new("sea test", {
+    long = "-",
+    usage = "[-v] [-run TEXT] [-bench TEXT] [-benchtime S] [-j N] [-timeout S] [-cover] [-coverprofile F] [path ...]",
+    about = "Runs the *_test.sea files under the paths (default: the current directory),\n" ..
+        "each in its own process, and prints a summary.",
+})
+local verbose_flag = cli:bool("v", false, "show every test")
+local run_flag = cli:string("run", "", "only the tests whose full name contains TEXT", {arg = "text"})
+local bench_flag = cli:string("bench", "", "also run the benchmarks whose name contains TEXT (\".\" for all)", {arg = "text"})
+local benchtime_flag = cli:number("benchtime", 1, "seconds per benchmark", {arg = "s"})
+local jobs_flag = cli:int("j", 0, "files run at the same time (default: the number of CPUs)", {arg = "n"})
+local timeout_flag = cli:number("timeout", 600, "seconds a file may take before it is killed", {arg = "s"})
+local cover_flag = cli:bool("cover", false, "report the lines of the code under test that ran")
+local coverprofile_flag = cli:string("coverprofile", "", "also write the coverage as an lcov file (implies -cover)", {arg = "file"})
+local paths = cli:parse()
+
+local function positive(f)
+    if f.value <= 0 then
+        io.write_err("sea test: -" .. f.name .. " takes a positive number\n")
         os.exit(2)
     end
-    return v
+    return f.value
 end
-
-local i = 1
-while i <= len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "-v" then
-        verbose = true
-    elseif a == "-run" then
-        i = i + 1
-        run = os.args[i]
-        if run == nil then
-            io.write_err("sea test: -run takes a text\n")
-            os.exit(2)
-        end
-    elseif a == "-bench" then
-        i = i + 1
-        bench = os.args[i]
-        if bench == nil then
-            io.write_err("sea test: -bench takes a text (\".\" for all)\n")
-            os.exit(2)
-        end
-    elseif a == "-benchtime" then
-        i = i + 1
-        benchtime = number_arg(i, "-benchtime")
-    elseif a == "-j" then
-        i = i + 1
-        jobs = math.floor(number_arg(i, "-j"))
-    elseif a == "-cover" then
-        cover = true
-    elseif a == "-coverprofile" then
-        i = i + 1
-        coverprofile = os.args[i]
-        if coverprofile == nil then
-            io.write_err("sea test: -coverprofile takes a file name\n")
-            os.exit(2)
-        end
-        cover = true
-    elseif a == "-timeout" then
-        i = i + 1
-        timeout = number_arg(i, "-timeout")
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") then
-        io.write_err("sea test: unknown flag " .. a .. "\n")
-        usage()
-        os.exit(2)
-    else
-        paths[] = a
-    end
-    i = i + 1
-end
+local verbose = verbose_flag.value
+local run = run_flag.set and run_flag.value or nil
+local bench = bench_flag.set and bench_flag.value or nil
+local benchtime = benchtime_flag.set and positive(benchtime_flag) or nil
+local jobs = jobs_flag.set and positive(jobs_flag) or nil
+local timeout = positive(timeout_flag)
+local coverprofile = coverprofile_flag.set and coverprofile_flag.value or nil
+local cover = cover_flag.value or coverprofile ~= nil
 if len(paths) == 0 then paths[] = "." end
 
 -- the test files

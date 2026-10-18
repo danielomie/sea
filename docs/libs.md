@@ -19,7 +19,7 @@ pure-Sea libraries work out of the box.
 | `http` | `libs/http/http` | Sea + native | `make -C libs/http` |
 | `ssl` | `libs/ssl/ssl` | Sea + native | `make -C libs/ssl` |
 | `jwt` | `libs/jwt/jwt` | Sea + native | `make -C libs/jwt` |
-| `flags` | `libs/flags/flags` | pure Sea | — |
+| `flags` | built in: `require("sea/flags")` (`libs/flags/flags.sea`) | pure Sea | — |
 | `test` | `libs/test/test` | pure Sea | — |
 | `stream` | built in: `require("sea/stream")` (`libs/stream/stream.sea`) | pure Sea | — |
 | `template` | `libs/template/template` | pure Sea | — |
@@ -1099,69 +1099,81 @@ print(header.alg)   -- "HS256"
 
 ## `flags`
 
-Pure Sea. No build required.
+Command-line flags in the style of Go's `flag` package, with aliases,
+repeatable flags, allowed values and independent sets. Pure Sea, built into
+the `sea` binary as `require("sea/flags")` (the file is
+`libs/flags/flags.sea`; `require("../libs/flags/flags")` still works). The
+`sea` tools (`sea fmt`, `sea test`, ...) parse their arguments with it.
 
 ```sea
-local flags = require("./libs/flags/flags")
+local flags = require("sea/flags")
+
+local host    = flags.string("host", "localhost", "server address")
+local port    = flags.int("port", 8080, "server port", {alias = "p"})
+local verbose = flags.bool("v", false, "verbose output", {alias = "verbose"})
+local tags    = flags.list("tag", "a tag (repeat it)", {alias = "t"})
+local format  = flags.string("format", "text", "output format", {choices = {"text", "json"}})
+
+local files = flags.parse()          -- the positional arguments, an array
+print(host.value, port.value, verbose.value, len(tags.value), files[0])
 ```
 
-Modeled after Go's `flag` package. All flag definitions must come before `flags.parse()`.
+**Syntax:** `-flag value`, `-flag=value`, `--flag value`, `--flag=value`
+(one or two dashes, always); `-bool` sets a bool flag, `-bool=false` clears
+it; `--` ends the flags; `-` alone is a positional argument. Flags and
+positional arguments may be mixed (`tool file -v`). `-h` / `--help` prints
+the usage on stdout and exits 0 (unless the set defines `h`). A bad flag
+(unknown, missing or invalid value, a value not in `choices`) prints
+`name: message` and the usage on stderr and exits 2.
 
-### Flag definition
+**Defining flags** — each returns a flag whose `.value` holds the parsed
+value (and `.set` whether it was given):
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `flags.string` | `string(name, default, usage) → ref` | Define a string flag |
-| `flags.int` | `int(name, default, usage) → ref` | Define an integer flag |
-| `flags.bool` | `bool(name, default, usage) → ref` | Define a boolean flag |
-| `flags.number` | `number(name, default, usage) → ref` | Define a float flag |
+| Function | Description |
+|----------|-------------|
+| `string(name, default, usage [, opts])` | A string |
+| `int(name, default, usage [, opts])` | An integer (`1.5` is an error) |
+| `number(name, default, usage [, opts])` | A number |
+| `bool(name, default, usage [, opts])` | A bool |
+| `list(name, usage [, opts])` | Repeatable: `.value` is an array of every value given (`-i a -i b`) |
 
-Each function returns a **flagref** table with a `.value` field that holds the parsed value after `flags.parse()` is called.
+`opts`: `alias` (another name, or a list of names: `{alias = "n"}`), `arg`
+(the value's name in the usage: `{arg = "file"}` shows `-o FILE`), `choices`
+(the values allowed, for strings and lists).
 
-### Parsing
+**Parsing and results:** `parse([args]) → array` (the positional arguments;
+`args` defaults to `os.args` from 1; parsing again starts from the
+defaults), `get(name)` (by name or alias), `is_set(name)`, `args()` (the
+positional arguments of the last parse, an array), `narg()`, `nflag()`.
+
+**Usage:** `usage([to_stderr])` prints it, `help()` returns it,
+`set_usage(fn)` replaces it, `reset()` forgets every flag.
+
+```
+usage: tool [flags] [arguments...]
+
+flags:
+  -p, --port INT    server port (default 8080)
+  -v, --verbose     verbose output
+  --tag, -t VALUE   a tag (repeat it)
+```
+
+**Sets of their own:** `flags.new([name [, opts]])` returns a set with the
+same functions as methods (`set:string(...)`, `set:parse()`, ...), so a
+program can have several, and its messages and usage carry its name:
 
 ```sea
-flags.parse()
+local cli = flags.new("sea fmt", {usage = "[-l] [path ...]", about = "Formats Sea source."})
+local list = cli:bool("l", false, "list the files whose formatting differs")
+local paths = cli:parse()
 ```
 
-Reads `os.args[1..n]`. Recognized syntax:
-- `-flag value` or `--flag value`
-- `-flag=value` or `--flag=value`
-- `-boolFlag` (sets to `true`, no value needed)
-- `--` ends flag parsing; remaining arguments become positional
-- `-h` / `--help` prints usage and exits with code 0
-
-Unknown flags print `flag: <message>`, call `flags.usage()` and exit with
-code 2. The default usage text goes to stderr.
-
-### Accessing results
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `flags.get` | `get(name) → value\|nil` | Current value of flag `name` |
-| `flags.is_set` | `is_set(name) → bool` | `true` if the flag was explicitly passed |
-| `flags.args` | `args() → table` | Positional arguments after flag parsing (0-indexed) |
-| `flags.narg` | `narg() → int` | Number of positional arguments |
-| `flags.nflag` | `nflag() → int` | Number of defined flags |
-
-### Usage / help
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `flags.usage` | `usage()` | Print default Go-style help to stderr |
-| `flags.set_usage` | `set_usage(fn)` | Replace the usage function with a custom one |
-| `flags.reset` | `reset()` | Clear all state (useful in tests) |
-
-```sea
-local host    = flags.string("host",    "localhost", "server address")
-local port    = flags.int("port",       8080,        "server port")
-local verbose = flags.bool("verbose",   false,       "verbose output")
-
-flags.parse()
-
-print(host.value)     -- "localhost" (or whatever was passed)
-print(flags.narg())   -- number of positional args
-```
+`opts`: `usage` (what follows the name on the usage line), `about` (text
+under it), `interspersed` (default `true`; `false` ends the flags at the
+first positional argument, for subcommands), `exit_on_error` (default
+`true`; `false` makes `parse` return an error value instead of exiting),
+`long` (`"--"` (default) or `"-"`: how the usage writes names longer than
+one letter).
 
 ---
 

@@ -1,0 +1,49 @@
+-- a set of its own
+ana	3	2.5	true	x,y	fast
+a.txt b.txt -c c.txt	4	4	array
+true	false	3	nil	6
+world	7	false	0	slow	0	false
+-- errors are values with exit_on_error = false
+demo: unknown flag -bogus
+demo: --count needs a value
+demo: --count takes an integer (got 'x')
+demo: --count takes an integer (got '1.5')
+demo: --rate takes a number (got 'x')
+demo: --loud takes true or false (got 'maybe')
+demo: --mode must be one of fast, slow (got 'medium')
+ok
+-- interspersed = false: the first positional argument ends the flags
+true	cmd -x --y
+-- usage
+usage: demo [flags] file...
+
+flags:
+  -n, --name STRING         who to greet (default "world")
+  -c, --count, --times INT  how many times (default 1)
+  --rate NUMBER             a rate (default 0.5)
+  --loud                    shout
+  -t, --tag VALUE           a tag (repeat it)
+  --mode STRING             the mode (fast, slow) (default "fast")
+usage: tool [flags] [arguments...]
+
+Does things.
+
+flags:
+  -v                verbose
+  -o, -output FILE  write here
+-- the default set (the original API)
+9000	localhost	9000	false	1	extra	extra
+-- -h prints the usage and exits 0; a bad flag exits 2 with the usage on stderr
+0	usage: cli [-x] file
+
+flags:
+  -x  an x
+	true
+2	true	cli: unknown flag -y
+usage: cli [-x] file
+
+flags:
+  -x  an x
+
+0	rest:	f.txt
+

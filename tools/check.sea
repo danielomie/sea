@@ -20,25 +20,6 @@
 
 local check = require("sea/check")
 
-local function usage()
-    print("usage: sea check [-disable CODES] [-only CODES] [-g NAMES] [-all] [-f text|json] [-w] [path ...]")
-    print("")
-    print("Checks (errors fail at run time, warnings are probable mistakes):")
-    print("  syntax       error    the file does not parse or compile")
-    print("  undefined    error    a variable that is not local, built in or set as a global anywhere")
-    print("  require      error    require() of a module that cannot be found")
-    print("  args         error    more arguments than a local function takes")
-    print("  format       error    string.format / printf arguments that do not match the format")
-    print("  unused       warning  a local variable or function that is never read")
-    print("  redeclared   warning  a local declared twice in the same block")
-    print("  shadow       warning  a local that hides a local of an enclosing block")
-    print("  unreachable  warning  code after return, break, continue or panic")
-    print("  dupkey       warning  a key written twice in a table literal")
-    print("  selfassign   warning  x = x")
-    print("")
-    print("A line ending with `-- check:ignore [codes]` is not checked.")
-end
-
 local function code_set(s)
     local set = {}
     for _, c in string.split(s or "", ",") do
@@ -58,51 +39,47 @@ local function code_set(s)
     return set
 end
 
-local disable = {}
-local only = nil
-local extra = {}
-local all = false
-local format = "text"
-local warn_ok = false
-local paths = []
+local flags = require("sea/flags")
 
-local i = 1
-while i <= len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "-disable" then
-        i = i + 1
-        disable = code_set(os.args[i])
-    elseif a == "-only" then
-        i = i + 1
-        only = code_set(os.args[i])
-    elseif a == "-g" then
-        i = i + 1
-        for _, g in string.split(os.args[i] or "", ",") do
-            if string.trim(g) ~= "" then extra[string.trim(g)] = true end
-        end
-    elseif a == "-all" then
-        all = true
-    elseif a == "-w" then
-        warn_ok = true
-    elseif a == "-f" then
-        i = i + 1
-        format = os.args[i]
-        if format ~= "text" and format ~= "json" then
-            io.write_err("sea check: -f takes text or json\n")
-            os.exit(2)
-        end
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") then
-        io.write_err("sea check: unknown flag " .. a .. "\n")
-        usage()
-        os.exit(2)
-    else
-        paths[] = a
+local cli = flags.new("sea check", {
+    long = "-",
+    usage = "[-disable CODES] [-only CODES] [-g NAMES] [-all] [-f text|json] [-w] [path ...]",
+    about = string.join({
+        "Checks (errors fail at run time, warnings are probable mistakes):",
+        "  syntax       error    the file does not parse or compile",
+        "  undefined    error    a variable that is not local, built in or set as a global anywhere",
+        "  require      error    require() of a module that cannot be found",
+        "  args         error    more arguments than a local function takes",
+        "  format       error    string.format / printf arguments that do not match the format",
+        "  unused       warning  a local variable or function that is never read",
+        "  redeclared   warning  a local declared twice in the same block",
+        "  shadow       warning  a local that hides a local of an enclosing block",
+        "  unreachable  warning  code after return, break, continue or panic",
+        "  dupkey       warning  a key written twice in a table literal",
+        "  selfassign   warning  x = x",
+        "",
+        "A line ending with `-- check:ignore [codes]` is not checked.",
+    }, "\n"),
+})
+local disable_flag = cli:string("disable", "", "skip these checks (comma separated)", {arg = "codes"})
+local only_flag = cli:string("only", "", "run only these checks", {arg = "codes"})
+local globals_flag = cli:list("g", "globals defined elsewhere (comma separated; may repeat)", {arg = "names"})
+local all_flag = cli:bool("all", false, "also report unused parameters and loop variables")
+local format_flag = cli:string("f", "text", "output format", {arg = "format", choices = {"text", "json"}})
+local warn_flag = cli:bool("w", false, "exit with status 0 when there are only warnings")
+local paths = cli:parse()
+
+local disable = code_set(disable_flag.value)
+local only = only_flag.set and code_set(only_flag.value) or nil
+local extra = {}
+for _, names in globals_flag.value do
+    for _, g in string.split(names, ",") do
+        if string.trim(g) ~= "" then extra[string.trim(g)] = true end
     end
-    i = i + 1
 end
+local all = all_flag.value
+local format = format_flag.value
+local warn_ok = warn_flag.value
 if len(paths) == 0 then paths[] = "." end
 if only ~= nil then
     for _, c in check.CODES do

@@ -28,55 +28,27 @@ local BUILTINS = {
     "process", "sync", "time", "net", "gc", "sort", "bigint", "sea/parser",
 }
 
-local function usage()
-    print("usage: sea doc [-f text|markdown|html|json] [-o file] [--all] [path ...] [name]")
-    print("       sea doc -http [host]:port [-open] [--all] [path ...]")
-    print("")
-    print("Prints the documentation in the comments of Sea source files: the comment")
-    print("at the top of a file, and the comment right above each function; -http serves")
-    print("them as web pages (e.g. sea doc -http :6060 -open).")
-end
+local flags = require("sea/flags")
 
-local format = "text"
-local outfile = nil
-local show_all = false
-local http_addr = nil
-local open_browser = false
-local args = []
-local i = 1
-while i <= len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "-f" or a == "--format" then
-        i = i + 1
-        format = os.args[i] or ""
-    elseif a == "-o" then
-        i = i + 1
-        outfile = os.args[i]
-    elseif a == "--all" then
-        show_all = true
-    elseif a == "-http" or a == "--http" then
-        i = i + 1
-        http_addr = os.args[i] or ""
-    elseif string.starts_with(a, "-http=") or string.starts_with(a, "--http=") then
-        http_addr = string.sub(a, string.find(a, "=") + 1)
-    elseif a == "-open" or a == "--open" then
-        open_browser = true
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") then
-        print("sea doc: unknown flag " .. a)
-        usage()
-        os.exit(2)
-    else
-        args[] = a
-    end
-    i = i + 1
-end
-if format ~= "text" and format ~= "markdown" and format ~= "md" and format ~= "html" and format ~= "json" then
-    print("sea doc: unknown format " .. format .. " (text, markdown, html, json)")
-    os.exit(2)
-end
+local cli = flags.new("sea doc", {
+    usage = "[-f text|markdown|html|json] [-o file] [--all] [path ...] [name]\n" ..
+        "       sea doc -http [host]:port [-open] [--all] [path ...]",
+    about = "Prints the documentation in the comments of Sea source files: the comment\n" ..
+        "at the top of a file, and the comment right above each function; -http serves\n" ..
+            "them as web pages (e.g. sea doc -http :6060 -open).",
+})
+local format_flag = cli:string("f", "text", "output format", {alias = "format", arg = "format", choices = {"text", "markdown", "md", "html", "json"}})
+local out_flag = cli:string("o", "", "write to a file instead of stdout", {arg = "file"})
+local all_flag = cli:bool("all", false, "include local (private) functions")
+local http_flag = cli:string("http", "", "serve the documentation as web pages", {arg = "[host]:port"})
+local open_flag = cli:bool("open", false, "with -http, open the index in the browser")
+local args = cli:parse()
+
+local format = format_flag.value
+local outfile = out_flag.set and out_flag.value or nil
+local show_all = all_flag.value
+local http_addr = http_flag.set and http_flag.value or nil
+local open_browser = open_flag.value
 if format == "md" then format = "markdown" end
 
 -- ---- output buffer ------------------------------------------------------------------

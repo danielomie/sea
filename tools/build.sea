@@ -19,54 +19,29 @@
 
 local parser = require("sea/parser")
 
-local function usage()
-    print("usage: sea build [-o out] [-i path ...] [-v] file.sea")
-    print("")
-    print("Makes a standalone executable: this sea binary with the program and the")
-    print("modules it requires (followed from require(\"...\") calls) appended.")
-end
+local flags = require("sea/flags")
 
-local out = nil
-local main = nil
-local includes = []
-local verbose = false
+local cli = flags.new("sea build", {
+    long = "-",
+    usage = "[-o out] [-i path ...] [-v] file.sea",
+    about = "Makes a standalone executable: this sea binary with the program and the\n" ..
+        "modules it requires (followed from require(\"...\") calls) appended.",
+})
+local out_flag = cli:string("o", "", "the executable (default: the package or file name)", {arg = "file"})
+local include_flag = cli:list("i", "also include this module (for a computed require; may repeat)", {arg = "path"})
+local verbose_flag = cli:bool("v", false, "list the files included")
+local positional = cli:parse()
 
-local i = 1
-while i <= len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "-o" then
-        i = i + 1
-        out = os.args[i]
-        if out == nil then
-            io.write_err("sea build: -o takes a file name\n")
-            os.exit(2)
-        end
-    elseif a == "-i" then
-        i = i + 1
-        if os.args[i] == nil then
-            io.write_err("sea build: -i takes a path\n")
-            os.exit(2)
-        end
-        includes[] = os.args[i]
-    elseif a == "-v" then
-        verbose = true
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") then
-        io.write_err("sea build: unknown flag " .. a .. "\n")
-        usage()
-        os.exit(2)
-    elseif main == nil then
-        main = a
-    else
-        io.write_err("sea build: one main file expected (got " .. main .. " and " .. a .. ")\n")
-        os.exit(2)
-    end
-    i = i + 1
+local out = out_flag.set and out_flag.value or nil
+local includes = include_flag.value
+local verbose = verbose_flag.value
+local main = positional[0]
+if len(positional) > 1 then
+    io.write_err("sea build: one main file expected (got " .. positional[0] .. " and " .. positional[1] .. ")\n")
+    os.exit(2)
 end
 if main == nil then
-    usage()
+    cli:usage(true)
     os.exit(2)
 end
 if not fs.isfile(main) then
@@ -94,6 +69,7 @@ builtin["sea/parser"] = true
 builtin["sea/test"] = true
 builtin["sea/check"] = true
 builtin["sea/stream"] = true
+builtin["sea/flags"] = true
 
 -- The libraries installed with the sea binary (make install): lib/sea next to
 -- its bin/ directory, as require looks; nil when there is none

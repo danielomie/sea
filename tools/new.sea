@@ -11,38 +11,26 @@
 -- (--lib) gets <name>.sea, the file require("<name>") loads once it is
 -- installed with `sea get`.
 
-local function usage()
-    print("usage: sea new [--lib] [--no-git] name")
-    print("")
-    print("Creates a project in the directory name/: sea.toml, code, a test, README.md,")
-    print(".gitignore; --lib makes a library instead of an application.")
-end
+local flags = require("sea/flags")
 
-local lib = false
-local git = true
-local target = nil
-for i = 1, len(os.args) - 1 do
-    local a = os.args[i]
-    if a == "--lib" then
-        lib = true
-    elseif a == "--no-git" then
-        git = false
-    elseif a == "-h" or a == "--help" then
-        usage()
-        os.exit(0)
-    elseif string.starts_with(a, "-") then
-        io.write_err("sea new: unknown flag " .. a .. "\n")
-        usage()
-        os.exit(2)
-    elseif target == nil then
-        target = a
-    else
-        io.write_err("sea new: one name expected\n")
-        os.exit(2)
-    end
+local cli = flags.new("sea new", {
+    usage = "[--lib] [--no-git] name",
+    about = "Creates a project in the directory name/: sea.toml, code, a test, README.md,\n" ..
+        ".gitignore; --lib makes a library instead of an application.",
+})
+local lib_flag = cli:bool("lib", false, "make a library instead of an application")
+local nogit_flag = cli:bool("no-git", false, "don't run git init")
+local positional = cli:parse()
+
+local lib = lib_flag.value
+local git = not nogit_flag.value
+local target = positional[0]
+if len(positional) > 1 then
+    io.write_err("sea new: one name expected\n")
+    os.exit(2)
 end
 if target == nil then
-    usage()
+    cli:usage(true)
     os.exit(2)
 end
 

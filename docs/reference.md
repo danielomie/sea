@@ -703,7 +703,7 @@ a number (by value: `bigint.new(5) == 5`).
 | `string.pad_left` | `pad_left(s, width [, char]) → string` | Right-align `s` in a field of `width`, padding with `char` (default `' '`) |
 | `string.pad_right` | `pad_right(s, width [, char]) → string` | Left-align `s` in a field of `width` |
 | `string.pad_center` | `pad_center(s, width [, char]) → string` | Center `s` in a field of `width` |
-| `string.join` | `join(arr [, sep]) → string` | Join array elements with separator; numbers and other values join as `tostring` shows them. O(N), preferred over incremental `..` |
+| `string.join` | `join(arr [, sep]) → string` | Join the elements of an array (or a positional table `{"a", "b"}`) with a separator; numbers and other values join as `tostring` shows them. O(N), preferred over incremental `..` |
 | `string.normalize_ws` | `normalize_ws(s) → string` | Collapse internal whitespace runs to a single space and strip leading/trailing whitespace |
 
 ---
@@ -1711,7 +1711,7 @@ local http = require("./libs/http/http")
 
 Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
 `os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
-`sea/parser`, and the Sea modules `sea/test`, `sea/check` and `sea/stream`) are found
+`sea/parser`, and the Sea modules `sea/test`, `sea/check`, `sea/stream` and `sea/flags`) are found
 first, then, in an executable made by `sea build`, the modules bundled in
 it. An absolute path (`require("/opt/sea/libs/yaml/yaml")`) names the file
 itself, tried as `.sea`, `/init.sea`, then `.so`. Otherwise the search order

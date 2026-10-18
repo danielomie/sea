@@ -1,0 +1,83 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: sea/flags — command-line flags (run as ./bin/sea from the repo root)
+local flags = require("sea/flags")
+
+local function args(s)
+    local a = []
+    for _, w in string.split(s, " ") do
+        if w ~= "" then a[] = w end
+    end
+    return a
+end
+
+print("-- a set of its own")
+local f = flags.new("demo", {usage = "[flags] file...", exit_on_error = false})
+local name = f:string("name", "world", "who to greet", {alias = "n"})
+local count = f:int("count", 1, "how many times", {alias = {"c", "times"}})
+local rate = f:number("rate", 0.5, "a rate")
+local loud = f:bool("loud", false, "shout")
+local tags = f:list("tag", "a tag (repeat it)", {alias = "t"})
+local mode = f:string("mode", "fast", "the mode", {choices = {"fast", "slow"}})
+local rest = f:parse(args("a.txt -n ana --count=3 b.txt -loud -t x --tag y -rate 2.5 -- -c c.txt"))
+print(name.value, count.value, rate.value, loud.value, string.join(tags.value, ","), mode.value)
+print(string.join(rest, " "), len(rest), f:narg(), type(rest))
+print(f:is_set("name"), f:is_set("mode"), f:get("times"), f:get("nope"), f:nflag())
+
+-- parsing again starts from the defaults
+rest = f:parse(args("-loud=false -c 7 -mode slow"))
+print(name.value, count.value, loud.value, len(tags.value), mode.value, len(rest), f:is_set("name"))
+
+print("-- errors are values with exit_on_error = false")
+local function err(s)
+    local r = f:parse(args(s))
+    return is_error(r) and r.message or "ok"
+end
+print(err("-bogus"))
+print(err("-count"))
+print(err("-count x"))
+print(err("-count 1.5"))
+print(err("-rate x"))
+print(err("-loud=maybe"))
+print(err("-mode medium"))
+print(err("- -"))
+
+print("-- interspersed = false: the first positional argument ends the flags")
+local g = flags.new("strict", {interspersed = false, exit_on_error = false})
+local v = g:bool("v", false, "verbose")
+rest = g:parse(args("-v cmd -x --y"))
+print(v.value, string.join(rest, " "))
+
+print("-- usage")
+io.write(f:help())
+local h = flags.new("tool", {long = "-", about = "Does things."})
+h:bool("v", false, "verbose")
+h:string("output", "", "write here", {arg = "file", alias = "o"})
+io.write(h:help())
+
+print("-- the default set (the original API)")
+flags.reset()
+local port = flags.int("port", 8080, "port")
+local host = flags.string("host", "localhost", "host")
+local pos = flags.parse(args("--port 9000 extra"))
+print(port.value, host.value, flags.get("port"), flags.is_set("host"), flags.narg(), flags.args()[0], pos[0])
+
+print("-- -h prints the usage and exits 0; a bad flag exits 2 with the usage on stderr")
+local dir = fs.tempdir("flags-")
+local script = path.join(dir, "cli.sea")
+fs.write(script, [==[
+local flags = require("sea/flags")
+local f = flags.new("cli", {usage = "[-x] file"})
+f:bool("x", false, "an x")
+local rest = f:parse()
+print("rest:", rest[0])
+]==])
+local SEA = fs.realpath("./bin/sea")
+local r = process.run({SEA, script, "-h"})
+print(r.code, r.stdout, r.stderr == "")
+r = process.run({SEA, script, "-y"})
+print(r.code, r.stdout == "", r.stderr)
+r = process.run({SEA, script, "-x", "f.txt"})
+print(r.code, r.stdout)
+fs.remove(dir, {recursive = true})

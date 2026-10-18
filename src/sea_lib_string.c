@@ -571,8 +571,29 @@ static SeaValue str_normalize_ws(SeaVM *vm, int argc, SeaValue *args) {
 // Evita O(N²) de concatenação incremental: constrói o resultado em um único buffer.
 static SeaValue str_join(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !sea_is_obj(args[0])) return sea_obj_val(&sea_string_from_cstr("")->obj);
-    SeaArray *arr = (SeaArray*)sea_as_obj(args[0]);
-    if (arr->obj.type != OBJ_ARRAY) return sea_obj_val(&sea_string_from_cstr("")->obj);
+    SeaObject *o = sea_as_obj(args[0]);
+    /* An array, or a positional table ({"a", "b"}: keys 0, 1, ...), whose
+     * values are borrowed into a temporary list */
+    const SeaValue *vals = NULL;
+    SeaValue *tvals = NULL;
+    uint32_t n = 0, tcap = 0;
+    if (o->type == OBJ_ARRAY) {
+        vals = ((SeaArray*)o)->data;
+        n = ((SeaArray*)o)->len;
+    } else if (o->type == OBJ_TABLE) {
+        SeaValue v;
+        while (sea_table_get((SeaTable*)o, sea_int_val(n), &v)) {
+            if (n == tcap) {
+                uint32_t nc = tcap ? tcap * 2 : 16;
+                tvals = (SeaValue*)sea_realloc(tvals, tcap * sizeof(SeaValue), nc * sizeof(SeaValue));
+                tcap = nc;
+            }
+            tvals[n++] = v;
+        }
+        vals = tvals;
+    } else {
+        return sea_obj_val(&sea_string_from_cstr("")->obj);
+    }
 
     const char *sep     = "";
     size_t      sep_len = 0;
@@ -581,14 +602,12 @@ static SeaValue str_join(SeaVM *vm, int argc, SeaValue *args) {
         sep_len = SEA_AS_STRING(args[1])->len;
     }
 
-    uint32_t n = arr->len;
-
     /* Flatten any rope elements up front so we can measure and copy
      * correctly; other values (numbers, booleans) join as tostring shows them. */
     SeaString **flat = (SeaString**)sea_malloc(n * sizeof(SeaString*));
     size_t total = 0;
     for (uint32_t i = 0; i < n; i++) {
-        SeaValue v = arr->data[i];
+        SeaValue v = vals[i];
         flat[i] = sea_value_get_flat_string(v);
         if (!flat[i]) flat[i] = sea_vm_tostring(vm, v);
         if (flat[i]) total += flat[i]->len;
@@ -610,6 +629,7 @@ static SeaValue str_join(SeaVM *vm, int argc, SeaValue *args) {
     }
     *p = '\0';
     sea_free(flat, n * sizeof(SeaString*));
+    if (tvals) sea_free(tvals, tcap * sizeof(SeaValue));
 
     SeaString *result = sea_string_new(buf, total);
     sea_free(buf, total + 1);
