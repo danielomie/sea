@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (c) 2026 Daniel
+# Copyright (c) 2026 The Sea Authors
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Turn Sea sources into a C header: one byte array per file and a table

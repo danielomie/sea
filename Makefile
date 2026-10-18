@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Daniel
+# Copyright (c) 2026 The Sea Authors
 # SPDX-License-Identifier: BSD-3-Clause
 
 CC     = gcc
@@ -144,11 +144,11 @@ endif
 
 test: all
 	@$(TARGET) tests/run_tests.sea
-	@$(TARGET) util/license.sea -l BSD-3-Clause -check
+	@$(TARGET) util/license.sea -l BSD-3-Clause -c "The Sea Authors" -check
 
-# every source file has the BSD-3-Clause header (fix with: bin/sea util/license.sea -l BSD-3-Clause)
+# every source file has the BSD-3-Clause header (fix with: bin/sea util/license.sea -l BSD-3-Clause -c "The Sea Authors")
 test-license: $(TARGET)
-	@$(TARGET) util/license.sea -l BSD-3-Clause -check
+	@$(TARGET) util/license.sea -l BSD-3-Clause -c "The Sea Authors" -check
 
 # sea/parser's format round trip over every .sea file (see the script)
 test-format: $(TARGET)

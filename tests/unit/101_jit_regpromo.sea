@@ -1,4 +1,4 @@
--- Copyright (c) 2026 Daniel
+-- Copyright (c) 2026 The Sea Authors
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- Register promotion (JIT Fase 4): VM registers live in native locals inside

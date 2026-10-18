@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026 Daniel
+# Copyright (c) 2026 The Sea Authors
 # SPDX-License-Identifier: BSD-3-Clause
 
 set -euo pipefail

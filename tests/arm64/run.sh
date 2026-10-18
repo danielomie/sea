@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2026 Daniel
+# Copyright (c) 2026 The Sea Authors
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Build Sea and run the unit tests on aarch64, in an arm64 Docker container.

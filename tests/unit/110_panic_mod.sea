@@ -1,4 +1,4 @@
--- Copyright (c) 2026 Daniel
+-- Copyright (c) 2026 The Sea Authors
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- module for 110_panic_recover: its body fails at load time when the test

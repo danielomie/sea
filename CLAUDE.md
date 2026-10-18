@@ -16,7 +16,7 @@ bin/sea fmt -l .      # sea fmt / doc / test: Sea scripts in tools/, embedded at
                       # (sea/test = libs/test/test.sea, sea/check = tools/lib/check.sea)
                       # into gen/sea_modules.h
 
-bin/sea util/license.sea -l BSD-3-Clause -check   # license headers in .c/.h/.sea/.sh/Makefile
+bin/sea util/license.sea -l BSD-3-Clause -c "The Sea Authors" -check # license headers in .c/.h/.sea/.sh/Makefile
                       # (-n dry run, -update, -remove; skips vendor/, gen/, obj/)
 
 # Native libraries under libs/ (e.g. json, yaml, toml, csv, compress, xml, console, http, ssl, jwt, tensor, duckdb)

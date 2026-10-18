@@ -1,4 +1,4 @@
--- Copyright (c) 2026 Daniel
+-- Copyright (c) 2026 The Sea Authors
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- libs/websocket/websocket.sea — WebSocket (RFC 6455) client and server for Sea
