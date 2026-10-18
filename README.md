@@ -95,7 +95,7 @@ Native libraries are built per library, e.g. `make -C libs/json`.
 
 ## Examples
 
-29 runnable programs live in [`examples/`](examples/) — `bin/sea examples/<name>/<name>.sea`.
+30 runnable programs live in [`examples/`](examples/) — `bin/sea examples/<name>/<name>.sea`.
 Those marked ⚡ are compute-bound and print their run time (compare `bin/sea`
 with `bin/sea-jit --jit`).
 
@@ -107,6 +107,7 @@ with `bin/sea-jit --jit`).
 | Text & data | `word_count`, `calculator` (lexer + recursive-descent parser), `csv_report` (CSV → aggregation → JSON), `strings`, `verbos` |
 | Language & stdlib | `collections`, `structs`, `errors`, `os_demo`, `time_demo`, `file_watcher`, `seafmt` (formatter/checker on `sea/parser`) |
 | Concurrency | `pipeline`, `worker_pool`, `pubsub`, `timeout`, `rate_limiter`, `circuit_breaker`, `pool`, `logger`, `webhook`, `metrics_server` |
+| Apps & testing | `users` (sign-up and login on `libs/sqlite`, PBKDF2 passwords, lockout, sessions; `users_test.sea` is a `sea test` suite with a fake clock and in-memory databases: `cd examples/users && ../../bin/sea test -v`) |
 
 ## Performance
 

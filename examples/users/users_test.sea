@@ -1,0 +1,292 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Automated tests for users.sea. Run them from this directory with
+--
+--   sea test                 (or: sea test -v, sea test -run login, sea test -cover)
+--
+-- or from the repository root with `bin/sea test examples/users`.
+--
+-- Each test gets a fresh database in memory and a fake clock, so the tests
+-- don't depend on each other, on the disk or on the time of day; one group
+-- uses a real file to check that the data survives closing the database.
+-- PBKDF2 runs with few iterations here: the cost doesn't change what is
+-- being tested, only how long it takes.
+
+local t = require("sea/test")
+local users = require("./users")
+
+local FAST = 10 -- PBKDF2 rounds in the tests
+
+-- a clock the tests move by hand
+local function fake_clock(start)
+    local c = {}
+    c.now = start
+    c.read = function() return c.now end
+    c.advance = function(seconds) c.now = c.now + seconds end
+    return c
+end
+
+local store = nil
+local clock = nil
+
+local function open_store()
+    clock = fake_clock(1700000000)
+    store = t.no_error(users.open(nil, {now = clock.read, iterations = FAST}))
+end
+
+local function close_store()
+    if store ~= nil then store:close() end
+    store = nil
+end
+
+t.describe("passwords", function()
+    t.it("hash and check", function()
+        local h = users.hash_password("correct horse", FAST)
+        t.ok(users.check_password("correct horse", h))
+        t.no(users.check_password("wrong horse", h))
+    end)
+
+    t.it("are never stored in clear text", function()
+        local h = users.hash_password("correct horse", FAST)
+        t.no(string.contains(h, "correct horse"))
+        t.matches(h, "^pbkdf2-sha256\\$10\\$[0-9a-f]{32}\\$[0-9a-f]{64}$")
+    end)
+
+    t.it("get a new salt each time", function()
+        t.ne(users.hash_password("same password", FAST), users.hash_password("same password", FAST))
+    end)
+
+    t.it("match the PBKDF2-HMAC-SHA256 test vector", function()
+        -- RFC 7914 section 11: P = "passwd", S = "salt", c = 1 (first 32 bytes)
+        local stored = "pbkdf2-sha256$1$salt$55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+        t.ok(users.check_password("passwd", stored))
+        -- and with many iterations: P = "password", S = "salt", c = 4096
+        stored = "pbkdf2-sha256$4096$salt$c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+        t.ok(users.check_password("password", stored))
+    end)
+
+    t.it("reject a malformed stored hash", function()
+        t.no(users.check_password("x", "plain-text"))
+        t.no(users.check_password("x", "pbkdf2-sha256$abc$00$00"))
+    end)
+end)
+
+t.describe("validation", function()
+    t.it("accepts good data", function()
+        t.is_nil(users.validate("ana@example.com", "Ana", "12345678"))
+    end)
+
+    t.it("rejects bad emails", function()
+        local bad = {"", "ana", "ana@", "@example.com", "ana@example", "a na@example.com", "a@b@c.com"}
+        for _, email in bad do
+            t.is_error(users.validate(email, "Ana", "12345678"), "invalid email", "email '" .. email .. "'")
+        end
+    end)
+
+    t.it("requires a name", function()
+        t.is_error(users.validate("ana@example.com", "   ", "12345678"), "name is required")
+    end)
+
+    t.it("requires a password of MIN_PASSWORD characters", function()
+        t.is_error(users.validate("ana@example.com", "Ana", "1234567"), "at least 8 characters")
+        t.is_error(users.validate("ana@example.com", "Ana", nil), "at least 8 characters")
+    end)
+end)
+
+t.describe("register", function()
+    t.before_each(open_store)
+    t.after_each(close_store)
+
+    t.it("creates a user", function()
+        local u = t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+        t.eq(u, {id = 1, email = "ana@example.com", name = "Ana", created_at = 1700000000})
+        t.eq(store:count(), 1)
+    end)
+
+    t.it("normalizes the email and the name", function()
+        local u = t.no_error(store:register("  Ana@Example.COM ", "  Ana  ", "correct horse"))
+        t.eq(u.email, "ana@example.com")
+        t.eq(u.name, "Ana")
+        t.not_nil(store:find("ANA@example.com"))
+    end)
+
+    t.it("refuses an email already registered", function()
+        t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+        t.is_error(store:register("ANA@example.com", "Other Ana", "another one"), "email already registered")
+        t.eq(store:count(), 1)
+    end)
+
+    t.it("saves nothing when the data is invalid", function()
+        t.is_error(store:register("not-an-email", "Ana", "correct horse"), "invalid email")
+        t.is_error(store:register("ana@example.com", "Ana", "short"), "at least")
+        t.eq(store:count(), 0)
+    end)
+
+    t.it("keeps the password hashed in the database", function()
+        t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+        local stored = store.db:value("SELECT password FROM users WHERE email = ?", "ana@example.com")
+        t.no(string.contains(stored, "correct horse"))
+        t.ok(users.check_password("correct horse", stored))
+    end)
+
+    t.it("does not expose the password hash", function()
+        local u = t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+        t.is_nil(u.password)
+        t.is_nil(store:find("ana@example.com").password)
+    end)
+end)
+
+t.describe("login", function()
+    t.before_each(function()
+        open_store()
+        t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+    end)
+    t.after_each(close_store)
+
+    t.it("returns a session token for the right password", function()
+        local token = t.no_error(store:login("ana@example.com", "correct horse"))
+        t.matches(token, "^[0-9a-f]{64}$")
+        t.eq(store:whoami(token).name, "Ana")
+    end)
+
+    t.it("ignores case and spaces in the email", function()
+        t.no_error(store:login(" ANA@example.com", "correct horse"))
+    end)
+
+    t.it("gives the same error for a wrong password and an unknown email", function()
+        local wrong = store:login("ana@example.com", "wrong horse")
+        local unknown = store:login("bob@example.com", "correct horse")
+        t.is_error(wrong, "invalid email or password")
+        t.is_error(unknown, "invalid email or password")
+        t.eq(wrong.message, unknown.message)
+    end)
+
+    t.it("gives a different token on each login", function()
+        local a = store:login("ana@example.com", "correct horse")
+        local b = store:login("ana@example.com", "correct horse")
+        t.ne(a, b)
+        t.not_nil(store:whoami(a))
+        t.not_nil(store:whoami(b))
+    end)
+
+    t.describe("lockout", function()
+        local function fail_times(n)
+            for _ = 1, n do t.is_error(store:login("ana@example.com", "wrong horse")) end
+        end
+
+        t.it("locks the account after MAX_ATTEMPTS wrong passwords", function()
+            fail_times(users.MAX_ATTEMPTS)
+            -- even the right password is refused while locked
+            t.is_error(store:login("ana@example.com", "correct horse"), "account locked, try again in 900 s")
+            clock.advance(60)
+            t.is_error(store:login("ana@example.com", "correct horse"), "try again in 840 s")
+        end)
+
+        t.it("unlocks after LOCK_SECONDS", function()
+            fail_times(users.MAX_ATTEMPTS)
+            clock.advance(users.LOCK_SECONDS)
+            t.no_error(store:login("ana@example.com", "correct horse"))
+        end)
+
+        t.it("forgets the failures after a good login", function()
+            fail_times(users.MAX_ATTEMPTS - 1)
+            t.no_error(store:login("ana@example.com", "correct horse"))
+            fail_times(users.MAX_ATTEMPTS - 1)
+            t.no_error(store:login("ana@example.com", "correct horse"))
+        end)
+
+        t.it("locks only that account", function()
+            t.no_error(store:register("bob@example.com", "Bob", "battery staple"))
+            fail_times(users.MAX_ATTEMPTS)
+            t.no_error(store:login("bob@example.com", "battery staple"))
+        end)
+    end)
+end)
+
+t.describe("sessions", function()
+    local token = nil
+    t.before_each(function()
+        open_store()
+        t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+        token = t.no_error(store:login("ana@example.com", "correct horse"))
+    end)
+    t.after_each(close_store)
+
+    t.it("know who is logged in", function()
+        t.eq(store:whoami(token).email, "ana@example.com")
+    end)
+
+    t.it("reject unknown tokens", function()
+        t.is_nil(store:whoami("deadbeef"))
+        t.is_nil(store:whoami(nil))
+    end)
+
+    t.it("expire after SESSION_SECONDS", function()
+        clock.advance(users.SESSION_SECONDS - 1)
+        t.not_nil(store:whoami(token))
+        clock.advance(1)
+        t.is_nil(store:whoami(token))
+    end)
+
+    t.it("end on logout", function()
+        t.ok(store:logout(token))
+        t.is_nil(store:whoami(token))
+        t.no(store:logout(token), "a second logout finds nothing")
+    end)
+end)
+
+t.describe("change_password", function()
+    local token = nil
+    t.before_each(function()
+        open_store()
+        t.no_error(store:register("ana@example.com", "Ana", "correct horse"))
+        token = t.no_error(store:login("ana@example.com", "correct horse"))
+    end)
+    t.after_each(close_store)
+
+    t.it("replaces the password", function()
+        t.eq(store:change_password("ana@example.com", "correct horse", "battery staple"), true)
+        t.is_error(store:login("ana@example.com", "correct horse"))
+        t.no_error(store:login("ana@example.com", "battery staple"))
+    end)
+
+    t.it("ends the open sessions", function()
+        t.no_error(store:change_password("ana@example.com", "correct horse", "battery staple"))
+        t.is_nil(store:whoami(token))
+    end)
+
+    t.it("needs the current password", function()
+        t.is_error(store:change_password("ana@example.com", "wrong horse", "battery staple"), "invalid email or password")
+        t.no_error(store:login("ana@example.com", "correct horse"))
+    end)
+
+    t.it("validates the new password", function()
+        t.is_error(store:change_password("ana@example.com", "correct horse", "short"), "at least")
+        t.not_nil(store:whoami(token), "a refused change keeps the sessions")
+    end)
+end)
+
+t.describe("persistence", function()
+    local dir = nil
+    t.before_all(function() dir = t.no_error(fs.tempdir("users_test")) end)
+    t.after_all(function() fs.remove(dir, {recursive = true}) end)
+
+    t.it("keeps users and sessions in the file", function()
+        local file = path.join(dir, "users.db")
+        local a = t.no_error(users.open(file, {iterations = FAST}))
+        t.no_error(a:register("ana@example.com", "Ana", "correct horse"))
+        local token = t.no_error(a:login("ana@example.com", "correct horse"))
+        a:close()
+
+        local b = t.no_error(users.open(file, {iterations = FAST}))
+        defer b:close()
+        t.eq(b:count(), 1)
+        t.eq(b:whoami(token).name, "Ana")
+        t.no_error(b:login("ana@example.com", "correct horse"))
+    end)
+
+    t.it("fails clearly when the file can't be opened", function()
+        t.is_error(users.open(path.join(dir, "missing", "dir", "users.db")))
+    end)
+end)

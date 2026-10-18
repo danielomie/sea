@@ -1,0 +1,56 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- users — a small command line over users.sea
+--
+--   sea main.sea register EMAIL NAME PASSWORD
+--   sea main.sea login EMAIL PASSWORD        → prints a session token
+--   sea main.sea whoami TOKEN
+--   sea main.sea logout TOKEN
+--   sea main.sea passwd EMAIL OLD NEW
+--
+-- The database is users.db in the current directory (or $USERS_DB).
+-- The tests are in users_test.sea: `sea test` in this directory.
+
+local users = require("./users")
+
+local function usage()
+    print("usage: sea main.sea register EMAIL NAME PASSWORD | login EMAIL PASSWORD |")
+    print("                    whoami TOKEN | logout TOKEN | passwd EMAIL OLD NEW")
+    os.exit(2)
+end
+
+local function fail(err)
+    io.write_err("error: " .. err.message .. "\n")
+    os.exit(1)
+end
+
+local args = os.args
+local cmd = args[1]
+if cmd == nil then usage() end
+
+local store = users.open(os.getenv("USERS_DB") or "users.db")
+if is_error(store) then fail(store) end
+defer store:close()
+
+if cmd == "register" and len(args) == 5 then
+    local u = store:register(args[2], args[3], args[4])
+    if is_error(u) then fail(u) end
+    print("registered " .. u.email .. " (id " .. u.id .. ")")
+elseif cmd == "login" and len(args) == 4 then
+    local token = store:login(args[2], args[3])
+    if is_error(token) then fail(token) end
+    print(token)
+elseif cmd == "whoami" and len(args) == 3 then
+    local u = store:whoami(args[2])
+    if u == nil then fail(error("not logged in")) end
+    print(u.name .. " <" .. u.email .. ">")
+elseif cmd == "logout" and len(args) == 3 then
+    print(store:logout(args[2]) and "logged out" or "no such session")
+elseif cmd == "passwd" and len(args) == 5 then
+    local ok = store:change_password(args[2], args[3], args[4])
+    if is_error(ok) then fail(ok) end
+    print("password changed; sessions ended")
+else
+    usage()
+end

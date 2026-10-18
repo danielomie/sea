@@ -1,0 +1,240 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- users — sign-up and login backed by SQLite
+--
+--   local users = require("./users")
+--   local store = users.open("app.db")?
+--   local u = store:register("ana@example.com", "Ana", "correct horse")?
+--   local token = store:login("ana@example.com", "correct horse")?
+--   print(store:whoami(token).name)       -- Ana
+--
+-- Passwords are stored as PBKDF2-HMAC-SHA256 with a random salt
+-- ("pbkdf2-sha256$iterations$salt$hash"), never in clear text. After
+-- MAX_ATTEMPTS wrong passwords in a row the account is locked for
+-- LOCK_SECONDS. A login returns a session token that expires after
+-- SESSION_SECONDS. The clock and the iteration count are options, so the
+-- tests can move time forward and run fast.
+
+local sqlite = require("../../libs/sqlite/sqlite")
+
+local M = {}
+
+M.MIN_PASSWORD = 8
+M.MAX_ATTEMPTS = 5
+M.LOCK_SECONDS = 15 * 60
+M.SESSION_SECONDS = 24 * 60 * 60
+M.ITERATIONS = 20000 -- about 0.1 s per check here; raise it for real use
+
+local SCHEMA = [==[
+CREATE TABLE IF NOT EXISTS users (
+    id         INTEGER PRIMARY KEY,
+    email      TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    password   TEXT NOT NULL,
+    failures   INTEGER NOT NULL DEFAULT 0,
+    locked_until INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+]==]
+
+-- ---- passwords ----
+
+-- users.random_hex(n) → 2n hex digits from n bytes of /dev/urandom
+function M.random_hex(n)
+    local f = io.open("/dev/urandom", "rb")
+    if f == nil then return error("users: cannot open /dev/urandom") end
+    local bytes = io.read_bytes(f, n)
+    io.close(f)
+    return encoding.hex_encode(bytes)
+end
+
+local function pbkdf2(password, salt, iterations)
+    -- one block: the derived key is as long as a SHA-256 digest
+    local u = hash.hmac("sha256", password, salt .. "\x00\x00\x00\x01", true)
+    local acc = []
+    for i = 1, 32 do acc[] = string.byte(u, i) end
+    for _ = 2, iterations do
+        u = hash.hmac("sha256", password, u, true)
+        for i = 1, 32 do acc[i - 1] = acc[i - 1] ~ string.byte(u, i) end
+    end
+    local hex = []
+    for _, b in acc do hex[] = string.format("%02x", b) end
+    return string.join(hex, "")
+end
+
+-- users.hash_password(password [, iterations]) → "pbkdf2-sha256$iterations$salt$hash"
+function M.hash_password(password, iterations)
+    iterations = iterations or M.ITERATIONS
+    local salt = M.random_hex(16)
+    if is_error(salt) then return salt end
+    return "pbkdf2-sha256$" .. iterations .. "$" .. salt .. "$" .. pbkdf2(password, salt, iterations)
+end
+
+-- users.check_password(password, stored) → bool
+function M.check_password(password, stored)
+    local parts = string.split(stored, "$")
+    if len(parts) ~= 4 or parts[0] ~= "pbkdf2-sha256" then return false end
+    local iterations = tonumber(parts[1])
+    if iterations == nil then return false end
+    return hash.equal(pbkdf2(password, parts[2], iterations), parts[3])
+end
+
+-- ---- validation ----
+
+local EMAIL = "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+
+local function normalize_email(email)
+    return string.lower(string.trim(email or ""))
+end
+
+-- users.validate(email, name, password) → nil | error (the first problem found)
+function M.validate(email, name, password)
+    if not re.test(EMAIL, normalize_email(email)) then return error("invalid email") end
+    if string.trim(name or "") == "" then return error("name is required") end
+    if password == nil or len(password) < M.MIN_PASSWORD then
+        return error("password must have at least " .. M.MIN_PASSWORD .. " characters")
+    end
+    return nil
+end
+
+-- ---- the store ----
+
+local Store = {}
+
+-- users.open([path [, opts]]) → store | error
+-- path: the SQLite file (nil or ":memory:" for a database in memory).
+-- opts: now (a function returning Unix seconds; default time.time),
+-- iterations (PBKDF2 rounds for new passwords; default users.ITERATIONS).
+function M.open(path, opts)
+    opts = opts or {}
+    local db = sqlite.open(path)
+    if is_error(db) then return db end
+    local made = db:exec(SCHEMA)
+    if is_error(made) then
+        db:close()
+        return made
+    end
+    local s = {}
+    s.db = db
+    s.now = opts.now or time.time
+    s.iterations = opts.iterations or M.ITERATIONS
+    for k, f in Store do s[k] = f end
+    return s
+end
+
+local function public(row)
+    local u = {}
+    u.id = row.id
+    u.email = row.email
+    u.name = row.name
+    u.created_at = row.created_at
+    return u
+end
+
+-- store:register(email, name, password) → user | error
+-- user: {id, email, name, created_at}. The email is trimmed and lowercased;
+-- registering it twice is the error "email already registered".
+function Store.register(self, email, name, password)
+    local bad = M.validate(email, name, password)
+    if bad ~= nil then return bad end
+    email = normalize_email(email)
+    local hashed = M.hash_password(password, self.iterations)
+    if is_error(hashed) then return hashed end
+    local r = self.db:exec("INSERT INTO users (email, name, password, created_at) VALUES (?, ?, ?, ?)",
+        email, string.trim(name), hashed, self.now())
+    if is_error(r) then
+        if string.contains(r.message, "UNIQUE") then return error("email already registered") end
+        return r
+    end
+    return self:find(email)
+end
+
+-- store:find(email) → user | nil
+function Store.find(self, email)
+    local row = self.db:row("SELECT * FROM users WHERE email = ?", normalize_email(email))
+    if row == nil or is_error(row) then return row end
+    return public(row)
+end
+
+-- store:count() → the number of users
+function Store.count(self)
+    return self.db:value("SELECT count(*) FROM users")
+end
+
+-- store:login(email, password) → token | error
+-- Errors: "invalid email or password" (the same message for an unknown email
+-- and a wrong password) and "account locked, try again in N s".
+function Store.login(self, email, password)
+    local row = self.db:row("SELECT * FROM users WHERE email = ?", normalize_email(email))
+    if is_error(row) then return row end
+    if row == nil then return error("invalid email or password") end
+    local now = self.now()
+    if row.locked_until > now then
+        return error("account locked, try again in " .. (row.locked_until - now) .. " s")
+    end
+    if not M.check_password(password or "", row.password) then
+        local failures = row.failures + 1
+        local locked_until = 0
+        if failures >= M.MAX_ATTEMPTS then
+            failures = 0
+            locked_until = now + M.LOCK_SECONDS
+        end
+        local _ = self.db:exec("UPDATE users SET failures = ?, locked_until = ? WHERE id = ?", failures, locked_until, row.id)
+        return error("invalid email or password")
+    end
+    local token = M.random_hex(32)
+    if is_error(token) then return token end
+    return self.db:transaction(function(db)
+        local _ = db:exec("UPDATE users SET failures = 0, locked_until = 0 WHERE id = ?", row.id)?
+        local _ = db:exec("INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+            token, row.id, now + M.SESSION_SECONDS)?
+        return token
+    end)
+end
+
+-- store:whoami(token) → user | nil (unknown, logged out or expired token)
+function Store.whoami(self, token)
+    local row = self.db:row(
+        "SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?",
+        token or "", self.now())
+    if row == nil or is_error(row) then return nil end
+    return public(row)
+end
+
+-- store:logout(token) → true if the session existed
+function Store.logout(self, token)
+    local n = self.db:exec("DELETE FROM sessions WHERE token = ?", token or "")
+    return not is_error(n) and n > 0
+end
+
+-- store:change_password(email, old, new) → true | error
+-- Needs the current password; ends every session of the user.
+function Store.change_password(self, email, old, new)
+    local row = self.db:row("SELECT * FROM users WHERE email = ?", normalize_email(email))
+    if is_error(row) then return row end
+    if row == nil or not M.check_password(old or "", row.password) then
+        return error("invalid email or password")
+    end
+    local bad = M.validate(row.email, row.name, new)
+    if bad ~= nil then return bad end
+    local hashed = M.hash_password(new, self.iterations)
+    if is_error(hashed) then return hashed end
+    return self.db:transaction(function(db)
+        local _ = db:exec("UPDATE users SET password = ? WHERE id = ?", hashed, row.id)?
+        local _ = db:exec("DELETE FROM sessions WHERE user_id = ?", row.id)?
+        return true
+    end)
+end
+
+-- store:close()
+function Store.close(self)
+    self.db:close()
+end
+
+return M
