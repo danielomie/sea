@@ -890,6 +890,10 @@ static void esc_walk_captures(SeaEscapeInfo *ei, SeaNode *n, bool mark_idents) {
         for (int i = 0; i < n->array_lit.count; i++)
             esc_walk_captures(ei, n->array_lit.elems[i], mark_idents);
         break;
+    case NODE_TEMPLATE:
+        for (int i = 0; i < n->tmpl.count; i++)
+            esc_walk_captures(ei, n->tmpl.exprs[i], mark_idents);
+        break;
     case NODE_PROPAGATE:
         esc_walk_captures(ei, n->propagate, mark_idents);
         break;
@@ -1017,6 +1021,10 @@ static void esc_scan(SeaEscapeInfo *ei, SeaNode *n) {
     case NODE_ARRAY_LIT:
         for (int i = 0; i < n->array_lit.count; i++)
             esc_scan(ei, n->array_lit.elems[i]);
+        break;
+    case NODE_TEMPLATE:
+        for (int i = 0; i < n->tmpl.count; i++)
+            esc_scan(ei, n->tmpl.exprs[i]);
         break;
     case NODE_PROPAGATE:
         esc_scan(ei, n->propagate);
@@ -1224,6 +1232,14 @@ static bool name_assigned_in(SeaNode *n, const char *name) {
     case NODE_TABLE:
         for (int i = 0; i < n->table.count; i++)
             if (name_assigned_in(n->table.vals[i], name)) return true;
+        return false;
+    case NODE_ARRAY_LIT:
+        for (int i = 0; i < n->array_lit.count; i++)
+            if (name_assigned_in(n->array_lit.elems[i], name)) return true;
+        return false;
+    case NODE_TEMPLATE:
+        for (int i = 0; i < n->tmpl.count; i++)
+            if (name_assigned_in(n->tmpl.exprs[i], name)) return true;
         return false;
     case NODE_BINOP: case NODE_CHAN_SEND:
         return name_assigned_in(n->binop.left, name) || name_assigned_in(n->binop.right, name);
@@ -1975,6 +1991,58 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
                     drop_temp(c, v, line);
                     if (!reg_is_named_local(c, v)) free_reg(c, v);
                 }
+            }
+            reg_clear_int(c, dst);
+            c->reg_meta[dst].is_owned = 1;
+            break;
+        }
+
+        case NODE_TEMPLATE: {
+            /* `a ${x} b`: the pieces in consecutive registers, then one CONCAT
+             * (which converts each value as tostring does) */
+            if (dst < 0) dst = alloc_reg(c);
+            int npieces = 0;
+            for (int i = 0; i <= node->tmpl.count; i++) {
+                if (node->tmpl.lens[i] > 0) npieces++;
+                if (i < node->tmpl.count) npieces++;
+            }
+            bool lead_empty = npieces == 1 && node->tmpl.count == 1;  /* `${x}`: "" .. x */
+            if (npieces == 0 || (npieces == 1 && node->tmpl.count == 0)) {
+                int kidx = sea_chunk_add_const_strn(c->chunk, node->tmpl.texts[0], node->tmpl.lens[0]);
+                emit_abx(c, OP_LOAD_K, dst, kidx, line);
+                reg_set_scalar(c, dst);
+                break;
+            }
+            if (npieces + (lead_empty ? 1 : 0) > 250) {
+                compiler_error(c, line, "template string with more than 250 parts");
+                break;
+            }
+            int regs[256];
+            int nr = 0;
+            if (lead_empty) {
+                regs[nr] = alloc_reg(c);
+                emit_abx(c, OP_LOAD_K, regs[nr], sea_chunk_add_const_strn(c->chunk, "", 0), line);
+                reg_set_scalar(c, regs[nr]);
+                nr++;
+            }
+            for (int i = 0; i <= node->tmpl.count; i++) {
+                if (node->tmpl.lens[i] > 0) {
+                    regs[nr] = alloc_reg(c);
+                    int kidx = sea_chunk_add_const_strn(c->chunk, node->tmpl.texts[i], node->tmpl.lens[i]);
+                    emit_abx(c, OP_LOAD_K, regs[nr], kidx, line);
+                    reg_set_scalar(c, regs[nr]);
+                    nr++;
+                }
+                if (i < node->tmpl.count) {
+                    regs[nr] = alloc_reg(c);
+                    compile_expr(c, node->tmpl.exprs[i], regs[nr]);
+                    nr++;
+                }
+            }
+            emit_abc(c, OP_CONCAT, dst, regs[0], nr, line);
+            for (int i = nr - 1; i >= 0; i--) {
+                drop_temp(c, regs[i], line);
+                free_reg(c, regs[i]);
             }
             reg_clear_int(c, dst);
             c->reg_meta[dst].is_owned = 1;

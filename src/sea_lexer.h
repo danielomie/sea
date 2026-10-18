@@ -14,6 +14,7 @@
 typedef enum {
     // Literals
     TK_NIL, TK_TRUE, TK_FALSE, TK_NUMBER, TK_STRING, TK_IDENT,
+    TK_TEMPLATE,   /* `text ${expr} text`: start/len cover the whole literal, backticks included */
 
     // Keywords
     TK_AND, TK_BREAK, TK_CHAN, TK_CONST, TK_CONTINUE, TK_DEFAULT,
@@ -85,3 +86,8 @@ void      sea_lexer_free(SeaLexer *l);
 
 // Get token name for error messages
 const char* sea_tk_name(SeaTK tk);
+
+/* Decode the escapes of a string body (tmpl: also \` and \$, as in
+ * `templates`). On success *out is a new NUL-terminated buffer of *out_len
+ * bytes (free with sea_free(*out, len + 1)); on failure *err says why. */
+bool sea_lex_unescape(const char *s, size_t len, bool tmpl, char **out, size_t *out_len, const char **err);

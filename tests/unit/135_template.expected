@@ -1,0 +1,19 @@
+total: 3 items
+Ana	string	plain	33	ab	0
+x=1, sum=5, call=ANA, nested=in 3
+braces v and str } and a'b
+escapes: ` ${not} tab	end Aé
+multi
+line 3
+nil true 1.5 2 ana
+i=1	i=3
+error at line	33
+t.sea:1:11: unterminated template string (a ` without its closing `)
+t.sea:1:16: empty ${} in template string
+t.sea:1:18: unexpected '<number>' in ${...}: one expression expected
+t.sea:1:11: invalid escape '\q' (valid: \n \t \r \\ \" \' \0 \a \b \f \v \xHH \u{XXXX} \` \$; write a backslash as \\)
+t.sea:2:6: unexpected token '<eof>' in expression
+template	2	x	 b\n
+local s = `v=${a + 1} \` ok`
+
+`x \`q\` \${${v}!`

@@ -2,27 +2,63 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Sea",
   "scopeName": "source.sea",
-  "fileTypes": [".sea"],
+  "fileTypes": [
+    ".sea"
+  ],
   "patterns": [
-    { "include": "#block-comment" },
-    { "include": "#line-comment" },
-    { "include": "#long-string" },
-    { "include": "#double-string" },
-    { "include": "#single-string" },
-    { "include": "#number" },
-    { "include": "#keyword-control" },
-    { "include": "#keyword-decl" },
-    { "include": "#keyword-operator" },
-    { "include": "#constant" },
-    { "include": "#builtin-function" },
-    { "include": "#stdlib-module" },
-    { "include": "#function-definition" },
-    { "include": "#function-call" },
-    { "include": "#varargs" },
-    { "include": "#operator" }
+    {
+      "include": "#block-comment"
+    },
+    {
+      "include": "#line-comment"
+    },
+    {
+      "include": "#long-string"
+    },
+    {
+      "include": "#template-string"
+    },
+    {
+      "include": "#double-string"
+    },
+    {
+      "include": "#single-string"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#keyword-control"
+    },
+    {
+      "include": "#keyword-decl"
+    },
+    {
+      "include": "#keyword-operator"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#builtin-function"
+    },
+    {
+      "include": "#stdlib-module"
+    },
+    {
+      "include": "#function-definition"
+    },
+    {
+      "include": "#function-call"
+    },
+    {
+      "include": "#varargs"
+    },
+    {
+      "include": "#operator"
+    }
   ],
   "repository": {
-
     "block-comment": {
       "name": "comment.block.sea",
       "begin": "--\\[=*\\[",
@@ -34,46 +70,60 @@
         }
       ]
     },
-
     "line-comment": {
       "name": "comment.line.double-dash.sea",
       "match": "--.*$"
     },
-
     "long-string": {
       "name": "string.quoted.other.long.sea",
       "begin": "\\[=*\\[",
       "end": "\\]=*\\]",
       "patterns": []
     },
-
     "double-string": {
       "name": "string.quoted.double.sea",
       "begin": "\"",
       "end": "\"",
-      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.sea" } },
-      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.sea" } },
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.sea"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.sea"
+        }
+      },
       "patterns": [
-        { "include": "#string-escape" }
+        {
+          "include": "#string-escape"
+        }
       ]
     },
-
     "single-string": {
       "name": "string.quoted.single.sea",
       "begin": "'",
       "end": "'",
-      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.sea" } },
-      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.sea" } },
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.sea"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.sea"
+        }
+      },
       "patterns": [
-        { "include": "#string-escape" }
+        {
+          "include": "#string-escape"
+        }
       ]
     },
-
     "string-escape": {
       "name": "constant.character.escape.sea",
       "match": "\\\\(?:[ntr\\\\'\"\\/0abfv]|x[0-9a-fA-F]{2})"
     },
-
     "number": {
       "patterns": [
         {
@@ -86,62 +136,56 @@
         }
       ]
     },
-
     "keyword-control": {
       "name": "keyword.control.sea",
       "match": "\\b(if|elseif|else|then|end|while|for|do|in|break|continue|return|select|case|default|panic|recover|defer|del)\\b"
     },
-
     "keyword-decl": {
       "name": "keyword.other.sea",
       "match": "\\b(function|local|const|go)\\b"
     },
-
     "keyword-operator": {
       "name": "keyword.operator.logical.sea",
       "match": "\\b(and|or|not)\\b"
     },
-
     "constant": {
       "name": "constant.language.sea",
       "match": "\\b(true|false|nil)\\b"
     },
-
     "builtin-function": {
       "name": "support.function.builtin.sea",
       "match": "\\b(print|printf|type|tostring|tonumber|error|is_error|assert|len|chan|close|require|int_array|float_array|isnan|isinf)\\b(?=\\s*[({\"'])"
     },
-
     "stdlib-module": {
       "name": "support.class.sea",
       "match": "\\b(math|string|utf8|re|encoding|hash|io|os|fs|path|process|sync|time|net|gc|sort|bigint)\\b(?=\\.)"
     },
-
     "function-definition": {
       "patterns": [
         {
           "comment": "named function: function foo.bar:baz()",
           "match": "\\bfunction\\b\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:[.:][a-zA-Z_][a-zA-Z0-9_]*)*)",
           "captures": {
-            "1": { "name": "entity.name.function.sea" }
+            "1": {
+              "name": "entity.name.function.sea"
+            }
           }
         }
       ]
     },
-
     "function-call": {
       "comment": "Any identifier immediately before ( that was not matched by builtin-function",
       "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
       "captures": {
-        "1": { "name": "entity.name.function.call.sea" }
+        "1": {
+          "name": "entity.name.function.call.sea"
+        }
       }
     },
-
     "varargs": {
       "name": "variable.parameter.vararg.sea",
       "match": "\\.\\.\\."
     },
-
     "operator": {
       "patterns": [
         {
@@ -173,7 +217,47 @@
           "match": "(?<![=!<>])=(?!=)"
         }
       ]
+    },
+    "template-string": {
+      "name": "string.template.sea",
+      "begin": "`",
+      "end": "`",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.sea"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.sea"
+        }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.sea",
+          "match": "\\\\(?:[ntr\\\\\"'0abfv`$]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]{1,6}\\})"
+        },
+        {
+          "name": "meta.template.expression.sea",
+          "begin": "\\$\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.template-expression.begin.sea"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.template-expression.end.sea"
+            }
+          },
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        }
+      ]
     }
-
   }
 }

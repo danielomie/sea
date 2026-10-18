@@ -79,6 +79,16 @@ void sea_node_free(SeaNode *n) {
             break;
         case NODE_MAP_LIT:
             break;
+        case NODE_TEMPLATE:
+            for (int i = 0; i <= n->tmpl.count; i++) {
+                sea_free(n->tmpl.texts[i], n->tmpl.lens[i] + 1);
+                sea_free(n->tmpl.raws[i], strlen(n->tmpl.raws[i]) + 1);
+            }
+            sea_free(n->tmpl.texts, sizeof(char*) * (size_t)(n->tmpl.count + 1));
+            sea_free(n->tmpl.lens, sizeof(size_t) * (size_t)(n->tmpl.count + 1));
+            sea_free(n->tmpl.raws, sizeof(char*) * (size_t)(n->tmpl.count + 1));
+            free_node_array(n->tmpl.exprs, n->tmpl.count);
+            break;
         case NODE_ARRAY_LIT:
             free_node_array(n->array_lit.elems, n->array_lit.count);
             break;

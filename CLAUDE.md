@@ -182,6 +182,7 @@ its examples are checked by `tests/unit/132_ai_guide`): keep it in sync when the
 - **Cycles** are freed by the cycle collector (automatically, or `gc.collect()`), except cycles of objects shared between goroutines, which still leak; break those by setting a field to nil (see `docs/memory.md`).
 - **`int` is 48-bit** (±140 737 488 355 327). Wider integers are `bigint`s, an explicit type: `bigint.new("…")` and `bigint.add/sub/mul/div/mod/pow` (the operators `+ - *` do not take bigints; comparisons, `==`, `tostring`, `..` and `sort` do).
 - **`//` and `%` floor** (toward minus infinity) for ints and floats: `-7 // 2` is `-4`, `-7 % 2` is `1`.
+- **Template strings** use backquotes: `` `total: ${n}` `` (NODE_TEMPLATE, compiled to one OP_CONCAT). `"${x}"` is plain text (re.gsub uses `${name}` in replacements) and `f"x"` is a call.
 - **`string.find` is plain text**; regular expressions are the built-in `re` module (RE2 syntax, linear time, no backreferences or lookaround).
 - **`isnan` / `isinf`** are registered as bare globals (in addition to `math.isnan` / `math.isinf`).
 - **Runtime errors are panics**: `recover()` in a deferred call catches them (Go semantics: the recovering function returns nil). The message starts with `file:line:`. Unrecovered, they print a traceback of `file:line: in main chunk` / `file:line: in function 'name'` lines (each function knows its source file: `SeaChunk.source`).

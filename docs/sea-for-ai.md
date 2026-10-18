@@ -117,8 +117,10 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     `require("./util")` loads `util.sea` next to the current file;
     `require("../../libs/json/json")` reaches a library. Built-in modules
     (`string`, `math`, `fs`, `re`, `json` is *not* one) need no `require`.
-25. **No `goto`, `repeat ... until`, `switch`, classes, metatables,
-    `setmetatable`, `__index`, string interpolation, `+=` / `++`,
+25. **String interpolation uses backquotes**: `` `total: ${n} items` ``
+    (any expression inside `${}`; not `"${n}"`, not `f"..."`).
+    **No `goto`, `repeat ... until`, `switch`, classes, metatables,
+    `setmetatable`, `__index`, `+=` / `++`,
     ternary `?:`** (use `cond and a or b`, which fails when `a` is false
     or nil), or `print` with `%` formatting (use `printf` or
     `string.format`).
@@ -144,6 +146,7 @@ says what to write instead (`undefined variable 'pairs' (iterate with
 local n = 42                      -- int
 local pi = 3.14                   -- number
 local s = "text" .. " more"       -- .. concatenates (numbers are converted)
+local msg = `n is ${n}, twice ${n * 2}`   -- template string: ${expr} inside backquotes
 local raw = [[no \n escapes here]]
 local yes, no = true, nil
 
@@ -169,6 +172,7 @@ print(i)                                    -- → 7
 local function add(a, b) return a + b end   -- one-statement body on one line
 print(add(2, 3), type(add))                 -- → 5  function
 print(yes, no, raw)                         -- → true  nil  no \n escapes here
+print(msg)                                  -- → n is 42, twice 84
 ```
 
 ---
@@ -686,7 +690,7 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | `d = {}` (Python dict), `map[K]V{}` | `local d = [=]` |
 | `if k in d`, `v, ok := m[k]` | `local v, ok = d[k]` |
 | `local s = a .. b` | the same |
-| `string.format`, f-strings, template literals | `string.format("%s=%d", k, v)` / `printf` |
+| f-strings `f"{k}={v}"`, template literals `` `${k}` `` | `` `${k}=${v}` `` (backquotes), or `string.format("%s=%d", k, v)` / `printf` |
 | `s:gsub(pattern, r)`, `re.sub` | `re.gsub(pattern, s, r)` (subject second) |
 | `s:find("x", 1, true)` | `string.find(s, "x")` |
 | `pcall(f)`, `try/except`, `try/catch` | error values + `?`, or `defer` + `recover()` |

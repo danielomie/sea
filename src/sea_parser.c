@@ -118,6 +118,7 @@ static char* dup_cstr(const char *s) {
 
 // ---- Forward declarations ----
 static SeaNode* parse_expr(SeaParser *p);
+static SeaNode* parse_template(SeaParser *p, SeaToken t);
 static SeaNode* parse_stmt(SeaParser *p);
 static SeaNode* parse_block(SeaParser *p);
 static SeaNode* parse_simple_expr(SeaParser *p);
@@ -342,6 +343,10 @@ static SeaNode* parse_primary(SeaParser *p) {
             n->unop.expr = parse_expr(p);
             return n;
         }
+        case TK_TEMPLATE: {
+            advance(p);
+            return parse_template(p, t);
+        }
         case TK_LBRACKET: {
             advance(p);
             if (check(p, TK_ASSIGN)) {
@@ -380,6 +385,156 @@ static SeaNode* parse_primary(SeaParser *p) {
             parser_error(p, "unexpected token '%s' in expression", sea_tk_name(t.type));
             return NULL;
     }
+}
+
+/* The end of a ${...} expression in a template body: s points after "${";
+ * returns the matching '}' (skipping strings and nested templates), or NULL. */
+static const char *template_expr_end(const char *s, const char *end) {
+    int depth = 1;
+    while (s < end) {
+        char c = *s++;
+        if (c == '{') depth++;
+        else if (c == '}') { if (--depth == 0) return s - 1; }
+        else if (c == '"' || c == '\'') {
+            while (s < end && *s != c) { if (*s == '\\') s++; s++; }
+            s++;
+        } else if (c == '`') {
+            while (s < end && *s != '`') {
+                if (*s == '\\') { s += 2; continue; }
+                if (*s == '$' && s + 1 < end && s[1] == '{') {
+                    const char *e = template_expr_end(s + 2, end);
+                    if (!e) return NULL;
+                    s = e + 1;
+                    continue;
+                }
+                s++;
+            }
+            s++;
+        }
+    }
+    return NULL;
+}
+
+/* `text ${expr} text`: the texts are decoded like string escapes (plus \`
+ * and \$); each expression is parsed by a parser of its own, given the
+ * expression preceded by the newlines and spaces that put it at its place in
+ * the file, so its positions are the real ones. */
+static SeaNode* parse_template(SeaParser *p, SeaToken t) {
+    SeaNode *n = node_new(NODE_TEMPLATE, t.line, t.col);
+    const char *body = t.start + 1, *end = t.start + t.len - 1;
+    int cap = 4, count = 0;
+    char **texts = SEA_ALLOC_N(char*, cap + 1);
+    size_t *lens = SEA_ALLOC_N(size_t, cap + 1);
+    char **raws = SEA_ALLOC_N(char*, cap + 1);
+    SeaNode **exprs = SEA_ALLOC_N(SeaNode*, cap);
+    const char *seg = body, *s = body;
+    int line = t.line, col = t.col + 1;     /* position of *s */
+    bool ok = true;
+    for (;;) {
+        bool at_end = s >= end;
+        bool at_expr = !at_end && s[0] == '$' && s + 1 < end && s[1] == '{';
+        if (at_end || at_expr) {
+            /* the text before */
+            const char *err = NULL;
+            char *dec = NULL;
+            size_t dlen = 0;
+            if (!sea_lex_unescape(seg, (size_t)(s - seg), true, &dec, &dlen, &err)) {
+                parser_error_at(p, t.line, t.col, "%s", err);
+                ok = false;
+                break;
+            }
+            texts[count] = dec;
+            lens[count] = dlen;
+            raws[count] = dup_str(seg, (size_t)(s - seg));
+            if (at_end) break;
+            const char *e_start = s + 2;
+            const char *e_end = template_expr_end(e_start, end);
+            if (!e_end) {
+                parser_error_at(p, line, col, "unterminated ${ in template string");
+                sea_free(texts[count], lens[count] + 1);
+                sea_free(raws[count], strlen(raws[count]) + 1);
+                ok = false;
+                break;
+            }
+            /* the expression, placed at its line and column */
+            int eline = line, ecol = col + 2;
+            size_t elen = (size_t)(e_end - e_start);
+            size_t pad = (size_t)(eline - 1) + (size_t)(ecol - 1);
+            char *src = (char*)sea_malloc(pad + elen + 1);
+            memset(src, '\n', (size_t)(eline - 1));
+            memset(src + eline - 1, ' ', (size_t)(ecol - 1));
+            memcpy(src + pad, e_start, elen);
+            src[pad + elen] = '\0';
+            SeaParser sub;
+            sea_parser_init(&sub, src);
+            sub.func_depth = p->func_depth;
+            sub.depth = p->depth;
+            SeaNode *e = NULL;
+            if (check(&sub, TK_EOF)) {
+                parser_error_at(p, eline, ecol, "empty ${} in template string");
+            } else {
+                e = parse_expr(&sub);
+                if (!sub.had_error && !check(&sub, TK_EOF))
+                    parser_error(&sub, "unexpected '%s' in ${...}: one expression expected", sea_tk_name(cur(&sub).type));
+                if (sub.had_error) {
+                    parser_error_at(p, sub.err_line, sub.err_col, "%s", sub.err_msg ? sub.err_msg : "syntax error");
+                    sea_node_free(e);
+                    e = NULL;
+                }
+            }
+            sea_parser_free(&sub);
+            sea_free(src, pad + elen + 1);
+            if (!e) {
+                sea_free(texts[count], lens[count] + 1);
+                sea_free(raws[count], strlen(raws[count]) + 1);
+                ok = false;
+                break;
+            }
+            if (count == cap) {
+                int nc = cap * 2;
+                texts = SEA_REALLOC_N(texts, char*, cap + 1, nc + 1);
+                lens = SEA_REALLOC_N(lens, size_t, cap + 1, nc + 1);
+                raws = SEA_REALLOC_N(raws, char*, cap + 1, nc + 1);
+                exprs = SEA_REALLOC_N(exprs, SeaNode*, cap, nc);
+                cap = nc;
+            }
+            exprs[count++] = e;
+            /* move past the expression */
+            for (const char *q = s; q <= e_end; q++) {
+                if (*q == '\n') { line++; col = 1; } else col++;
+            }
+            s = seg = e_end + 1;
+            continue;
+        }
+        if (*s == '\\' && s + 1 < end) { s++; col++; }
+        if (*s == '\n') { line++; col = 1; } else col++;
+        s++;
+    }
+    if (!ok) {
+        for (int i = 0; i < count; i++) {
+            sea_free(texts[i], lens[i] + 1);
+            sea_free(raws[i], strlen(raws[i]) + 1);
+        }
+        for (int i = 0; i < count; i++) sea_node_free(exprs[i]);
+        sea_free(texts, sizeof(char*) * (size_t)(cap + 1));
+        sea_free(lens, sizeof(size_t) * (size_t)(cap + 1));
+        sea_free(raws, sizeof(char*) * (size_t)(cap + 1));
+        sea_free(exprs, sizeof(SeaNode*) * (size_t)cap);
+        n->type = NODE_NIL;
+        return n;
+    }
+    /* exact sizes (sea_node_free frees count + 1 texts) */
+    texts = SEA_REALLOC_N(texts, char*, cap + 1, count + 1);
+    lens = SEA_REALLOC_N(lens, size_t, cap + 1, count + 1);
+    raws = SEA_REALLOC_N(raws, char*, cap + 1, count + 1);
+    if (count) exprs = SEA_REALLOC_N(exprs, SeaNode*, cap, count);
+    else { sea_free(exprs, sizeof(SeaNode*) * (size_t)cap); exprs = NULL; }
+    n->tmpl.texts = texts;
+    n->tmpl.lens = lens;
+    n->tmpl.raws = raws;
+    n->tmpl.exprs = exprs;
+    n->tmpl.count = count;
+    return n;
 }
 
 // Parse a function body (after 'function')

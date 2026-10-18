@@ -184,6 +184,162 @@ static SeaToken error_token(SeaLexer *l, const char *msg) {
 
 // ---- String scanning ----
 
+/* Decode the escape after a backslash: *pp points at the character after
+ * it and is advanced past the escape. Writes 1 to 4 bytes to out and returns
+ * their count, or 0 with *err set. In a template string (`...`) \` and \$
+ * are escapes too. A backslash before a newline keeps the newline (the
+ * caller counts the line). */
+static int lex_escape(const char **pp, char out[4], bool tmpl, const char **err) {
+    static _Thread_local char msg[192];   /* error_token copies it */
+    const char *p = *pp;
+    char esc = *p++;
+    int n = 1;
+    switch (esc) {
+        case 'n':  out[0] = '\n'; break;
+        case 't':  out[0] = '\t'; break;
+        case 'r':  out[0] = '\r'; break;
+        case '\\': out[0] = '\\'; break;
+        case '\'': out[0] = '\''; break;
+        case '"':  out[0] = '"';  break;
+        case '0':  out[0] = '\0'; break;
+        case 'a':  out[0] = '\a'; break;
+        case 'b':  out[0] = '\b'; break;
+        case 'f':  out[0] = '\f'; break;
+        case 'v':  out[0] = '\v'; break;
+        case '\n': out[0] = '\n'; break;
+        case 'u': {
+            /* \u{XXXX} — a code point (1 to 6 hex digits), written as UTF-8 */
+            uint32_t cp = 0;
+            int digits = 0;
+            if (*p == '{') {
+                p++;
+                while (isxdigit((unsigned char)*p) && digits < 7) {
+                    int h = isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10);
+                    cp = cp * 16 + (uint32_t)h;
+                    digits++;
+                    p++;
+                }
+            }
+            n = 0;
+            if (digits >= 1 && digits <= 6 && *p == '}') n = sea_utf8_encode(cp, out);
+            if (!n) {
+                *err = "invalid \\u escape (use \\u{XXXX} with a code point up to 10FFFF, not a surrogate)";
+                return 0;
+            }
+            p++;
+            break;
+        }
+        case 'x': {
+            /* \xNN — two hex digits */
+            char h1 = p[0], h2 = h1 ? p[1] : 0;
+            if (!isxdigit((unsigned char)h1) || !isxdigit((unsigned char)h2)) {
+                *err = "invalid \\x escape (use \\xHH with two hex digits)";
+                return 0;
+            }
+            p += 2;
+            int hi = isdigit((unsigned char)h1) ? h1 - '0' : (tolower((unsigned char)h1) - 'a' + 10);
+            int lo = isdigit((unsigned char)h2) ? h2 - '0' : (tolower((unsigned char)h2) - 'a' + 10);
+            out[0] = (char)(hi * 16 + lo);
+            break;
+        }
+        default:
+            if (tmpl && (esc == '`' || esc == '$')) {
+                out[0] = esc;
+                break;
+            }
+            if (esc == '\0')
+                snprintf(msg, sizeof msg, "unterminated string");
+            else if ((unsigned char)esc >= 0x20 && (unsigned char)esc < 0x7F)
+                snprintf(msg, sizeof msg, "invalid escape '\\%c' (valid: \\n \\t \\r \\\\ \\\" \\' \\0 \\a \\b \\f \\v \\xHH \\u{XXXX}%s; "
+                         "write a backslash as \\\\)", esc, tmpl ? " \\` \\$" : "");
+            else
+                snprintf(msg, sizeof msg, "invalid escape (a backslash followed by byte 0x%02X)", (unsigned char)esc);
+            *err = msg;
+            return 0;
+    }
+    *pp = p;
+    return n;
+}
+
+bool sea_lex_unescape(const char *s, size_t len, bool tmpl, char **out, size_t *out_len, const char **err) {
+    char *buf = (char*)sea_malloc(len + 1);
+    size_t n = 0;
+    const char *p = s, *end = s + len;
+    while (p < end) {
+        if (*p == '\\' && p + 1 < end) {
+            p++;
+            char enc[4];
+            int k = lex_escape(&p, enc, tmpl, err);
+            if (!k) {
+                sea_free(buf, len + 1);
+                return false;
+            }
+            for (int i = 0; i < k; i++) buf[n++] = enc[i];
+        } else {
+            buf[n++] = *p++;
+        }
+    }
+    buf[n] = '\0';
+    *out = buf;
+    *out_len = n;
+    return true;
+}
+
+/* Skip a template literal starting after its opening backtick; returns false
+ * at the end of the input. Counts lines. ${...} may hold strings, braces and
+ * templates of their own. */
+static bool skip_template(SeaLexer *l);
+
+static void lex_newline(SeaLexer *l) {
+    l->line++;
+    l->line_start = l->cur;
+}
+
+static bool skip_quoted(SeaLexer *l, char q) {
+    while (*l->cur && *l->cur != q) {
+        if (*l->cur == '\\' && l->cur[1]) l->cur++;
+        if (*l->cur == '\n') { l->cur++; lex_newline(l); continue; }
+        l->cur++;
+    }
+    if (!*l->cur) return false;
+    l->cur++;
+    return true;
+}
+
+static bool skip_template(SeaLexer *l) {
+    while (*l->cur && *l->cur != '`') {
+        char c = *l->cur++;
+        if (c == '\n') { lex_newline(l); continue; }
+        if (c == '\\') {
+            if (!*l->cur) return false;
+            if (*l->cur == '\n') { l->cur++; lex_newline(l); continue; }
+            l->cur++;
+            continue;
+        }
+        if (c == '$' && *l->cur == '{') {
+            l->cur++;
+            int depth = 1;
+            while (depth > 0) {
+                char d = *l->cur;
+                if (!d) return false;
+                l->cur++;
+                if (d == '\n') lex_newline(l);
+                else if (d == '{') depth++;
+                else if (d == '}') depth--;
+                else if (d == '"' || d == '\'') { if (!skip_quoted(l, d)) return false; }
+                else if (d == '`') { if (!skip_template(l)) return false; l->cur++; }
+            }
+        }
+    }
+    return *l->cur == '`';
+}
+
+static SeaToken scan_template(SeaLexer *l) {
+    if (!skip_template(l)) return error_token(l, "unterminated template string (a ` without its closing `)");
+    l->cur++;   /* the closing backtick */
+    return make_token(l, TK_TEMPLATE);
+}
+
 static SeaToken scan_string(SeaLexer *l, char quote) {
     // We'll build the string in a dynamic buffer to handle escapes
     char *buf = NULL;
@@ -196,78 +352,21 @@ static SeaToken scan_string(SeaLexer *l, char quote) {
             l->line_start = l->cur;
         }
         if (c == '\\') {
-            char esc = *l->cur++;
-            switch (esc) {
-                case 'n':  c = '\n'; break;
-                case 't':  c = '\t'; break;
-                case 'r':  c = '\r'; break;
-                case '\\': c = '\\'; break;
-                case '\'': c = '\''; break;
-                case '"':  c = '"';  break;
-                case '0':  c = '\0'; break;
-                case 'a':  c = '\a'; break;
-                case 'b':  c = '\b'; break;
-                case 'f':  c = '\f'; break;
-                case 'v':  c = '\v'; break;
-                case 'u': {
-                    /* \u{XXXX} — a code point (1 to 6 hex digits), written as UTF-8 */
-                    const char *p = l->cur;
-                    uint32_t cp = 0;
-                    int digits = 0;
-                    if (*p == '{') {
-                        p++;
-                        while (isxdigit((unsigned char)*p) && digits < 7) {
-                            int h = isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10);
-                            cp = cp * 16 + (uint32_t)h;
-                            digits++;
-                            p++;
-                        }
-                    }
-                    char enc[4];
-                    int n = 0;
-                    if (digits >= 1 && digits <= 6 && *p == '}') n = sea_utf8_encode(cp, enc);
-                    if (!n) {
-                        if (buf) sea_free(buf, (size_t)buf_cap);
-                        return error_token(l, "invalid \\u escape (use \\u{XXXX} with a code point up to 10FFFF, not a surrogate)");
-                    }
-                    l->cur = p + 1;
-                    for (int k = 0; k < n - 1; k++) SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, enc[k]);
-                    c = enc[n - 1];
-                    break;
-                }
-                case 'x': {
-                    /* \xNN — two hex digits */
-                    char h1 = *l->cur, h2 = *(l->cur + 1);
-                    if (isxdigit((unsigned char)h1) && isxdigit((unsigned char)h2)) {
-                        l->cur += 2;
-                        int hi = isdigit((unsigned char)h1) ? h1 - '0' : (tolower((unsigned char)h1) - 'a' + 10);
-                        int lo = isdigit((unsigned char)h2) ? h2 - '0' : (tolower((unsigned char)h2) - 'a' + 10);
-                        c = (char)(hi * 16 + lo);
-                    } else {
-                        if (buf) sea_free(buf, (size_t)buf_cap);
-                        return error_token(l, "invalid \\x escape (use \\xHH with two hex digits)");
-                    }
-                    break;
-                }
-                case '\n':
-                    /* a backslash at the end of a line keeps the newline (as in Lua) */
-                    l->line++;
-                    l->line_start = l->cur;
-                    c = '\n';
-                    break;
-                default: {
-                    if (buf) sea_free(buf, (size_t)buf_cap);
-                    static _Thread_local char msg[160];  /* error_token keeps the pointer */
-                    if (esc == '\0')
-                        snprintf(msg, sizeof msg, "unterminated string");
-                    else if ((unsigned char)esc >= 0x20 && (unsigned char)esc < 0x7F)
-                        snprintf(msg, sizeof msg, "invalid escape '\\%c' (valid: \\n \\t \\r \\\\ \\\" \\' \\0 \\a \\b \\f \\v \\xHH \\u{XXXX}; "
-                                 "write a backslash as \\\\)", esc);
-                    else
-                        snprintf(msg, sizeof msg, "invalid escape (a backslash followed by byte 0x%02X)", (unsigned char)esc);
-                    return error_token(l, msg);
-                }
+            if (*l->cur == '\n') {
+                l->line++;
+                l->line_start = l->cur + 1;
             }
+            const char *err = NULL;
+            char enc[4];
+            const char *p = l->cur;
+            int k = lex_escape(&p, enc, false, &err);
+            if (!k) {
+                if (buf) sea_free(buf, (size_t)buf_cap);
+                return error_token(l, err);
+            }
+            l->cur = p;
+            for (int i = 0; i < k - 1; i++) SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, enc[i]);
+            c = enc[k - 1];
         }
         SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, c);
     }
@@ -425,6 +524,9 @@ static SeaToken scan_token(SeaLexer *l) {
     if (c == '"' || c == '\'') {
         return scan_string(l, c);
     }
+    if (c == '`') {
+        return scan_template(l);
+    }
 
     // Long strings and comments
     if (c == '[') {
@@ -567,6 +669,7 @@ const char* sea_tk_name(SeaTK tk) {
         case TK_FALSE:     return "false";
         case TK_NUMBER:    return "<number>";
         case TK_STRING:    return "<string>";
+        case TK_TEMPLATE:  return "<template>";
         case TK_IDENT:     return "<identifier>";
         case TK_AND:       return "and";
         case TK_BREAK:     return "break";

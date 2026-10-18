@@ -193,6 +193,7 @@ static const char *node_type_name(SeaNodeType t) {
         case NODE_TABLE:       return "table";
         case NODE_ARRAY_LIT:   return "array_lit";
         case NODE_MAP_LIT:     return "map_lit";
+        case NODE_TEMPLATE:    return "template";
         case NODE_CHAN_RECV:   return "chan_recv";
         case NODE_CHAN_SEND:   return "chan_send";
         case NODE_PROPAGATE:   return "propagate";
@@ -378,6 +379,21 @@ static SeaValue node_to_val(SeaNode *n, const SrcIndex *ix) {
             }
             tset(t, "fields", sea_obj_val(&fields->obj));
             tset(t, "end_line", sea_int_val(n->table.end_line));
+            break;
+        }
+
+        case NODE_TEMPLATE: {
+            SeaArray *parts = sea_array_new((uint32_t)n->tmpl.count + 1);
+            SeaArray *raws = sea_array_new((uint32_t)n->tmpl.count + 1);
+            SeaArray *exprs = sea_array_new((uint32_t)n->tmpl.count);
+            for (int i = 0; i <= n->tmpl.count; i++) {
+                apush(parts, str_n(n->tmpl.texts[i], n->tmpl.lens[i]));
+                apush(raws, str_val(n->tmpl.raws[i]));
+                if (i < n->tmpl.count) apush(exprs, node_to_val(n->tmpl.exprs[i], ix));
+            }
+            tset(t, "parts", sea_obj_val(&parts->obj));
+            tset(t, "raws", sea_obj_val(&raws->obj));
+            tset(t, "exprs", sea_obj_val(&exprs->obj));
             break;
         }
 
@@ -712,6 +728,7 @@ static const struct { const char *type; const char *fields[4]; } CHILD_FIELDS[] 
     {"func",        {"body"}},
     {"table",       {"fields%"}},
     {"array_lit",   {"elems*"}},
+    {"template",    {"exprs*"}},
     {"chan_recv",   {"channel"}},
     {"chan_send",   {"channel", "value"}},
     {"propagate",   {"expr"}},
@@ -1461,6 +1478,43 @@ static void print_array(Printer *P, Obj *t) {
     outc(P, ']');
 }
 
+/* `text ${expr} text`: the texts as written (raws), or escaped from the
+ * decoded parts for a tree built by hand. */
+static void print_template(Printer *P, Obj *n) {
+    SeaArray *parts = tget_arr(n, "parts");
+    SeaArray *raws = tget_arr(n, "raws");
+    SeaArray *exprs = tget_arr(n, "exprs");
+    uint32_t ne = exprs ? exprs->len : 0;
+    if (!parts || parts->len != ne + 1) { fail(P, "'template' node needs one more part than exprs"); return; }
+    outc(P, '`');
+    for (uint32_t i = 0; i <= ne && !P->failed; i++) {
+        size_t len;
+        const char *raw = raws && raws->len == ne + 1 ? str_data(raws->data[i], &len) : NULL;
+        if (raw) {
+            outs(P, raw);
+        } else {
+            const char *s = str_data(parts->data[i], &len);
+            if (!s) { fail(P, "template part is not a string"); return; }
+            for (size_t k = 0; k < len; k++) {
+                char ch = s[k];
+                if (ch == '\\') outs(P, "\\\\");
+                else if (ch == '`') outs(P, "\\`");
+                else if (ch == '$' && k + 1 < len && s[k + 1] == '{') outs(P, "\\$");
+                else if (ch == '\t') outs(P, "\\t");
+                else if (ch == '\r') outs(P, "\\r");
+                else if (ch == '\0') outs(P, "\\0");
+                else outc(P, ch);
+            }
+        }
+        if (i < ne) {
+            outs(P, "${");
+            print_expr(P, exprs->data[i]);
+            outc(P, '}');
+        }
+    }
+    outc(P, '`');
+}
+
 static void print_string_node(Printer *P, Obj *n) {
     SeaValue v = tget(n, "value");
     size_t len;
@@ -1498,6 +1552,8 @@ static void print_expr(Printer *P, SeaValue v) {
     else if (strcmp(type, "map_lit") == 0) outs(P, "[=]");
     else if (strcmp(type, "array_lit") == 0) {
         print_array(P, n);
+    } else if (strcmp(type, "template") == 0) {
+        print_template(P, n);
     } else if (strcmp(type, "table") == 0) {
         print_table(P, n);
     } else if (strcmp(type, "unop") == 0 || strcmp(type, "chan_recv") == 0) {

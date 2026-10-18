@@ -39,6 +39,7 @@ typedef enum {
     NODE_TABLE,        // {key=val, ...}
     NODE_ARRAY_LIT,
     NODE_MAP_LIT,
+    NODE_TEMPLATE,     // `text ${expr} text`
 
     // Channel operations
     NODE_CHAN_RECV,    // <-expr (expression form)
@@ -153,6 +154,16 @@ struct SeaNode {
             int       count;
             int       end_line;  // line of the ']'
         } array_lit;
+
+        // Template string: texts[0] exprs[0] texts[1] ... exprs[count-1] texts[count]
+        // (texts decoded, raws as written between the backticks)
+        struct {
+            char    **texts;
+            size_t   *lens;
+            char    **raws;
+            SeaNode **exprs;
+            int       count;     // number of ${...}
+        } tmpl;
 
         // Block of statements (end_line: line of the token that ends it:
         // end, else, elseif, case or the end of the input)

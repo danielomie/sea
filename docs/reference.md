@@ -439,6 +439,23 @@ Any other character after a backslash (`"\d"`, `"\1"`, `"\x4"`) is a
 compile error: `invalid escape '\d'`. Write a backslash as `\\` (regular
 expressions: `"\\d+"`, or a long string `[[\d+]]`).
 
+### Template strings
+
+Backquoted strings insert the value of each `${expr}`, converted as
+`tostring` does (`nil`, booleans, numbers and other values too):
+
+```sea
+local name, n = "Ana", 3
+print(`hello ${name}, you have ${n} new ${n == 1 and "message" or "messages"}`)
+print(`sum = ${a + b}; upper = ${string.upper(name)}; nested = ${`<${n}>`}`)
+```
+
+A template may span lines, and takes the escapes of quoted strings plus
+`` \` `` (a backquote) and `\$` (a `$` that does not start `${`). Each
+`${...}` holds one expression (it may contain strings, tables and other
+templates). The result is always a string: `` `${n}` `` is `tostring(n)`.
+They compile to one concatenation, as fast as `..`.
+
 ### Long strings (no escape processing)
 
 ```sea

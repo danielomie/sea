@@ -20,7 +20,8 @@ print(1 == 1.0, 10 .. "px")          -- true  10px
 
 - `int` (48-bit signed) and `number` (IEEE double) are distinct types; integer
   literals are `int`, literals with `.`/`e` and the result of `/` are `number`.
-- Strings are immutable byte strings; `..` concatenates (numbers are converted).
+- Strings are immutable byte strings; `..` concatenates (numbers are converted);
+  backquotes interpolate: `` `${n} items` ``.
 - Variables are `local`; assigning an undeclared name creates a global.
 
 ## Collections
