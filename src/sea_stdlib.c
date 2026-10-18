@@ -558,6 +558,25 @@ static SeaValue fn_float_array(SeaVM *vm, int argc, SeaValue *args) {
     return sea_obj_val(&a->obj);
 }
 
+/* Native libraries compiled into the binary (EMBED_LIBS in the Makefile):
+ * libs/json/json.c and libs/csv/csv.c, whose sea_open is renamed. */
+SeaValue sea_open_json(SeaVM *vm);
+SeaValue sea_open_csv(SeaVM *vm);
+
+static void sea_lib_embedded_register(SeaVM *vm) {
+    static const struct { const char *name; SeaValue (*open)(SeaVM *); } LIBS[] = {
+        {"json", sea_open_json},
+        {"csv",  sea_open_csv},
+    };
+    for (size_t i = 0; i < sizeof LIBS / sizeof LIBS[0]; i++) {
+        SeaValue m = LIBS[i].open(vm);
+        if (sea_is_obj(m) && sea_obj_is_type(m, OBJ_TABLE)) {
+            sea_vm_register_module(vm, LIBS[i].name, (SeaTable*)sea_as_obj(m));
+        }
+        if (sea_is_obj(m)) sea_obj_release(sea_as_obj(m));   /* register_module retained it */
+    }
+}
+
 void sea_lib_core_register(SeaVM *vm) {
     sea_vm_register_native(vm, "print",    fn_print);
     sea_vm_register_native(vm, "printf",   fn_printf);
@@ -597,4 +616,5 @@ void sea_stdlib_register(SeaVM *vm) {
     sea_lib_re_register(vm);
     sea_lib_process_register(vm);
     sea_lib_hash_register(vm);
+    sea_lib_embedded_register(vm);
 }

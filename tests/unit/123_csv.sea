@@ -3,8 +3,8 @@
 
 -- Test: libs/csv (needs make -C libs/csv)
 
-local csv = require("./libs/csv/csv")
-local json = require("./libs/json/json")
+local csv = require("csv")
+local json = require("json")
 local function show(v)
     if is_error(v) then return "error: " .. v.message end
     return json.encode(v, {sort_keys = true})

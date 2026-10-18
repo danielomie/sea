@@ -5,7 +5,7 @@
 -- Covers: encode (nil, bool, int, float, string, array, table, nested),
 --         decode (null, bool, number, string, array, object, nested, errors)
 
-local json = require("./libs/json/json")
+local json = require("json")
 
 local passed = 0
 local failed = 0

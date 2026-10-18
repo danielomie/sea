@@ -20,7 +20,7 @@
 --   local header, payload = jwt.decode(token)
 
 local native = require("jwt_native")
-local json   = require("../json/json")
+local json   = require("json")   -- built into sea
 
 local M = {}
 

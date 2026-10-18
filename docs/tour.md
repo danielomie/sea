@@ -234,8 +234,8 @@ are available for shared state (see the [reference](reference.md#module-sync)).
 -- main.sea
 --   local mu = require("./math_utils")
 --   print(mu.square(9))
-local json = require("../libs/json/json")   -- native module (.so); build with make -C libs/json
-print(json.encode({ok = true}))
+print(json.encode({ok = true}))              -- json and csv are built in
+local yaml = require("../libs/yaml/yaml")    -- a native module (.so): make -C libs/yaml
 ```
 
 `require` resolves a path relative to the requiring file, then the current

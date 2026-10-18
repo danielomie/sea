@@ -3,7 +3,7 @@
 
 -- libs/sqlite test: make -C libs/sqlite test
 local sqlite = require("sqlite")
-local json = require("../json/json")
+local json = require("json")   -- built into sea
 
 local function show(v)
     if is_error(v) then return "error: " .. v.message end

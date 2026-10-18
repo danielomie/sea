@@ -13,7 +13,7 @@
 --   bin/sea examples/csv_report/csv_report.sea [arquivo.csv]
 --
 
-local json = require("../../libs/json/json")
+local json = require("json")
 
 print("╔══════════════════════════════════════════╗")
 print("║   Relatório de Vendas (CSV → JSON)       ║")

@@ -3,7 +3,7 @@
 
 -- Test: libs/toml (needs make -C libs/toml)
 local toml = require("./libs/toml/toml")
-local json = require("./libs/json/json")
+local json = require("json")
 local function show(v)
     if is_error(v) then return "error: " .. v.message end
     return json.encode(v, {sort_keys = true})

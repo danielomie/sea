@@ -25,7 +25,7 @@ local M = {}
 
 -- loaded here, while require resolves paths relative to this file (a require
 -- inside a handler would resolve them relative to the running script)
-local json_lib = require("../json/json")
+local json_lib = require("json")   -- built into sea
 local function json_mod()
     if json_lib == nil then panic("http: libs/json is not built (make -C libs/json)") end
     return json_lib

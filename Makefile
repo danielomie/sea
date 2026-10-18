@@ -19,13 +19,16 @@ OBJ_DIR = obj
 BIN_DIR = bin
 
 SRCS    = $(wildcard $(SRC_DIR)/*.c)
-OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+# Native libraries built into the binary as modules (json = require("json")
+# with no .so): libs/<name>/<name>.c, its sea_open renamed sea_open_<name>
+EMBED_LIBS = json csv
+OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o) $(EMBED_LIBS:%=$(OBJ_DIR)/lib_%.o)
 TARGET  = $(BIN_DIR)/sea
 
 # Separate JIT-enabled binary (coexists with the plain interpreter bin/sea),
 # built into its own object dir so the two never clobber each other.
 JIT_OBJ_DIR = obj-jit
-JIT_OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(JIT_OBJ_DIR)/%.o)
+JIT_OBJS    = $(SRCS:$(SRC_DIR)/%.c=$(JIT_OBJ_DIR)/%.o) $(EMBED_LIBS:%=$(JIT_OBJ_DIR)/lib_%.o)
 JIT_TARGET  = $(BIN_DIR)/sea-jit
 
 .PHONY: all clean test test-jit test-seac test-build test-dwe test-format test-license install uninstall asan debug noreadline avx2 lib jemalloc test-jemalloc jit sea-jit
@@ -37,6 +40,15 @@ $(TARGET): $(OBJS) | $(BIN_DIR)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# the embedded libraries: obj/lib_<name>.o from libs/<name>/<name>.c
+define EMBED_RULE
+$$(OBJ_DIR)/lib_$(1).o: libs/$(1)/$(1).c | $$(OBJ_DIR)
+	$$(CC) $$(CFLAGS) -I$$(SRC_DIR) -Dsea_open=sea_open_$(1) -MMD -MP -c -o $$@ $$<
+$$(JIT_OBJ_DIR)/lib_$(1).o: libs/$(1)/$(1).c | $$(JIT_OBJ_DIR)
+	$$(CC) $$(CFLAGS) -I$$(SRC_DIR) -DSEA_JIT -Dsea_open=sea_open_$(1) -MMD -MP -c -o $$@ $$<
+endef
+$(foreach l,$(EMBED_LIBS),$(eval $(call EMBED_RULE,$(l))))
 
 -include $(OBJS:.o=.d)
 

@@ -15,7 +15,7 @@
 --
 
 local http = require("../../libs/http/http")
-local json = require("../../libs/json/json")
+local json = require("json")
 
 print("╔══════════════════════════════════════════╗")
 print("║      Webhook Dispatcher em Sea           ║")

@@ -472,7 +472,7 @@ print(geometry.area(3, 4))
   `make install` (`require("json")` works by name with an installed `sea`).
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
-  sort bigint`. `require("sea/parser")`, `require("sea/test")`,
+  sort bigint json csv`. `require("sea/parser")`, `require("sea/test")`,
   `require("sea/check")`, `require("sea/stream")` and `require("sea/flags")`
   are built in too.
 - Doc comments: a comment block at the top of the file documents the
@@ -591,13 +591,14 @@ collector; you rarely need these.
 ## 10. External libraries (`libs/`)
 
 Required by path (relative to the requiring file), or by name
-(`require("json")`) when Sea was installed with `make install`. Native ones
-need a build first: `make -C libs/<name>`.
+(`require("yaml")`) when Sea was installed with `make install`. Native ones
+need a build first: `make -C libs/<name>`. `json` and `csv` are built in.
 
 | Library | Path from the repo root | What |
 |---------|-------------------------|------|
-| `json` | `libs/json/json` | `encode(v[,{indent,sort_keys}])`, `decode(s) → v\|error` |
-| `yaml`, `toml`, `csv`, `xml` | `libs/<name>/<name>` | Parse and write those formats |
+| `json` | built in (global `json`) | `json.encode(v[,{indent,sort_keys}])`, `json.decode(s) → v\|error` |
+| `csv` | built in (global `csv`) | `csv.decode(s[,{header,numbers}]) → rows\|error`, `csv.encode(rows)`, streaming a file row by row |
+| `yaml`, `toml`, `xml` | `libs/<name>/<name>` | Parse and write those formats |
 | `http` | `libs/http/http` | Client (`http.get(url)`, `http.post(url, body, type)`, `resp.status`, `resp.body`, `resp:json()`) and server (`http.serve(port, function(req) return http.json(v) end)`, `http.router()`) |
 | `ssl`, `websocket`, `jwt` | `libs/<name>/<name>` | TLS, WebSockets, JSON Web Tokens |
 | `sqlite`, `duckdb` | `libs/<name>/<name>` | `local db = sqlite.open("app.db")?`, `db:exec(sql, params...)`, `db:query(sql, ...) → rows`, `db:row`, `db:value`, `db:transaction(fn)` |
@@ -714,4 +715,4 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | `sleep(0.1)` (seconds) | `time.sleep(100 * time.Millisecond)` (nanoseconds) |
 | `os.exit(1)`, `sys.exit(1)` | `os.exit(1)` |
 | `io.read("*l")` | `io.read("l")` |
-| `require("json")` / `import json` | `local json = require("../libs/json/json")` (a path) |
+| `import json`, `import csv` | nothing: `json` and `csv` are built in (`json.decode(s)`) |

@@ -9,10 +9,10 @@ pure-Sea libraries work out of the box.
 
 | Library | Path | Kind | Build |
 |---------|------|------|-------|
-| `json` | `libs/json/json` | native `.so` | `make -C libs/json` |
+| `json` | built in: the global `json` (or `require("json")`); also `libs/json/json` | native, compiled into `sea` | — |
 | `yaml` | `libs/yaml/yaml` | native `.so` | `make -C libs/yaml` |
 | `toml` | `libs/toml/toml` | native `.so` | `make -C libs/toml` |
-| `csv` | `libs/csv/csv` | native `.so` | `make -C libs/csv` |
+| `csv` | built in: the global `csv` (or `require("csv")`); also `libs/csv/csv` | native, compiled into `sea` | — |
 | `compress` | `libs/compress/compress` | native `.so` (zlib) | `make -C libs/compress` (needs `zlib1g-dev`) |
 | `xml` | `libs/xml/xml` | native `.so` | `make -C libs/xml` |
 | `console` | `libs/console/console` | native `.so` | `make -C libs/console` |
@@ -43,10 +43,14 @@ instead of a private copy.
 
 ## `json`
 
-JSON (RFC 8259) in C. Build: `make -C libs/json`.
+JSON (RFC 8259) in C, compiled into the `sea` binary: `json` is a global
+(like `string` or `fs`), and `require("json")` returns it. The same code
+also builds as `libs/json/json.so` (`make -C libs/json`) for
+`require("../libs/json/json")`.
 
 ```sea
-local json = require("../libs/json/json")   -- relative to the requiring file
+print(json.encode({ok = true, items = [1, 2]}))   -- {"items":[1,2],"ok":true} (key order may vary)
+local data = json.decode(fs.read("data.json")?)?
 ```
 
 | Function | Signature | Description |
@@ -303,10 +307,11 @@ back, and Python's `tomllib` reads it the same way.
 ## `csv`
 
 CSV (RFC 4180) in C: decode a string, encode rows, or stream a file of any
-size row by row. Build: `make -C libs/csv`.
+size row by row. Compiled into the `sea` binary: `csv` is a global, and
+`require("csv")` returns it (`make -C libs/csv` builds the same code as a
+`.so` for `require("../libs/csv/csv")`).
 
 ```sea
-local csv = require("../libs/csv/csv")   -- relative to the requiring file
 
 for _, r in csv.decode(fs.read("people.csv")?, {header = true, numbers = true})? do
     print(r.name, r.age + 1)
