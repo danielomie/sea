@@ -316,12 +316,14 @@ static SeaValue str_find(SeaVM *vm, int argc, SeaValue *args) {
     const char *s = ss->data;
     size_t slen = ss->len;
     const char *pat = SEA_AS_STRING(args[1])->data;
+    size_t plen = SEA_AS_STRING(args[1])->len;
     int64_t init = 1;
     if (argc >= 3) init = sea_is_int(args[2]) ? sea_as_int(args[2]) : (int64_t)sea_as_number(args[2]);
     if (init < 0) init = (int64_t)slen + init + 1;
     if (init < 1) init = 1;
     if ((size_t)init > slen) { sea_obj_release(&ss->obj); return SEA_NIL_VAL; }
-    const char *found = strstr(s + init - 1, pat);
+    /* bytes, not C strings: either side may hold a zero byte */
+    const char *found = memmem(s + init - 1, slen - (size_t)(init - 1), pat, plen);
     sea_obj_release(&ss->obj);
     if (!found) return SEA_NIL_VAL;
     return sea_int_val((int64_t)(found - s) + 1);
@@ -334,14 +336,15 @@ static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
     SeaString *ss = sea_value_get_flat_string(args[0]);
     if (!ss) return SEA_NIL_VAL;
     const char *s = ss->data;
+    const char *end = s + ss->len;
     const char *sep = SEA_AS_STRING(args[1])->data;
-    size_t seplen = strlen(sep);
+    size_t seplen = SEA_AS_STRING(args[1])->len;
     /* split(s, sep, n): at most n pieces, the last holding the rest */
     int64_t limit = argc >= 3 && sea_is_int(args[2]) && sea_as_int(args[2]) > 0 ? sea_as_int(args[2]) : -1;
 
     SeaArray *arr = sea_array_new(4);
     if (seplen == 0) {
-        while (*s) {
+        while (s < end) {
             SeaValue sv = sea_obj_val(&sea_string_new(s, 1)->obj);
             sea_array_push(arr, sv);  /* array retains */
             sea_obj_release(sea_as_obj(sv));  /* release our rc */
@@ -349,10 +352,11 @@ static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
         }
     } else {
         const char *start = s;
-        while (*start) {
-            const char *found = limit > 0 && (int64_t)arr->len == limit - 1 ? NULL : strstr(start, sep);
+        while (start < end) {
+            const char *found = limit > 0 && (int64_t)arr->len == limit - 1 ? NULL :
+                memmem(start, (size_t)(end - start), sep, seplen);
             if (!found) {
-                SeaValue sv = sea_obj_val(&sea_string_new(start, strlen(start))->obj);
+                SeaValue sv = sea_obj_val(&sea_string_new(start, (size_t)(end - start))->obj);
                 sea_array_push(arr, sv);
                 sea_obj_release(sea_as_obj(sv));
                 break;
@@ -436,7 +440,7 @@ static SeaValue str_contains(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 2 || !sea_is_string(args[1])) return SEA_FALSE_VAL;
     SeaString *ss = sea_value_get_flat_string(args[0]);
     if (!ss) return SEA_FALSE_VAL;
-    bool found = strstr(ss->data, SEA_AS_STRING(args[1])->data) != NULL;
+    bool found = memmem(ss->data, ss->len, SEA_AS_STRING(args[1])->data, SEA_AS_STRING(args[1])->len) != NULL;
     sea_obj_release(&ss->obj);
     return sea_bool_val(found);
 }
@@ -578,7 +582,7 @@ static SeaValue str_replace(SeaVM *vm, int argc, SeaValue *args) {
     const char *p = s;
     const char *end = s + slen;
     while (p < end) {
-        const char *found = strstr(p, old_str);
+        const char *found = memmem(p, (size_t)(end - p), old_str, old_len);
         if (!found) {
             while (p < end) {
                 SEA_DYNARRAY_PUSH(buf, buf_len, buf_cap, char, *p++);

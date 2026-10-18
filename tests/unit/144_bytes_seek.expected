@@ -1,0 +1,6 @@
+3	nil	false	true
+3	true	4
+["a", "b", "", "c"]	["a", "b"]	["abc"]	2
+3	34	5
+10	8	89
+01234XY789	true

@@ -295,6 +295,34 @@ static SeaValue io_flush(SeaVM *vm, int argc, SeaValue *args) {
     return SEA_NIL_VAL;
 }
 
+/* ---- io.seek(handle, offset [, whence]) → position | nil ----------------- */
+/*
+ * whence: "set" (default, from the start), "cur" or "end". With offset 0
+ * and "cur" it tells the position. For random access, open the file with
+ * "r+b" (read and write) or "w+b".
+ */
+static SeaValue io_seek(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    IoFile *h = as_file(args[0]);
+    if (!h || h->tag != TAG_FILE) return SEA_NIL_VAL;
+    int64_t off = 0;
+    if (argc >= 2) {
+        if (sea_is_int(args[1])) off = sea_as_int(args[1]);
+        else if (sea_is_number(args[1])) off = (int64_t)sea_as_number(args[1]);
+    }
+    int whence = SEEK_SET;
+    if (argc >= 3 && sea_is_string(args[2])) {
+        const char *w = SEA_AS_STRING(args[2])->data;
+        if (strcmp(w, "cur") == 0) whence = SEEK_CUR;
+        else if (strcmp(w, "end") == 0) whence = SEEK_END;
+    }
+    if (fseeko(h->fp, (off_t)off, whence) != 0) return SEA_NIL_VAL;
+    off_t pos = ftello(h->fp);
+    if (pos < 0) return SEA_NIL_VAL;
+    return sea_int_val((int64_t)pos);
+}
+
 /* ---- io.scanner(path) → scanner | nil ----------------------------------- */
 /*
  * Opens a file for line-by-line scanning (bufio.Scanner style).
@@ -403,6 +431,7 @@ void sea_lib_io_register(SeaVM *vm) {
     mod_set(vm, mod, "write_string", io_write_string);
     mod_set(vm, mod, "write_line",   io_write_line);
     mod_set(vm, mod, "flush",        io_flush);
+    mod_set(vm, mod, "seek",         io_seek);
     mod_set(vm, mod, "scanner",      io_scanner);
     mod_set(vm, mod, "scan",         io_scan);
     mod_set(vm, mod, "scan_text",    io_scan_text);

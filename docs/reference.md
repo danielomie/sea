@@ -754,7 +754,8 @@ Handles are opaque integer values returned by `io.open` and `io.scanner`. Close 
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `io.open` | `open(path [, mode]) → handle\|nil` | Open a file. `mode`: `"r"` (default), `"w"`, `"a"`, `"rb"`, `"wb"`, `"ab"`. Returns `nil` if the file cannot be opened |
+| `io.open` | `open(path [, mode]) → handle\|nil` | Open a file. `mode`: `"r"` (default), `"w"`, `"a"`, `"rb"`, `"wb"`, `"ab"`, and `"r+b"` / `"w+b"` to read and write (with `io.seek`). Returns `nil` if the file cannot be opened |
+| `io.seek` | `seek(handle, offset [, whence]) → int\|nil` | Move to `offset` from the start (`whence` `"set"`, the default), the current position (`"cur"`) or the end (`"end"`); the new position (`seek(h, 0, "cur")` tells it), `nil` on failure |
 | `io.stdin` | `stdin() → handle\|nil` | A handle on standard input for `read_line` / `read_bytes` / `read_all` (works when stdin is a pipe, file, terminal or socket; closing it leaves stdin open) |
 | `io.close` | `close(handle)` | Close a file or scanner handle and free its resources |
 | `io.read_line` | `read_line(handle) → string\|nil` | Read one line, stripping the trailing newline. Returns `nil` on EOF |

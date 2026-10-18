@@ -1,0 +1,18 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: string functions on bytes with zeros; io.seek and read/write files
+print(string.find("ab\0cd", "\0"), string.find("abc", "\0"), string.contains("abc", "\0"), string.contains("a\0b", "\0b"))
+print(len(string.split("a\0b\0c", "\0")), string.replace("x\0y", "\0", "-") == "x-y", string.find("a\0bc", "c"))
+print(string.split("a,b,,c", ","), string.split("ab", ""), string.split("abc", ",", 2), string.find("abc", "", 2))
+local dir = fs.tempdir("seek-")
+local p = path.join(dir, "f.bin")
+fs.write(p, "0123456789")?
+local h = io.open(p, "r+b")
+print(io.seek(h, 3), io.read_bytes(h, 2), io.seek(h, 0, "cur"))
+io.seek(h, 5)
+io.write_string(h, "XY")
+print(io.seek(h, 0, "end"), io.seek(h, -2, "end"), io.read_bytes(h, 5))
+io.close(h)
+print(fs.read(p)?, io.seek(io.open(p), 99) ~= nil)
+fs.remove(dir, {recursive = true})
