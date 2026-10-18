@@ -9,12 +9,12 @@ without blank and comment lines. Regenerate with
 
 | Script | What it does | Python | Sea | Python time / Sea time | Lines (Py / Sea) | Same output |
 |--------|--------------|--------|-----|------------------------|------------------|-------------|
-| `csv_report` | Sales report from a 300k-row CSV (sums by region, month, product) | 1.49 s | 0.47 s | 3.2× | 27 / 19 | yes |
-| `log_stats` | HTTP access log, 300k lines: regex per line, counters, p95 | 2.22 s | 1.85 s | 1.2× | 37 / 35 | yes |
-| `word_freq` | Word frequencies of a 7 MB text (regex findall, counter) | 0.54 s | 0.44 s | 1.2× | 11 / 8 | yes |
-| `file_tree` | Inventory of 3000 files: walk, stat, totals by extension | 0.09 s | 0.03 s | 2.7× | 21 / 17 | yes |
-| `json_transform` | 19 MB of JSON orders: decode, filter, aggregate, encode | 0.86 s | 0.44 s | 2.0× | 22 / 22 | yes |
-| **total** | | **5.20 s** | **3.24 s** | **1.6×** | | |
+| `csv_report` | Sales report from a 300k-row CSV (sums by region, month, product) | 1.51 s | 0.46 s | 3.3× | 27 / 19 | yes |
+| `log_stats` | HTTP access log, 300k lines: regex per line, counters, p95 | 2.21 s | 1.82 s | 1.2× | 37 / 35 | yes |
+| `word_freq` | Word frequencies of a 7 MB text (regex findall, counter) | 0.54 s | 0.42 s | 1.3× | 11 / 8 | yes |
+| `file_tree` | Inventory of 3000 files: walk, stat, totals by extension | 0.09 s | 0.03 s | 2.8× | 21 / 17 | yes |
+| `json_transform` | 19 MB of JSON orders: decode, filter, aggregate, encode | 0.88 s | 0.45 s | 1.9× | 22 / 22 | yes |
+| **total** | | **5.23 s** | **3.20 s** | **1.6×** | | |
 
 Machine: x86_64, 4 CPUs; Python 3.12.3; sea version 0.2.0.
 

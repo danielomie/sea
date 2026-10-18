@@ -2173,8 +2173,12 @@ static SeaValue re_escape(SeaVM *vm, int argc, SeaValue *args) {
 
 void sea_lib_re_register(SeaVM *vm) {
     if (KEY[0] == 0)
-        for (int k = 0; k < K_COUNT; k++)
-            KEY[k] = sea_obj_val(&sea_string_intern(KEY_NAMES[k], strlen(KEY_NAMES[k]))->obj);   /* kept */
+        for (int k = 0; k < K_COUNT; k++) {
+            /* borrowed: the intern table keeps interned strings until exit */
+            SeaString *key = sea_string_intern(KEY_NAMES[k], strlen(KEY_NAMES[k]));
+            KEY[k] = sea_obj_val(&key->obj);
+            sea_obj_release(&key->obj);
+        }
     SeaTable *mod = sea_table_new(TABLE_MAP);
     mod_set(vm, mod, "compile", re_compile);
     mod_set(vm, mod, "test",    re_test);

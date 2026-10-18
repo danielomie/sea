@@ -15,14 +15,34 @@ SEA_INLINE void arr_val_release(SeaValue v) {
 }
 
 SeaArray* sea_array_new(uint32_t initial_cap) {
-    SeaArray *a = SEA_ALLOC(SeaArray);
+    uint32_t cap = initial_cap < 4 ? 4 : initial_cap;
+    SeaArray *a;
+    if (cap <= SEA_ARRAY_INLINE_MAX) {
+        a = (SeaArray *)sea_malloc(sizeof(SeaArray) + sizeof(SeaValue) * cap);
+        a->data = (SeaValue *)(a + 1);
+    } else {
+        a = SEA_ALLOC(SeaArray);
+        a->data = SEA_ALLOC_N(SeaValue, cap);
+    }
     a->obj.type = OBJ_ARRAY;
     a->obj.gc = 0;
     a->obj.refcount = 1;
     a->len = 0;
-    a->cap = initial_cap < 4 ? 4 : initial_cap;
-    a->data = SEA_ALLOC_N(SeaValue, a->cap);
+    a->cap = cap;
     return a;
+}
+
+/* double the capacity (inline elements move to a buffer of their own) */
+static void array_grow(SeaArray *a) {
+    uint32_t new_cap = a->cap * 2;
+    if (SEA_ARRAY_IS_INLINE(a)) {
+        SeaValue *d = SEA_ALLOC_N(SeaValue, new_cap);
+        memcpy(d, a->data, sizeof(SeaValue) * a->len);
+        a->data = d;
+    } else {
+        a->data = SEA_REALLOC_N(a->data, SeaValue, a->cap, new_cap);
+    }
+    a->cap = new_cap;
 }
 
 void sea_array_init_header(SeaArray *a, uint32_t initial_cap) {
@@ -35,11 +55,7 @@ void sea_array_init_header(SeaArray *a, uint32_t initial_cap) {
 }
 
 void sea_array_push(SeaArray *a, SeaValue v) {
-    if (a->len >= a->cap) {
-        uint32_t new_cap = a->cap * 2;
-        a->data = SEA_REALLOC_N(a->data, SeaValue, a->cap, new_cap);
-        a->cap = new_cap;
-    }
+    if (a->len >= a->cap) array_grow(a);
     sea_store_barrier(&a->obj, v);
     arr_val_retain(v);
     a->data[a->len++] = v;
@@ -47,11 +63,7 @@ void sea_array_push(SeaArray *a, SeaValue v) {
 
 /* Append, taking over the caller's reference to v (no retain). */
 void sea_array_push_move(SeaArray *a, SeaValue v) {
-    if (a->len >= a->cap) {
-        uint32_t new_cap = a->cap * 2;
-        a->data = SEA_REALLOC_N(a->data, SeaValue, a->cap, new_cap);
-        a->cap = new_cap;
-    }
+    if (a->len >= a->cap) array_grow(a);
     sea_store_barrier(&a->obj, v);
     a->data[a->len++] = v;
 }
@@ -100,7 +112,7 @@ void sea_array_destroy(SeaArray *a) {
         for (uint32_t i = 0; i < a->len; i++) {
             arr_val_release(a->data[i]);
         }
-        sea_free(a->data, sizeof(SeaValue) * a->cap);
+        if (!SEA_ARRAY_IS_INLINE(a)) sea_free(a->data, sizeof(SeaValue) * a->cap);
         a->data = NULL;
     }
     a->len = 0;

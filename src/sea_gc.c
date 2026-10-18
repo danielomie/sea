@@ -85,10 +85,26 @@ void sea_gc_possible_root(SeaObject *o) {
                                    the collector is off (SEA_GC=0) */
     if (!gc_may_cycle(o)) return;
     if (vm->gc_nroots == vm->gc_cap) {
-        uint32_t nc = vm->gc_cap ? vm->gc_cap * 2 : 1024;
-        vm->gc_roots = (SeaObject**)sea_realloc(vm->gc_roots,
-            sizeof(SeaObject*) * vm->gc_cap, sizeof(SeaObject*) * nc);
-        vm->gc_cap = nc;
+        /* Full: first drop the slots of candidates freed since (a native
+         * looping over sea_vm_call, like csv.each, reaches no safe point, so
+         * no collection empties the buffer). Without this the buffer grows
+         * past the 16-bit gc_idx, and candidates that die there cannot be
+         * unbuffered: their headers wait for the next collection. A
+         * collection takes the buffer, so this never runs under one. */
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < vm->gc_nroots; i++) {
+            SeaObject *r = vm->gc_roots[i];
+            if (!r) continue;
+            r->gc_idx = k < SEA_GC_NO_IDX ? (uint16_t)k : (uint16_t)SEA_GC_NO_IDX;
+            vm->gc_roots[k++] = r;
+        }
+        vm->gc_nroots = k;
+        if (k * 2 > vm->gc_cap || vm->gc_cap == 0) {   /* still more than half live: grow */
+            uint32_t nc = vm->gc_cap ? vm->gc_cap * 2 : 1024;
+            vm->gc_roots = (SeaObject**)sea_realloc(vm->gc_roots,
+                sizeof(SeaObject*) * vm->gc_cap, sizeof(SeaObject*) * nc);
+            vm->gc_cap = nc;
+        }
     }
     if (!vm->gc_threshold) {
         gc_config();
@@ -238,7 +254,7 @@ static void gc_free_white(SeaObject *o) {
     switch (o->type) {
     case OBJ_ARRAY: {
         SeaArray *a = (SeaArray*)o;
-        if (a->data) sea_free(a->data, sizeof(SeaValue) * a->cap);
+        if (a->data && !SEA_ARRAY_IS_INLINE(a)) sea_free(a->data, sizeof(SeaValue) * a->cap);
         a->data = NULL;
         break;
     }

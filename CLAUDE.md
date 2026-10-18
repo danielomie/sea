@@ -76,6 +76,8 @@ Objects are **reference-counted**, plus a **cycle collector** for reference cycl
 - `is_scalar` facts (numbers, bools, nil, pinned string constants) let the compiler skip RC entirely. They are tracked with the same sound dataflow as `is_int`.
 - **Cycles:** a release that leaves a container (array/table/map/struct/closure/upvalue/error) with a non-zero count buffers it as a possible root, in the running goroutine's VM. At safe points (allocations, returns, JIT helpers, goroutine end, `gc.collect()`), the collector frees what only internal references keep alive (Bacon–Rajan trial deletion). It handles only objects that are not shared; `SeaObject.gc` and `gc_idx` hold its flags. Any VM code that frees objects outside a safe point must not hold borrowed pointers across a collection.
 - **Storing into a shared container marks the value shared** (`sea_store_barrier`), so "not shared" really means "seen by one goroutine".
+- **Small arrays are one allocation:** `sea_array_new` with a capacity up to `SEA_ARRAY_INLINE_MAX` (8) puts the elements right after the header (`SEA_ARRAY_IS_INLINE(a)`); growing moves them to their own buffer. Code that frees or reallocates `a->data` must check it (`sea_array.c`, `gc_free_white`).
+- **The cycle collector's root buffer is compacted when full** (freed candidates leave NULL slots): a native looping over `sea_vm_call` (`csv.each`) reaches no safe point, and past 65535 slots (`gc_idx` is 16 bits) dying candidates would linger until the next collection.
 
 **Native C functions** (`sea_obj_val(&x->obj)` makes a `SeaValue` *without* changing RC):
 - Arguments are **borrowed**: never release them.

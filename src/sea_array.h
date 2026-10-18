@@ -19,6 +19,13 @@ struct SeaArray {
     SeaValue  *data;
 };
 
+/* A small array (sea_array_new with a capacity up to SEA_ARRAY_INLINE_MAX)
+ * keeps its elements in the same allocation, right after the header: one
+ * malloc instead of two. Growing moves them to a buffer of their own. Code
+ * that frees or reallocates `data` must check this first. */
+#define SEA_ARRAY_INLINE_MAX 8
+#define SEA_ARRAY_IS_INLINE(a) ((a)->data == (SeaValue *)((a) + 1))
+
 // Create a new array with optional initial capacity
 SeaArray* sea_array_new(uint32_t initial_cap);
 
