@@ -22,3 +22,13 @@ bad keys	true
 panic	five!	3 1 2 5 4
 5000 by key, stable	true
 5000 with a comparator	true
+["ana", "caio", "bia", "bob"]
+["bob", "bia", "caio", "ana"]
+[ ["y", 5], ["w", 2], ["x", 2] ]
+[ ["y", 5], ["x", 2], ["w", 2] ]
+[ ["x", 2], ["w", 2], ["y", 5] ]
+sort.by: cannot compare a number key with a string key
+sort.by: a int has no fields
+sort.by: the keys mix arrays and single values
+sort.by: field 0 of the key is a int, not a name
+sort.by: the list of field names is empty

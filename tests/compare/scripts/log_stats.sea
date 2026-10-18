@@ -13,17 +13,6 @@ local times = []
 local total_bytes = 0
 local bad = 0
 
-local function count(m, k)
-    m[k] = (m[k] or 0) + 1
-end
-
--- the keys of a counter, most frequent first (ties by key)
-local function by_count(m)
-    local items = list.items(m)
-    sort.sort(items, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[0] < b[0]) end)
-    return items
-end
-
 local sc = stream.scanner(stream.open(os.args[1])?)
 while sc:scan() do
     local m = LINE:match(sc:text())
@@ -31,10 +20,10 @@ while sc:scan() do
         bad += 1
     else
         local g = m.groups
-        count(statuses, g[5])
-        count(ips, g[1])
-        count(paths, re.gsub("/\\d+", g[4], "/:id"))
-        count(hours, g[2])
+        list.inc(statuses, g[5])
+        list.inc(ips, g[1])
+        list.inc(paths, re.gsub("/\\d+", g[4], "/:id"))
+        list.inc(hours, g[2])
         total_bytes += tonumber(g[6])
         times[] = tonumber(g[7])
     end
@@ -48,7 +37,7 @@ printf("p95: %.3f s, mean: %.4f s\n", p95, list.mean(times))
 print("status:")
 for _, s in list.keys(statuses) do print(`  ${s} ${statuses[s]}`) end
 print("top clients:")
-for _, kv in list.slice(by_count(ips), 0, 5) do print(`  ${kv[0]} ${kv[1]}`) end
+for _, kv in list.most_common(ips, 5) do print(`  ${kv[0]} ${kv[1]}`) end
 print("paths:")
-for _, kv in by_count(paths) do print(`  ${kv[0]} ${kv[1]}`) end
-print(`busiest hour: ${by_count(hours)[0][0]}`)
+for _, kv in list.most_common(paths) do print(`  ${kv[0]} ${kv[1]}`) end
+print(`busiest hour: ${list.most_common(hours, 1)[0][0]}`)

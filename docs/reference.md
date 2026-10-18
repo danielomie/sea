@@ -1131,11 +1131,19 @@ print(list.group_by(people, function(p) return p.age > 30 and "senior" or "junio
 | `list.zip` | `zip(a, b, ...) → array` | `[[a[0], b[0]], [a[1], b[1]], ...]`, as long as the shortest |
 | `list.group_by` | `group_by(a, fn) → map` | `fn(v, i)` → the array of elements with that key |
 | `list.count_by` | `count_by(a, fn) → map` | `fn(v, i)` → how many elements have that key (like Python's `Counter`) |
+| `list.inc` | `inc(m, k [, n]) → number` | Counter update: `m[k] = (m[k] or 0) + n` (`n` defaults to 1) on a table, map or struct (a struct only for a field it has); returns the new value. Changes `m` |
+| `list.most_common` | `most_common(m [, n]) → array` | `[[key, count], ...]` of a table, map or struct of numbers: largest count first, ties by key; only the first `n` when given (Python's `Counter.most_common`) |
 | `list.keys`, `list.values` | `keys(t) → array` | The keys / values of a table or map (sorted by key: numbers, then strings), a struct (its literal's order) or an array (indexes) |
 | `list.items` | `items(t) → array` | `[[key, value], ...]` in the same order |
 
 A panic or runtime error in a callback stops the function and goes on as
 any panic.
+
+```sea
+local words = [=]
+for _, w in string.split("a b a c b a", " ") do list.inc(words, w) end
+print(list.most_common(words, 2))               -- [ ["a", 3], ["b", 2] ]
+```
 
 ---
 
@@ -1149,7 +1157,7 @@ equal elements keep their order.
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `sort.sort` | `sort(a [, less]) → a` | Sort in place. `less(x, y)` returns true when `x` goes before `y` |
-| `sort.by` | `by(a, key [, reverse]) → a` | Sort in place by a key: a function (called once per element) or a field name of tables/structs/maps; keys compare in the natural order |
+| `sort.by` | `by(a, key [, reverse]) → a` | Sort in place by a key: a function (called once per element), a field name of tables/structs/maps, or an array of field names (`"-name"`: that field descending). Keys compare in the natural order; a key that is an array (from a field list, or returned by the function) compares element by element, like a Python tuple |
 | `sort.sorted` | `sorted(a [, less]) → array` | A sorted copy (same kind of array); `a` is untouched |
 | `sort.reverse` | `reverse(a) → a` | Reverse in place |
 | `sort.is_sorted` | `is_sorted(a [, less]) → bool` | Whether `a` is already in order |
@@ -1162,6 +1170,8 @@ scores[] = {name = "ana", points = 7}
 scores[] = {name = "bia", points = 9}
 scores[] = {name = "caio", points = 7}
 sort.by(scores, "points", true)                 -- bia 9, ana 7, caio 7 (stable)
+sort.by(scores, ["-points", "name"])            -- bia 9, ana 7, caio 7
+sort.by(scores, function(s) return [-s.points, s.name] end)   -- the same
 
 local words = string.split("pear apple fig", " ")
 sort.sort(words, function(a, b) return len(a) < len(b) end)   -- fig pear apple

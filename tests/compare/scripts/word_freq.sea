@@ -5,11 +5,9 @@
 local counts = [=]
 local text = fs.read(os.args[1])?
 for _, word in re.findall("[a-z]+", string.lower(text)) do
-    counts[word] = (counts[word] or 0) + 1
+    list.inc(counts, word)
 end
 
 local total = list.sum(list.values(counts))
 print(`words: ${total}, distinct: ${len(counts)}`)
-local top = list.items(counts)
-sort.sort(top, function(a, b) return a[1] > b[1] or (a[1] == b[1] and a[0] < b[0]) end)
-for _, kv in list.slice(top, 0, 20) do printf("%-12s %7d %6.2f%%\n", kv[0], kv[1], 100 * kv[1] / total) end
+for _, kv in list.most_common(counts, 20) do printf("%-12s %7d %6.2f%%\n", kv[0], kv[1], 100 * kv[1] / total) end

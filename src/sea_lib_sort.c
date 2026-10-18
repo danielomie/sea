@@ -7,7 +7,8 @@
  * The `sort` module: sorting and binary search on arrays.
  *
  *   sort.sort(a [, less])          sort in place, stable
- *   sort.by(a, key [, reverse])    sort in place by key (function or field name), stable
+ *   sort.by(a, key [, reverse])    sort in place by key (function, field name or
+ *                                  list of field names; array keys compare in order), stable
  *   sort.sorted(a [, less])        a sorted copy
  *   sort.reverse(a)                reverse in place
  *   sort.is_sorted(a [, less])     bool
@@ -119,8 +120,23 @@ typedef struct {
     SeaValue        less;     /* M_CALL */
     const SeaValue *keys;     /* M_KEYS: elements are int indexes into keys */
     bool            reverse;  /* M_KEYS */
+    const bool     *desc;     /* M_KEYS with array keys: column j descending (or NULL) */
+    size_t          ndesc;
     bool            failed;   /* a panic escaped the comparator */
 } Cmp;
+
+/* two sort.by keys: scalars in the natural order, arrays element by element
+ * (a shorter array that is a prefix comes first) */
+static int key_cmp(const Cmp *c, SeaValue a, SeaValue b) {
+    if (!sea_is_array(a)) return natural(a, b);
+    SeaArray *x = SEA_AS_ARRAY(a), *y = SEA_AS_ARRAY(b);
+    uint32_t n = x->len < y->len ? x->len : y->len;
+    for (uint32_t j = 0; j < n; j++) {
+        int r = natural(x->data[j], y->data[j]);
+        if (r != 0) return j < c->ndesc && c->desc[j] ? -r : r;
+    }
+    return x->len < y->len ? -1 : x->len > y->len;
+}
 
 static bool lt(Cmp *c, SeaValue a, SeaValue b) {
     switch (c->mode) {
@@ -128,7 +144,8 @@ static bool lt(Cmp *c, SeaValue a, SeaValue b) {
         case M_DESC: return natural(b, a) < 0;
         case M_KEYS: {
             SeaValue ka = c->keys[sea_as_int(a)], kb = c->keys[sea_as_int(b)];
-            return c->reverse ? natural(kb, ka) < 0 : natural(ka, kb) < 0;
+            int r = key_cmp(c, ka, kb);
+            return c->reverse ? r > 0 : r < 0;
         }
         default: {
             if (c->failed) return false;
@@ -328,17 +345,76 @@ static SeaValue field(SeaVM *vm, SeaValue v, SeaValue name) {
     sea_vm_error_noreturn(vm, "sort.by: a %s has no fields", sea_type_name(v));
 }
 
+/* the kinds of sort.by keys agree: all scalars of one kind, or all arrays
+ * whose elements at each position share a kind. 0, or -1 (not a number or
+ * string), -2 (a number against a string), -3 (arrays mixed with scalars) */
+static int check_keys(const SeaValue *keys, size_t n) {
+    bool arrays = sea_is_array(keys[0]);
+    int k0 = K_OTHER;
+    int *col = NULL;
+    size_t ncol = 0;
+    int bad = 0;
+    for (size_t i = 0; i < n && !bad; i++) {
+        if (sea_is_array(keys[i]) != arrays) { bad = -3; break; }
+        if (!arrays) {
+            int ki = kind(keys[i]);
+            if (ki == K_OTHER) bad = -1;
+            else if (k0 == K_OTHER) k0 = ki;
+            else if (ki != k0) bad = -2;
+            continue;
+        }
+        SeaArray *a = SEA_AS_ARRAY(keys[i]);
+        if (a->len > ncol) {
+            col = (int *)realloc(col, sizeof(int) * a->len);
+            for (size_t j = ncol; j < a->len; j++) col[j] = K_OTHER;
+            ncol = a->len;
+        }
+        for (uint32_t j = 0; j < a->len && !bad; j++) {
+            int kj = kind(a->data[j]);
+            if (kj == K_OTHER) bad = -1;
+            else if (col[j] == K_OTHER) col[j] = kj;
+            else if (kj != col[j]) bad = -2;
+        }
+    }
+    free(col);
+    return bad;
+}
+
 /* sort.by(a, key [, reverse]) → a: key is a function (called once per
- * element) or a field name; the keys are compared in the natural order */
+ * element), a field name, or an array of field names ("-name": that field
+ * descending). The keys are compared in the natural order; a key function
+ * may return an array, compared element by element like a Python tuple. */
 static SeaValue sort_by(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !sea_is_array(args[0]))
         sea_vm_error_noreturn(vm, "sort.by: expected an array, got %s", argc < 1 ? "nothing" : sea_type_name(args[0]));
-    if (argc < 2 || (!sea_obj_is_type(args[1], OBJ_CLOSURE) && !sea_is_string(args[1])))
-        sea_vm_error_noreturn(vm, "sort.by: the key must be a function or a field name");
+    if (argc < 2 || (!sea_obj_is_type(args[1], OBJ_CLOSURE) && !sea_is_string(args[1]) && !sea_is_array(args[1])))
+        sea_vm_error_noreturn(vm, "sort.by: the key must be a function, a field name or an array of field names");
     SeaArray *arr = SEA_AS_ARRAY(args[0]);
     size_t n = arr->len;
     bool reverse = argc > 2 && sea_is_truthy(args[2]);
+
+    /* an array of field names: the names (without "-") and which descend */
+    SeaArray *names = sea_is_array(args[1]) ? SEA_AS_ARRAY(args[1]) : NULL;
+    SeaValue *fields = NULL;
+    bool *desc = NULL;
+    size_t nf = 0;
+    if (names) {
+        nf = names->len;
+        if (nf == 0) sea_vm_error_noreturn(vm, "sort.by: the list of field names is empty");
+        for (size_t j = 0; j < nf; j++)
+            if (!sea_is_string(names->data[j]))
+                sea_vm_error_noreturn(vm, "sort.by: field %zu of the key is a %s, not a name", j, sea_type_name(names->data[j]));
+    }
     if (n < 2) return sea_val_ref(args[0]);
+    if (names) {
+        fields = (SeaValue *)malloc(sizeof(SeaValue) * nf);
+        desc = (bool *)malloc(sizeof(bool) * nf);
+        for (size_t j = 0; j < nf; j++) {
+            SeaString *name = SEA_AS_STRING(names->data[j]);
+            desc[j] = name->len > 1 && name->data[0] == '-';
+            fields[j] = desc[j] ? sea_obj_val(&sea_string_new(name->data + 1, name->len - 1)->obj) : sea_val_ref(names->data[j]);
+        }
+    }
 
     SeaValue *orig = (SeaValue *)malloc(sizeof(SeaValue) * n);
     SeaValue *keys = (SeaValue *)calloc(n, sizeof(SeaValue));
@@ -346,6 +422,7 @@ static SeaValue sort_by(SeaVM *vm, int argc, SeaValue *args) {
     for (size_t i = 0; i < n; i++) if (sea_is_obj(orig[i])) sea_obj_retain(sea_as_obj(orig[i]));
     bool is_fn = sea_obj_is_type(args[1], OBJ_CLOSURE);
     size_t got = 0;
+    const char *nofields = NULL;
     for (; got < n; got++) {
         SeaValue k;
         if (is_fn) {
@@ -355,28 +432,28 @@ static SeaValue sort_by(SeaVM *vm, int argc, SeaValue *args) {
                 break;
             }
         } else {
-            k = sea_val_ref(field(vm, orig[got], args[1]));
+            SeaValue e = orig[got];
+            if (!sea_is_table(e) && !sea_is_map(e) && !sea_is_struct(e)) {
+                nofields = sea_type_name(e);
+                break;
+            }
+            if (names) {
+                SeaArray *t = sea_array_new((uint32_t)nf);
+                for (size_t j = 0; j < nf; j++) sea_array_push(t, field(vm, e, fields[j]));
+                k = sea_obj_val(&t->obj);
+            } else {
+                k = sea_val_ref(field(vm, e, args[1]));
+            }
         }
         keys[got] = k;
     }
     bool failed = got < n;
-    int bad = K_OTHER;
-    if (!failed) {
-        /* the keys must be comparable (checked here, so that an error does
-         * not jump past the cleanup) */
-        int k0 = K_OTHER;
-        for (size_t i = 0; i < n && bad == K_OTHER; i++) {
-            int ki = kind(keys[i]);
-            if (ki == K_OTHER) bad = -1;
-            else if (k0 == K_OTHER) k0 = ki;
-            else if (ki != k0) bad = -2;
-        }
-    }
+    int bad = failed ? 0 : check_keys(keys, n);   /* checked here, so that an error does not jump past the cleanup */
     bool same = false;
-    if (!failed && bad == K_OTHER) {
+    if (!failed && bad == 0) {
         SeaValue *idx = (SeaValue *)malloc(sizeof(SeaValue) * n);
         for (size_t i = 0; i < n; i++) idx[i] = sea_int_val((int64_t)i);
-        Cmp c = { .vm = vm, .mode = M_KEYS, .keys = keys, .reverse = reverse };
+        Cmp c = { .vm = vm, .mode = M_KEYS, .keys = keys, .reverse = reverse, .desc = desc, .ndesc = nf };
         merge_sort(&c, idx, n);
         same = arr->len == n && memcmp(orig, arr->data, sizeof(SeaValue) * n) == 0;
         if (same)
@@ -385,11 +462,16 @@ static SeaValue sort_by(SeaVM *vm, int argc, SeaValue *args) {
     }
     for (size_t i = 0; i < got; i++) if (sea_is_obj(keys[i])) sea_obj_release(sea_as_obj(keys[i]));
     for (size_t i = 0; i < n; i++) if (sea_is_obj(orig[i])) sea_obj_release(sea_as_obj(orig[i]));
+    for (size_t j = 0; j < nf; j++) sea_obj_release(sea_as_obj(fields[j]));
+    free(fields);
+    free(desc);
     free(keys);
     free(orig);
+    if (nofields) sea_vm_error_noreturn(vm, "sort.by: a %s has no fields", nofields);
     if (failed) return SEA_NIL_VAL;
     if (bad == -1) sea_vm_error_noreturn(vm, "sort.by: the keys must be numbers or strings");
     if (bad == -2) sea_vm_error_noreturn(vm, "sort.by: cannot compare a number key with a string key");
+    if (bad == -3) sea_vm_error_noreturn(vm, "sort.by: the keys mix arrays and single values");
     if (!same) sea_vm_error_noreturn(vm, "sort.by: the array was changed by the key function");
     return sea_val_ref(args[0]);
 }

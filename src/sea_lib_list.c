@@ -9,7 +9,7 @@
  * what Python's built-ins and list comprehensions do: map, filter, reduce,
  * sum, min, max, find, index, contains, any, all, count, unique, slice,
  * concat, flatten, reversed, chunk, zip, range, group_by, count_by, keys,
- * values, copy.
+ * values, copy — and counters: inc, most_common.
  *
  * Functions return new arrays and never change their input. Callbacks get
  * (value, index) — a Sea function may take just the value. A panic in a
@@ -668,6 +668,91 @@ static SeaValue pairs_of(SeaVM *vm, const char *name, SeaValue v, int which) {
     return arr_val(out);
 }
 
+/* list.inc(m, k [, n]) → the new count: m[k] = (m[k] or 0) + n (n = 1),
+ * for a table, map or struct used as a counter */
+static SeaValue list_inc(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 2) sea_vm_error_noreturn(vm, "list.inc: expected a table or map and a key");
+    SeaValue m = args[0], k = args[1];
+    SeaValue by = argc > 2 ? args[2] : sea_int_val(1);
+    if (!sea_is_int(by) && !sea_is_number(by))
+        sea_vm_error_noreturn(vm, "list.inc: the amount must be a number, got %s", sea_type_name(by));
+    if (sea_is_nil(k)) sea_vm_error_noreturn(vm, "list.inc: the key is nil");
+    SeaValue cur = SEA_NIL_VAL;
+    bool have;
+    if (sea_obj_is_type(m, OBJ_TABLE)) have = sea_table_get((SeaTable*)sea_as_obj(m), k, &cur);
+    else if (sea_obj_is_type(m, OBJ_MAP)) have = sea_map_get((SeaMap*)sea_as_obj(m), k, &cur);
+    else if (sea_obj_is_type(m, OBJ_STRUCT) && sea_is_string(k)) {
+        /* a struct ({a = 0, b = 0}) has a fixed set of fields */
+        cur = sea_struct_get((SeaStruct*)sea_as_obj(m), SEA_AS_STRING(k));
+        have = true;
+        if (sea_is_nil(cur))
+            sea_vm_error_noreturn(vm, "list.inc: the struct has no field '%s'", SEA_AS_STRING(k)->data);
+    }
+    else sea_vm_error_noreturn(vm, "list.inc: expected a table, map or struct, got %s", sea_type_name(m));
+    if (!have || sea_is_nil(cur)) cur = sea_int_val(0);
+    SeaValue r;
+    if (sea_is_int(cur) && sea_is_int(by)) {
+        int64_t x = sea_as_int(cur) + sea_as_int(by);
+        r = x >= -140737488355327LL && x <= 140737488355327LL ? sea_int_val(x) : sea_number_val((double)x);
+    } else if (sea_is_int(cur) || sea_is_number(cur)) {
+        double x = sea_is_int(cur) ? (double)sea_as_int(cur) : sea_as_number(cur);
+        r = sea_number_val(x + (sea_is_int(by) ? (double)sea_as_int(by) : sea_as_number(by)));
+    } else {
+        sea_vm_error_noreturn(vm, "list.inc: the value of that key is a %s, not a number", sea_type_name(cur));
+    }
+    if (sea_obj_is_type(m, OBJ_TABLE)) sea_table_set((SeaTable*)sea_as_obj(m), k, r);
+    else if (sea_obj_is_type(m, OBJ_MAP)) sea_map_set((SeaMap*)sea_as_obj(m), k, r);
+    else sea_struct_set((SeaStruct*)sea_as_obj(m), SEA_AS_STRING(k), r);
+    return r;
+}
+
+static int count_cmp(const void *pa, const void *pb) {
+    SeaValue a = ((const SeaValue*)pa)[1], b = ((const SeaValue*)pb)[1];
+    bool ok;
+    int c = sea_sort_natural(b, a, &ok);      /* larger counts first */
+    return c != 0 ? c : pair_cmp(pa, pb);     /* then by key */
+}
+
+/* list.most_common(m [, n]) → [[key, count], ...]: the entries of a counter
+ * (a table, map or struct of numbers), largest count first, ties by key; the first
+ * n only when n is given (Python's Counter.most_common) */
+static SeaValue list_most_common(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || (!sea_obj_is_type(args[0], OBJ_TABLE) && !sea_obj_is_type(args[0], OBJ_MAP) && !sea_obj_is_type(args[0], OBJ_STRUCT)))
+        sea_vm_error_noreturn(vm, "list.most_common: expected a table, map or struct, got %s", argc < 1 ? "nothing" : sea_type_name(args[0]));
+    int64_t limit = -1;
+    if (argc > 1 && !sea_is_nil(args[1])) {
+        if (!sea_is_int(args[1]) || sea_as_int(args[1]) < 0)
+            sea_vm_error_noreturn(vm, "list.most_common: n must be an int >= 0");
+        limit = sea_as_int(args[1]);
+    }
+    SeaValue m = args[0], key, val;
+    int t = sea_obj_is_type(m, OBJ_TABLE) ? 0 : sea_obj_is_type(m, OBJ_MAP) ? 1 : 2;
+    uint32_t n = t == 0 ? ((SeaTable*)sea_as_obj(m))->count : t == 1 ? sea_map_count((SeaMap*)sea_as_obj(m))
+                        : ((SeaStruct*)sea_as_obj(m))->field_count;
+    SeaValue *pairs = (SeaValue*)malloc(sizeof(SeaValue) * 2 * (n ? n : 1));
+    uint32_t k = 0, iter = 0;
+    while (k < n && (t == 0 ? sea_table_next((SeaTable*)sea_as_obj(m), &iter, &key, &val)
+                     : t == 1 ? sea_map_next((SeaMap*)sea_as_obj(m), &iter, &key, &val)
+                     : sea_struct_next((SeaStruct*)sea_as_obj(m), &iter, &key, &val))) {
+        if (!sea_is_int(val) && !sea_is_number(val)) {
+            free(pairs);
+            sea_vm_error_noreturn(vm, "list.most_common: the value of a key is a %s, not a number", sea_type_name(val));
+        }
+        pairs[2 * k] = key; pairs[2 * k + 1] = val; k++;
+    }
+    qsort(pairs, k, 2 * sizeof(SeaValue), count_cmp);
+    uint32_t take = limit >= 0 && (uint64_t)limit < k ? (uint32_t)limit : k;
+    SeaArray *out = sea_array_new(take);
+    for (uint32_t i = 0; i < take; i++) {
+        SeaArray *p = sea_array_new(2);
+        sea_array_push(p, pairs[2 * i]);
+        sea_array_push(p, pairs[2 * i + 1]);
+        sea_array_push_move(out, arr_val(p));
+    }
+    free(pairs);
+    return arr_val(out);
+}
+
 /* list.keys(t) → the keys (sorted for tables and maps; a struct's in order) */
 static SeaValue list_keys(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1) sea_vm_error_noreturn(vm, "list.keys: expected a table, map or struct");
@@ -714,6 +799,8 @@ void sea_lib_list_register(SeaVM *vm) {
     mod_set(vm, mod, "zip",      list_zip);
     mod_set(vm, mod, "group_by", list_group_by);
     mod_set(vm, mod, "count_by", list_count_by);
+    mod_set(vm, mod, "inc",      list_inc);
+    mod_set(vm, mod, "most_common", list_most_common);
     mod_set(vm, mod, "keys",     list_keys);
     mod_set(vm, mod, "values",   list_values);
     mod_set(vm, mod, "items",    list_items);

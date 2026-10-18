@@ -21,7 +21,7 @@ for _, o in orders do
 end
 
 local top = list.values(per_customer)
-sort.sort(top, function(a, b) return a.total > b.total or (a.total == b.total and a.customer < b.customer) end)
+sort.by(top, ["-total", "customer"])
 top = list.slice(top, 0, 10)
 for _, c in top do c.total = math.round(c.total * 100) / 100 end
 fs.write(os.args[2], json.encode(top, {indent = 2, sort_keys = true}))?

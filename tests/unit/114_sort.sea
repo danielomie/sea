@@ -138,3 +138,27 @@ local nums = []
 for i = 1, 5000 do nums[] = big[i - 1].k * 1000 + big[i - 1].i end
 sort.sort(nums, function(x, y) return x > y end)
 print("5000 with a comparator", sort.is_sorted(nums, sort.desc))
+
+-- several keys: an array of field names ("-name" descends), or a key
+-- function returning an array (compared like a Python tuple)
+local ppl = [{name = "ana", age = 31}, {name = "bob", age = 25}, {name = "caio", age = 31}, {name = "bia", age = 25}]
+sort.by(ppl, ["-age", "name"])
+print(list.map(ppl, function(p) return p.name end))
+sort.by(ppl, ["age", "-name"])
+print(list.map(ppl, function(p) return p.name end))
+local kv = list.items({x = 2, y = 5, w = 2})
+sort.by(kv, function(e) return [-e[1], e[0]] end)
+print(kv)
+sort.by(kv, function(e) return [e[1], e[0]] end, true)
+print(kv)
+sort.by(kv, function(e) return e[1] == 2 and [2] or [2, "a"] end)
+print(kv)
+local function msg(f)
+    local s = tostring(try(f))
+    return string.sub(s, string.find(s, "sort.by:"), -2)
+end
+print(msg(function() sort.by([{a = 1}, {a = "x"}], ["a"]) end))
+print(msg(function() sort.by([1, 2], ["a"]) end))
+print(msg(function() sort.by([1, 2], function(x) return x == 1 and [1] or 2 end) end))
+print(msg(function() sort.by([1, 2], [5]) end))
+print(msg(function() sort.by([1, 2], []) end))

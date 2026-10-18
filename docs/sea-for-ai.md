@@ -588,9 +588,13 @@ contains(a,x) any(a,fn) all(a,fn) count(a,fn|x) sum(a[,fn]) min(a[,fn])
 max(a[,fn]) mean(a) median(a) stdev(a) range(n) range(from,to[,step])` (to **inclusive**)
 `unique(a) slice(a,from[,to])` (to **exclusive**) `concat(a,b,...) flatten
 reversed copy chunk(a,n) zip(a,b,...) group_by(a,fn) count_by(a,fn)` (→ maps)
-`keys(t) values(t) items(t)` (tables/maps sorted by key).
+`keys(t) values(t) items(t)` (tables/maps sorted by key); counters:
+`inc(m,k[,n])` (`m[k] = (m[k] or 0) + n`), `most_common(m[,n])` (→
+`[[k, count], ...]`, largest first, ties by key).
 
-**sort**: `sort(a[,less])` (stable, in place), `by(a,key_or_field[,reverse])`,
+**sort**: `sort(a[,less])` (stable, in place), `by(a,key[,reverse])` (key: function,
+field name, or fields `["-total", "name"]`; a key function may return an array
+`[-x.n, x.name]`, compared like a tuple),
 `sorted(a[,less]) → copy`, `reverse(a)`, `is_sorted`, `search(a,x)`,
 `asc`, `desc`.
 
@@ -726,6 +730,8 @@ More programs: [`examples/`](../examples/) (each directory has a runnable
 | `s:gsub(pattern, r)`, `re.sub` | `re.gsub(pattern, s, r)` (subject second) |
 | `s:find("x", 1, true)` | `string.find(s, "x")` |
 | `[x * 2 for x in a]`, `a.map(f)`, `sum(a)`, `max(a, key=f)`, `Counter(a)` | `list.map(a, function(x) return x * 2 end)`, `list.sum(a)`, `list.max(a, f)`, `list.count_by(a, f)` |
+| `c[k] += 1` (defaultdict/Counter), `c.most_common(5)` | `list.inc(c, k)`, `list.most_common(c, 5)` |
+| `sorted(a, key=lambda x: (-x.n, x.name))` | `sort.by(a, ["-n", "name"])` (in place) or `sort.by(a, function(x) return [-x.n, x.name] end)` |
 | `d.keys()`, `d.items()`, `a[1:3]`, `range(n)` | `list.keys(d)`, `list.items(d)`, `list.slice(a, 1, 3)`, `list.range(n)` |
 | `pcall(f)`, `try/except`, `try/catch` | error values + `?`, or `defer` + `recover()` |
 | `error("x")` (Lua throws) | `panic("x")`; `error("x")` only *creates* an error value |
