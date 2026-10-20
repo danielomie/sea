@@ -1,0 +1,17 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- a long a .. b .. c chain (it used to run out of registers at ~125 operands)
+local parts = []
+for i = 1, 300 do parts[] = `"${i % 10}"` end
+local f = load("return " .. string.join(parts, " .. "))
+local s = f()
+print(len(s), string.sub(s, 1, 12), string.sub(s, -5))
+local x = 7
+print("a" .. x .. "b" .. 1.5 .. "c")
+local n = 0
+local function nxt()
+    n += 1
+    return n
+end
+print("<" .. nxt() .. nxt() .. nxt() .. ">")

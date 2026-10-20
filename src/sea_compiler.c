@@ -1572,17 +1572,61 @@ static int compile_expr(SeaCompiler *c, SeaNode *node, int dst) {
                 break;
             }
             if (node->binop.op == BINOP_CONCAT) {
-                /* operands borrowed, in consecutive registers; a new owned
-                 * string (or rope) lands in dst */
-                int left = compile_expr(c, node->binop.left, -1);
-                int right = compile_expr(c, node->binop.right, -1);
-                emit_abc(c, OP_CONCAT, dst, left, 2, line);
-                drop_temp(c, right, line);
-                drop_temp(c, left, line);
-                free_reg(c, right);
-                free_reg(c, left);
-                reg_clear_int(c, dst);
-                c->reg_meta[dst].is_owned = 1;
+                /* a .. b .. c ...: the whole chain at once (it nests to the
+                 * right, and a register per level ran out at ~125 operands).
+                 * Operands borrowed, in consecutive registers, CONCAT_GROUP at a
+                 * time; with more, each group's string goes to a register of
+                 * its own and a last CONCAT joins them. A new owned string (or
+                 * rope) lands in dst */
+                enum { CONCAT_GROUP = 64 };
+                SeaNode **ops = NULL;
+                int nops = 0, cap = 0;
+                SeaNode *stack[CONCAT_GROUP * CONCAT_GROUP];
+                int sp = 0;
+                stack[sp++] = node;
+                while (sp > 0) {
+                    SeaNode *n = stack[--sp];
+                    if (n->type == NODE_BINOP && n->binop.op == BINOP_CONCAT && sp + 2 <= CONCAT_GROUP * CONCAT_GROUP) {
+                        stack[sp++] = n->binop.right;   /* left first out */
+                        stack[sp++] = n->binop.left;
+                    } else {
+                        SEA_DYNARRAY_PUSH(ops, nops, cap, SeaNode *, n);
+                    }
+                }
+                if (nops > CONCAT_GROUP * CONCAT_GROUP) {
+                    compiler_error(c, line, "concatenation of more than 4096 parts");
+                    SEA_FREE_N(ops, SeaNode *, cap);
+                    break;
+                }
+                int ngroups = (nops + CONCAT_GROUP - 1) / CONCAT_GROUP;
+                int groups[CONCAT_GROUP];
+                for (int g = 0; g < ngroups; g++) {
+                    int first = g * CONCAT_GROUP;
+                    int count = nops - first < CONCAT_GROUP ? nops - first : CONCAT_GROUP;
+                    int target = ngroups == 1 ? dst : (groups[g] = alloc_reg(c));
+                    int regs[CONCAT_GROUP];
+                    for (int i = 0; i < count; i++) {
+                        regs[i] = alloc_reg(c);
+                        compile_expr(c, ops[first + i], regs[i]);
+                    }
+                    emit_abc(c, OP_CONCAT, target, regs[0], count, line);
+                    for (int i = count - 1; i >= 0; i--) {
+                        drop_temp(c, regs[i], line);
+                        free_reg(c, regs[i]);
+                    }
+                    reg_clear_int(c, target);
+                    c->reg_meta[target].is_owned = 1;
+                }
+                if (ngroups > 1) {
+                    emit_abc(c, OP_CONCAT, dst, groups[0], ngroups, line);
+                    for (int g = ngroups - 1; g >= 0; g--) {
+                        drop_temp(c, groups[g], line);
+                        free_reg(c, groups[g]);
+                    }
+                    reg_clear_int(c, dst);
+                    c->reg_meta[dst].is_owned = 1;
+                }
+                SEA_FREE_N(ops, SeaNode *, cap);
                 break;
             }
 
