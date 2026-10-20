@@ -25,6 +25,7 @@ pure-Sea libraries work out of the box.
 | `log` | built in: `require("sea/log")` (`libs/log/log.sea`) | pure Sea | — |
 | `template` | `libs/template/template` | pure Sea | — |
 | `image` | `libs/image/image` | pure Sea (PNG through `compress`) | `make -C libs/compress` for PNG |
+| `truetype` | `libs/truetype/truetype` | pure Sea (uses `image`) | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
@@ -1547,6 +1548,44 @@ alpha), 1/8/24/32-bit BMP and P1–P6 PNM are read.
 | `img:clone` | `clone() → image` | A copy |
 | `img:to_ascii` | `to_ascii([opts]) → string` | One character per pixel: by gray level through `opts.ramp` (default `"@%#*+=-:. "`), or with any of `threshold` (default 128), `dark` (`"#"`), `light` (`"."`) as two characters |
 | `img:save` | `save(path) → true\|error` | By extension: `.png`, `.bmp`, `.pgm`/`.pnm`, `.pbm` (anything else: PNG) |
+
+---
+
+## `truetype`
+
+TrueType fonts in pure Sea: reads the outlines of a `.ttf` (tables head,
+maxp, hhea, hmtx, loca, glyf and cmap formats 4 and 12; simple and compound
+glyphs) and draws text anti-aliased (quadratic curves flattened, non-zero
+winding fill, 4×4 samples a pixel) into `libs/image` grayscale images. No
+hinting or kerning; CFF outlines (`.otf` with PostScript curves) are not
+read. The OCR library renders its training glyphs with it.
+
+```sea
+local tt = require("../libs/truetype/truetype")   -- relative to the requiring file
+
+local font = tt.load("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")?
+local img = font:render("Ação, 12!", 32, {pad = 4})  -- one line of text
+img:save("text.png")?
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `truetype.load` | `load(path) → font\|error` | Read a font file |
+| `truetype.parse` | `parse(bytes) → font\|error` | The same, from a string |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `font:glyph_index` | `glyph_index(codepoint) → int` | The glyph of a character (0: missing) |
+| `font:advance` | `advance(gid) → int` | Its advance width in font units |
+| `font:outline` | `outline(gid) → contours` | Its contours: arrays of `{x, y, on}` in font units, y up (`on`: on the curve, else a quadratic control point) |
+| `font:scale` | `scale(size) → number` | Pixels per font unit for a size in pixels (the em) |
+| `font:metrics` | `metrics(size) → {ascent, descent, line_gap, height}` | Line metrics in whole pixels (`height` = ascent + descent) |
+| `font:text_width` | `text_width(text, size) → number` | The advance of a UTF-8 string in pixels |
+| `font:draw` | `draw(img, text, x, baseline, size [, ink]) → number` | Draw a line into an image, its baseline at y = `baseline`, toward the gray `ink` (default 0); returns the x after it |
+| `font:render` | `render(text, size [, opts]) → image` | A new image of one line: as tall as the font's line, the baseline at y = ascent. `opts`: `pad` (pixels left and right, default 0), `ink` (0), `background` (255) |
+
+The font table also has `units_per_em`, `num_glyphs`, `ascender`,
+`descender` and `line_gap` (font units).
 
 ---
 

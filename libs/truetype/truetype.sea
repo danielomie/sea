@@ -1,0 +1,503 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- truetype — TrueType fonts in pure Sea: the tables a renderer needs (head,
+-- maxp, hhea, hmtx, loca, glyf, cmap formats 4 and 12), simple and compound
+-- glyph outlines, and an anti-aliased rasterizer (quadratic curves flattened,
+-- scanline fill by the non-zero winding rule, 4x4 samples a pixel) that draws
+-- into libs/image grayscale images. No hinting, no kerning; CFF (OpenType
+-- PostScript) outlines are not read.
+
+local image = require("../image/image")
+
+local M = {}
+
+local Font = {}
+
+-- ---- reading big-endian numbers (offsets from 0) ----
+
+local function u8(s, o) return string.byte(s, o + 1) end
+local function u16(s, o) return (string.byte(s, o + 1) << 8) | string.byte(s, o + 2) end
+local function s16(s, o)
+    local v = u16(s, o)
+    if v >= 0x8000 then v -= 0x10000 end
+    return v
+end
+local function u32(s, o) return (u16(s, o) << 16) | u16(s, o + 2) end
+local function f2dot14(s, o) return s16(s, o) / 16384.0 end
+
+-- truetype.parse(bytes) → font|error
+function M.parse(bytes)
+    if type(bytes) ~= "string" or len(bytes) < 12 then return error("truetype: not a font") end
+    local version = u32(bytes, 0)
+    if version == 0x4F54544F then return error("truetype: CFF (OpenType PostScript) outlines are not supported") end
+    if version ~= 0x00010000 and version ~= 0x74727565 then return error("truetype: not a TrueType font") end
+    local tables = [=]
+    local n = u16(bytes, 4)
+    for i = 0, n - 1 do
+        local rec = 12 + i * 16
+        tables[string.sub(bytes, rec + 1, rec + 4)] = {offset = u32(bytes, rec + 8), length = u32(bytes, rec + 12)}
+    end
+    for _, tag in ["head", "maxp", "hhea", "hmtx", "loca", "glyf", "cmap"] do
+        if tables[tag] == nil then return error(`truetype: missing table '${tag}'`) end
+    end
+    local f = {}
+    f.data = bytes
+    f.tables = tables
+    local head = tables.head.offset
+    f.units_per_em = u16(bytes, head + 18)
+    f.long_loca = s16(bytes, head + 50) ~= 0
+    f.num_glyphs = u16(bytes, tables.maxp.offset + 4)
+    local hhea = tables.hhea.offset
+    f.ascender = s16(bytes, hhea + 4)
+    f.descender = s16(bytes, hhea + 6)
+    f.line_gap = s16(bytes, hhea + 8)
+    f.num_hmetrics = u16(bytes, hhea + 34)
+    f.cmap = nil
+    f.cmap_format = 0
+    f.glyph_cache = [=]
+    f.cp_cache = [=]
+    -- the Unicode character map: (3,10) format 12, else (3,1) / (0,x) format 4
+    local cmap = tables.cmap.offset
+    local best = -1
+    for i = 0, u16(bytes, cmap + 2) - 1 do
+        local rec = cmap + 4 + i * 8
+        local platform = u16(bytes, rec)
+        local encoding = u16(bytes, rec + 2)
+        local sub = cmap + u32(bytes, rec + 4)
+        local format = u16(bytes, sub)
+        local rank = -1
+        if format == 12 and (platform == 3 or platform == 0) then rank = 3
+        elseif format == 4 and platform == 3 and encoding == 1 then rank = 2
+        elseif format == 4 and platform == 0 then rank = 1 end
+        if rank > best then
+            best = rank
+            f.cmap = sub
+            f.cmap_format = format
+        end
+    end
+    if f.cmap == nil then return error("truetype: no Unicode character map") end
+    for k, fn in Font do f[k] = fn end
+    return f
+end
+
+-- truetype.load(path) → font|error
+function M.load(file_path)
+    local bytes = fs.read(file_path)?
+    return M.parse(bytes)
+end
+
+-- font:glyph_index(cp) → glyph index (0: the missing glyph)
+function Font.glyph_index(self, cp)
+    local cached = self.cp_cache[cp]
+    if cached ~= nil then return cached end
+    local s = self.data
+    local sub = self.cmap
+    local gid = 0
+    if self.cmap_format == 12 then
+        local groups = u32(s, sub + 12)
+        local lo = 0
+        local hi = groups - 1
+        while lo <= hi do
+            local mid = (lo + hi) // 2
+            local g = sub + 16 + mid * 12
+            local first = u32(s, g)
+            local last = u32(s, g + 4)
+            if cp < first then hi = mid - 1
+            elseif cp > last then lo = mid + 1
+            else
+                gid = u32(s, g + 8) + (cp - first)
+                break
+            end
+        end
+    elseif cp <= 0xFFFF then
+        local seg2 = u16(s, sub + 6)
+        local ends = sub + 14
+        local starts = ends + seg2 + 2
+        local deltas = starts + seg2
+        local ranges = deltas + seg2
+        local lo = 0
+        local hi = seg2 // 2 - 1
+        while lo < hi do
+            local mid = (lo + hi) // 2
+            if u16(s, ends + mid * 2) < cp then lo = mid + 1 else hi = mid end
+        end
+        local i = lo
+        local start = u16(s, starts + i * 2)
+        if u16(s, ends + i * 2) >= cp and start <= cp then
+            local delta = u16(s, deltas + i * 2)
+            local range = u16(s, ranges + i * 2)
+            if range == 0 then
+                gid = (cp + delta) & 0xFFFF
+            else
+                local g = u16(s, ranges + i * 2 + range + (cp - start) * 2)
+                if g ~= 0 then gid = (g + delta) & 0xFFFF end
+            end
+        end
+    end
+    self.cp_cache[cp] = gid
+    return gid
+end
+
+-- font:advance(gid) → the advance width in font units
+function Font.advance(self, gid)
+    local hmtx = self.tables.hmtx.offset
+    local i = gid < self.num_hmetrics and gid or self.num_hmetrics - 1
+    return u16(self.data, hmtx + i * 4)
+end
+
+local function glyph_range(self, gid)
+    local loca = self.tables.loca.offset
+    local s = self.data
+    if self.long_loca then return u32(s, loca + gid * 4), u32(s, loca + gid * 4 + 4) end
+    return u16(s, loca + gid * 2) * 2, u16(s, loca + gid * 2 + 2) * 2
+end
+
+-- font:outline(gid) → contours: arrays of {x, y, on} in font units (y up)
+function Font.outline(self, gid, depth)
+    local cached = self.glyph_cache[gid]
+    if cached ~= nil then return cached end
+    depth = depth or 0
+    local s = self.data
+    local contours = []
+    if gid < 0 or gid >= self.num_glyphs or depth > 8 then return contours end
+    local from, to = glyph_range(self, gid)
+    if to <= from then
+        self.glyph_cache[gid] = contours
+        return contours
+    end
+    local g = self.tables.glyf.offset + from
+    local nc = s16(s, g)
+    if nc >= 0 then
+        local ends = []
+        for i = 0, nc - 1 do ends[] = u16(s, g + 10 + i * 2) end
+        local npts = nc > 0 and ends[nc - 1] + 1 or 0
+        local p = g + 10 + nc * 2
+        p += 2 + u16(s, p)                     -- skip the instructions
+        local flags = []
+        while len(flags) < npts do
+            local fl = u8(s, p)
+            p += 1
+            flags[] = fl
+            if fl & 8 ~= 0 then
+                local rep = u8(s, p)
+                p += 1
+                for _ = 1, rep do flags[] = fl end
+            end
+        end
+        local xs = []
+        local v = 0
+        for i = 0, npts - 1 do
+            local fl = flags[i]
+            if fl & 2 ~= 0 then
+                local d = u8(s, p)
+                p += 1
+                v += (fl & 16 ~= 0) and d or -d
+            elseif fl & 16 == 0 then
+                v += s16(s, p)
+                p += 2
+            end
+            xs[] = v
+        end
+        local ys = []
+        v = 0
+        for i = 0, npts - 1 do
+            local fl = flags[i]
+            if fl & 4 ~= 0 then
+                local d = u8(s, p)
+                p += 1
+                v += (fl & 32 ~= 0) and d or -d
+            elseif fl & 32 == 0 then
+                v += s16(s, p)
+                p += 2
+            end
+            ys[] = v
+        end
+        local start = 0
+        for _, e in ends do
+            local c = []
+            for i = start, e do c[] = {x = xs[i] * 1.0, y = ys[i] * 1.0, on = flags[i] & 1 ~= 0} end
+            contours[] = c
+            start = e + 1
+        end
+    else
+        -- a compound glyph: its components, transformed
+        local p = g + 10
+        while true do
+            local fl = u16(s, p)
+            local comp = u16(s, p + 2)
+            p += 4
+            local dx = 0.0
+            local dy = 0.0
+            if fl & 1 ~= 0 then
+                dx = s16(s, p) * 1.0
+                dy = s16(s, p + 2) * 1.0
+                p += 4
+            else
+                dx = u8(s, p)
+                dy = u8(s, p + 1)
+                if dx >= 128 then dx -= 256 end
+                if dy >= 128 then dy -= 256 end
+                dx *= 1.0
+                dy *= 1.0
+                p += 2
+            end
+            local a = 1.0
+            local b = 0.0
+            local c = 0.0
+            local d = 1.0
+            if fl & 8 ~= 0 then
+                a = f2dot14(s, p)
+                d = a
+                p += 2
+            elseif fl & 0x40 ~= 0 then
+                a = f2dot14(s, p)
+                d = f2dot14(s, p + 2)
+                p += 4
+            elseif fl & 0x80 ~= 0 then
+                a = f2dot14(s, p)
+                b = f2dot14(s, p + 2)
+                c = f2dot14(s, p + 4)
+                d = f2dot14(s, p + 6)
+                p += 8
+            end
+            for _, sc in self:outline(comp, depth + 1) do
+                local nc2 = []
+                for _, pt in sc do
+                    nc2[] = {x = a * pt.x + c * pt.y + dx, y = b * pt.x + d * pt.y + dy, on = pt.on}
+                end
+                contours[] = nc2
+            end
+            if fl & 0x20 == 0 then break end
+        end
+    end
+    self.glyph_cache[gid] = contours
+    return contours
+end
+
+-- ---- rasterizing ----
+
+-- the contours as line segments in pixels: scale, the origin (ox, oy) of the
+-- baseline in the image (y down)
+local function edges_of(contours, scale, ox, oy)
+    local edges = []
+    local function tx(p) return ox + p.x * scale end
+    local function ty(p) return oy - p.y * scale end
+    local function line(x0, y0, x1, y1)
+        if y0 ~= y1 then edges[] = [x0, y0, x1, y1] end
+    end
+    for _, c in contours do
+        local n = len(c)
+        if n >= 2 then
+            -- start on an on-curve point (or the midpoint of two off ones)
+            local first = -1
+            for i = 0, n - 1 do
+                if c[i].on then
+                    first = i
+                    break
+                end
+            end
+            local sx = 0.0
+            local sy = 0.0
+            if first >= 0 then
+                sx = tx(c[first])
+                sy = ty(c[first])
+            else
+                first = 0
+                sx = (tx(c[0]) + tx(c[1])) / 2.0
+                sy = (ty(c[0]) + ty(c[1])) / 2.0
+            end
+            local cx = sx
+            local cy = sy
+            local ctrl = nil
+            for k = 1, n do
+                local pt = c[(first + k) % n]
+                local px = tx(pt)
+                local py = ty(pt)
+                if pt.on then
+                    if ctrl == nil then
+                        line(cx, cy, px, py)
+                    else
+                        -- a quadratic curve: as many segments as its size needs
+                        local len_ = math.abs(ctrl[0] - cx) + math.abs(ctrl[1] - cy) + math.abs(px - ctrl[0]) + math.abs(py - ctrl[1])
+                        local steps = math.max(2, math.min(32, math.floor(len_ / 1.5) + 1))
+                        local lx = cx
+                        local ly = cy
+                        for st = 1, steps do
+                            local t = st / steps
+                            local u = 1.0 - t
+                            local qx = u * u * cx + 2.0 * u * t * ctrl[0] + t * t * px
+                            local qy = u * u * cy + 2.0 * u * t * ctrl[1] + t * t * py
+                            line(lx, ly, qx, qy)
+                            lx = qx
+                            ly = qy
+                        end
+                        ctrl = nil
+                    end
+                    cx = px
+                    cy = py
+                else
+                    if ctrl ~= nil then
+                        -- two off-curve points: an on-curve point between them
+                        local mx = (ctrl[0] + px) / 2.0
+                        local my = (ctrl[1] + py) / 2.0
+                        local len_ = math.abs(ctrl[0] - cx) + math.abs(ctrl[1] - cy) + math.abs(mx - ctrl[0]) + math.abs(my - ctrl[1])
+                        local steps = math.max(2, math.min(32, math.floor(len_ / 1.5) + 1))
+                        local lx = cx
+                        local ly = cy
+                        for st = 1, steps do
+                            local t = st / steps
+                            local u = 1.0 - t
+                            local qx = u * u * cx + 2.0 * u * t * ctrl[0] + t * t * mx
+                            local qy = u * u * cy + 2.0 * u * t * ctrl[1] + t * t * my
+                            line(lx, ly, qx, qy)
+                            lx = qx
+                            ly = qy
+                        end
+                        cx = mx
+                        cy = my
+                    end
+                    ctrl = [px, py]
+                end
+            end
+            -- close the contour
+            if ctrl ~= nil then
+                local steps = 8
+                local lx = cx
+                local ly = cy
+                for st = 1, steps do
+                    local t = st / steps
+                    local u = 1.0 - t
+                    local qx = u * u * cx + 2.0 * u * t * ctrl[0] + t * t * sx
+                    local qy = u * u * cy + 2.0 * u * t * ctrl[1] + t * t * sy
+                    line(lx, ly, qx, qy)
+                    lx = qx
+                    ly = qy
+                end
+            elseif cx ~= sx or cy ~= sy then
+                line(cx, cy, sx, sy)
+            end
+        end
+    end
+    return edges
+end
+
+const SS = 4
+
+-- fill the edges into img (ink darkens toward `ink`, 0 black by default),
+-- covering the rows y0..y1 and columns x0..x1
+local function fill(img, edges, ink, x0, y0, x1, y1)
+    local w = img.width
+    local cols = (x1 - x0 + 1)
+    if cols <= 0 or len(edges) == 0 then return end
+    local cov = int_array(cols)
+    for py = math.max(0, y0), math.min(img.height - 1, y1) do
+        for i = 0, cols - 1 do cov[i] = 0 end
+        local any = false
+        for sy = 0, SS - 1 do
+            local yy = py + (sy + 0.5) / SS
+            local xs = []
+            for _, e in edges do
+                local ey0 = e[1]
+                local ey1 = e[3]
+                local lo = ey0 < ey1 and ey0 or ey1
+                local hi = ey0 < ey1 and ey1 or ey0
+                if yy >= lo and yy < hi then
+                    local x = e[0] + (yy - ey0) * (e[2] - e[0]) / (ey1 - ey0)
+                    xs[] = [x, ey1 > ey0 and 1 or -1]
+                end
+            end
+            if len(xs) >= 2 then
+                sort.sort(xs, function(a, b) return a[0] < b[0] end)
+                local winding = 0
+                for k = 0, len(xs) - 2 do
+                    winding += xs[k][1]
+                    if winding ~= 0 then
+                        -- the subsample columns whose centre is inside [xa, xb)
+                        local a = math.ceil((xs[k][0] - x0) * SS - 0.5)
+                        local b = math.ceil((xs[k + 1][0] - x0) * SS - 0.5)
+                        if a < 0 then a = 0 end
+                        if b > cols * SS then b = cols * SS end
+                        for sc = a, b - 1 do cov[sc // SS] += 1 end
+                        if b > a then any = true end
+                    end
+                end
+            end
+        end
+        if any then
+            local row = py * w
+            for i = 0, cols - 1 do
+                local cv = cov[i]
+                local x = x0 + i
+                if cv > 0 and x >= 0 and x < w then
+                    local alpha = cv / (SS * SS * 1.0)
+                    local old = img.data[row + x]
+                    local v = old + (ink - old) * alpha
+                    img.data[row + x] = math.floor(v + 0.5)
+                end
+            end
+        end
+    end
+end
+
+-- font:scale(size) → pixels per font unit for a size in pixels (the em)
+function Font.scale(self, size) return size / (self.units_per_em * 1.0) end
+
+-- font:metrics(size) → {ascent, descent, line_gap, height} in pixels (whole)
+function Font.metrics(self, size)
+    local sc = self:scale(size)
+    local out = {}
+    out.ascent = math.ceil(self.ascender * sc)
+    out.descent = math.ceil(-self.descender * sc)
+    out.line_gap = math.ceil(self.line_gap * sc)
+    out.height = out.ascent + out.descent
+    return out
+end
+
+-- font:text_width(text, size) → the advance of the text in pixels
+function Font.text_width(self, text, size)
+    local sc = self:scale(size)
+    local wsum = 0.0
+    for _, ch in utf8.chars(text) do wsum += self:advance(self:glyph_index(utf8.codepoint(ch))) * sc end
+    return wsum
+end
+
+-- font:draw(img, text, x, baseline, size [, ink]) → the x after the text:
+-- draws a line of text with its baseline at y = baseline
+function Font.draw(self, img, text, x, baseline, size, ink)
+    ink = ink or 0
+    local sc = self:scale(size)
+    local m = self:metrics(size)
+    local pen = x * 1.0
+    for _, ch in utf8.chars(text) do
+        local gid = self:glyph_index(utf8.codepoint(ch))
+        local contours = self:outline(gid)
+        if len(contours) > 0 then
+            local edges = edges_of(contours, sc, pen, baseline * 1.0)
+            local minx = 1e9
+            local maxx = -1e9
+            for _, e in edges do
+                minx = math.min(minx, e[0], e[2])
+                maxx = math.max(maxx, e[0], e[2])
+            end
+            fill(img, edges, ink, math.floor(minx) - 1, baseline - m.ascent - 2, math.ceil(maxx) + 1, baseline + m.descent + 2)
+        end
+        pen += self:advance(gid) * sc
+    end
+    return pen
+end
+
+-- font:render(text, size [, opts]) → an image of one line of text: as tall
+-- as the font's line (ascent + descent), the baseline at y = ascent.
+-- opts: { pad = 0 (pixels added left and right), ink = 0, background = 255 }
+function Font.render(self, text, size, opts)
+    opts = opts or {}
+    local pad = opts.pad or 0
+    local m = self:metrics(size)
+    local w = math.max(1, math.ceil(self:text_width(text, size)) + pad * 2)
+    local img = image.new(w, m.height, opts.background or 255)
+    self:draw(img, text, pad, m.ascent, size, opts.ink or 0)
+    return img
+end
+
+return M

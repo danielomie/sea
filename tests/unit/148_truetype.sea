@@ -1,0 +1,92 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: libs/truetype (pure Sea), on a tiny font built here: a square "A",
+-- a compound "B" (the square moved right), a curved "o" and an empty space
+local tt = require("./libs/truetype/truetype")
+
+local function be16(v) return string.char((v >> 8) & 255, v & 255) end
+local function be32(v) return be16((v >> 16) & 0xFFFF) .. be16(v & 0xFFFF) end
+
+-- a simple glyph: one contour of points {x, y, on}
+local function simple(pts)
+    local s = be16(1) .. be16(0) .. be16(0) .. be16(1000) .. be16(1000) .. be16(len(pts) - 1) .. be16(0)
+    for _, p in pts do s ..= string.char(p[2] and 1 or 0) end
+    local last = 0
+    for _, p in pts do
+        s ..= be16((p[0] - last) & 0xFFFF)
+        last = p[0]
+    end
+    last = 0
+    for _, p in pts do
+        s ..= be16((p[1] - last) & 0xFFFF)
+        last = p[1]
+    end
+    return s
+end
+
+local glyphs = [
+    "",                                                                  -- 0 .notdef: empty
+    simple([ [100, 0, true], [100, 700, true], [600, 700, true], [600, 0, true] ]),
+    be16(0xFFFF) .. be16(0) .. be16(0) .. be16(1000) .. be16(1000) .. be16(3) .. be16(1) .. be16(200) .. be16(0),
+    simple([ [300, 0, false], [0, 250, false], [300, 500, false], [600, 250, false] ]),
+    "",                                                                  -- 4 space
+]
+local glyf = ""
+local loca = ""
+for _, g in glyphs do
+    loca ..= be32(len(glyf))
+    glyf ..= g
+end
+loca ..= be32(len(glyf))
+local hmtx = be16(500) .. be16(0) .. be16(700) .. be16(100) .. be16(900) .. be16(100) .. be16(600) .. be16(0) .. be16(300) .. be16(0)
+local head = be32(0x10000) .. be32(0) .. be32(0) .. be32(0x5F0F3CF5) .. be16(0) .. be16(1000)
+    .. string.rep("\0", 16) .. be16(0) .. be16(0) .. be16(1000) .. be16(1000) .. be16(0) .. be16(8) .. be16(2) .. be16(1) .. be16(0)
+local hhea = be32(0x10000) .. be16(800) .. be16(0xFFFF - 199) .. be16(0) .. string.rep("\0", 24) .. be16(5)
+local maxp = be32(0x5000) .. be16(5)
+-- cmap format 4: A-B → 1-2, o → 3, space → 4, and the closing 0xFFFF segment
+local segs = [ [32, 32, 4 - 32], [65, 66, 1 - 65], [111, 111, 3 - 111], [0xFFFF, 0xFFFF, 1] ]
+local sub = ""
+for _, s in segs do sub ..= be16(s[1]) end
+sub ..= be16(0)
+for _, s in segs do sub ..= be16(s[0]) end
+for _, s in segs do sub ..= be16(s[2] & 0xFFFF) end
+for _, s in segs do sub ..= be16(0) end
+sub = be16(4) .. be16(14 + len(sub)) .. be16(0) .. be16(len(segs) * 2) .. be16(8) .. be16(2) .. be16(0) .. sub
+local cmap = be16(0) .. be16(1) .. be16(3) .. be16(1) .. be32(12) .. sub
+
+local tables = [ ["cmap", cmap], ["glyf", glyf], ["head", head], ["hhea", hhea], ["hmtx", hmtx], ["loca", loca], ["maxp", maxp] ]
+local font_bytes = be32(0x10000) .. be16(len(tables)) .. be16(0) .. be16(0) .. be16(0)
+local offset = 12 + 16 * len(tables)
+local body = ""
+for _, t in tables do
+    font_bytes ..= t[0] .. be32(0) .. be32(offset + len(body)) .. be32(len(t[1]))
+    body ..= t[1]
+    while len(body) % 4 ~= 0 do body ..= "\0" end
+end
+font_bytes ..= body
+
+print("-- parse")
+local f = tt.parse(font_bytes)
+print(f.units_per_em, f.num_glyphs, f.ascender, f.descender)
+print(f:glyph_index(65), f:glyph_index(66), f:glyph_index(111), f:glyph_index(32), f:glyph_index(90))
+print(f:advance(1), f:advance(2), f:advance(4))
+local a = f:outline(1)
+print(len(a), len(a[0]), a[0][2].x, a[0][2].y, a[0][2].on)
+local b = f:outline(2)
+print(len(b), b[0][0].x, b[0][0].y)
+print(f:outline(3)[0][0].on, len(f:outline(4)))
+print(tt.parse("nope").message)
+print(tt.parse("OTTO" .. string.rep("\0", 20)).message)
+
+print("-- metrics")
+local m = f:metrics(20)
+print(m.ascent, m.descent, m.height, f:text_width("AB o", 20))
+
+print("-- render")
+local img = f:render("AB o", 20, {pad = 1})
+print(img.width, img.height)
+print(img:to_ascii({threshold = 128, dark = "#", light = "."}))
+-- anti-aliased edges: a half-covered column is gray
+local g = f:render("A", 15)
+print(g:get(1, 10), g:get(5, 10), g:get(9, 10))
