@@ -1,0 +1,21 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- assigning a local an and/or expression that reads the same local
+local k = 1
+local n = 3
+local seen = []
+for i = 1, 5 do
+    k = k == n and 1 or k + 1
+    seen[] = k
+end
+print(seen)
+local j = 5
+j = (j > 3 and j - 1 or j + 1)
+print(j)
+local s = "a"
+s = s == "a" and s .. "b" or s
+print(s)
+local f = false
+f = f or not f
+print(f)

@@ -2796,7 +2796,12 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
                      * the fold would use the stale compile-time value instead of
                      * the actual runtime value, producing a constant store. */
                     c->reg_meta[local].is_const = 0;
-                    if (rhs->type != NODE_CALL && rhs->type != NODE_METHOD_CALL &&
+                    /* Not for `and`/`or` either: they leave the left operand in
+                     * dst before evaluating the right one, which may read the
+                     * local (`k = k == n and 1 or k + 1`). */
+                    bool short_circuit = rhs->type == NODE_BINOP &&
+                        (rhs->binop.op == BINOP_AND || rhs->binop.op == BINOP_OR);
+                    if (rhs->type != NODE_CALL && rhs->type != NODE_METHOD_CALL && !short_circuit &&
                         reg_scalar(c, local) && expr_is_scalar(c, rhs)) {
                         compile_expr(c, rhs, local);
                         c->reg_meta[local].is_owned = 0;
