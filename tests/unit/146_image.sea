@@ -1,0 +1,60 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: libs/image (pure Sea; PNG needs libs/compress: make -C libs/compress)
+local image = require("./libs/image/image")
+
+print("-- pixels")
+local img = image.new(4, 3)
+print(img.width, img.height, img:get(0, 0), img:get(9, 9), img.binary)
+img:set(1, 1, 300)
+img:set(2, 1, -5)
+img:set(3, 2, 99.7)
+print(img:get(1, 1), img:get(2, 1), img:get(3, 2), img:is_dark(2, 1), img:is_ink(1, 1), img:is_dark(3, 2, 100))
+local copy = img:clone()
+copy:set(0, 0, 0)
+print(img:get(0, 0), copy:get(0, 0), copy:get(2, 1))
+
+print("-- ASCII art")
+local art = image.from_ascii([[
+#.%+
+-:█░
+]])
+print(art.width, art.height, art:get(0, 0), art:get(1, 0), art:get(2, 0), art:get(3, 0))
+print(art:get(0, 1), art:get(1, 1), art:get(2, 1), art:get(3, 1))
+print(art:to_ascii())
+print(art:to_ascii({threshold = 128}))
+print(art:to_ascii({dark = "X", light = " "}))
+local bin = image.from_ascii("#-\n.:", {binary = true, scale = 2, pad = 1})
+print(bin.width, bin.height, bin.binary, bin:get(0, 0), bin:get(1, 1), bin:get(3, 1), bin:get(1, 3), bin:get(3, 3))
+
+print("-- encode and decode")
+local function same(a, b)
+    if a.width ~= b.width or a.height ~= b.height then return false end
+    for i = 0, a.width * a.height - 1 do
+        if a.data[i] ~= b.data[i] then return false end
+    end
+    return true
+end
+for _, fmt in ["png", "bmp", "pgm"] do
+    local bytes = image["encode_" .. fmt](art)
+    local back = image.decode(bytes)
+    print(fmt, is_error(back) and back.message or same(art, back))
+end
+local pbm = image.decode(image.encode_pbm(art))
+print("pbm", pbm.width, pbm.height, pbm:get(0, 0), pbm:get(1, 0), pbm:get(2, 0), pbm:get(3, 0))
+local p2 = image.decode("P2\n# a comment\n3 1\n255\n0 128 255\n")
+print("P2", p2.width, p2:get(0, 0), p2:get(1, 0), p2:get(2, 0))
+local p3 = image.decode("P3 1 1 255 255 0 0")
+print("P3", p3:get(0, 0) < 255, p3:get(0, 0) > 0)
+print(image.decode("not an image").message)
+
+print("-- files")
+local dir = fs.tempdir()
+for _, ext in [".png", ".bmp", ".pgm", ".pbm"] do
+    local p = path.join(dir, "t" .. ext)
+    local ok = art:save(p)
+    local back = image.load(p)
+    print(ext, ok == true, not is_error(back) and back.width == 4)
+end
+fs.remove(dir, {recursive = true})

@@ -1,0 +1,764 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- image — grayscale images: PNG, BMP and PGM/PPM/PBM read and written,
+-- ASCII art in and out, pixels, cloning.
+--
+-- An Image is a table:
+--   { width = int, height = int, data = int_array(w * h), binary = bool }
+-- where `data[y * width + x]` is the grayscale luminance in 0..255 (0 = black, 255 = white).
+-- Color images are read as their luminance (an alpha channel over white).
+
+local compress = require("../compress/compress")
+
+local M = {}
+
+local Image = {}
+
+-- img:get(x, y) → int (0..255, out-of-bounds returns 255 white)
+function Image.get(self, x, y)
+    if x < 0 or x >= self.width or y < 0 or y >= self.height then
+        return 255
+    end
+    return self.data[y * self.width + x]
+end
+
+-- img:set(x, y, v) → sets pixel at (x, y) clamped to 0..255
+function Image.set(self, x, y, v)
+    if x < 0 or x >= self.width or y < 0 or y >= self.height then
+        return
+    end
+    if v < 0 then
+        v = 0
+    elseif v > 255 then
+        v = 255
+    end
+    self.data[y * self.width + x] = math.floor(v)
+end
+
+-- img:is_dark(x, y [, threshold]) → bool (true when pixel < threshold, default 128);
+-- img:is_ink is the same
+function Image.is_dark(self, x, y, threshold)
+    local thr = threshold or 128
+    return self:get(x, y) < thr
+end
+Image.is_ink = Image.is_dark
+
+-- img:clone() → Image
+function Image.clone(self)
+    local out = M.new(self.width, self.height, 255)
+    out.binary = self.binary
+    local n = self.width * self.height
+    for i = 0, n - 1 do
+        out.data[i] = self.data[i]
+    end
+    return out
+end
+
+-- img:to_ascii([opts]) → string, one character per pixel
+-- opts: { ramp = "@%#*+=-:. " } shades by gray level (the default), or
+-- { threshold = 128, dark = "#", light = "." } (any of them) for two characters
+function Image.to_ascii(self, opts)
+    opts = opts or {}
+    local two = opts.threshold ~= nil or opts.dark ~= nil or opts.light ~= nil
+    local dark_ch = opts.dark or "#"
+    local light_ch = opts.light or "."
+    local thr = opts.threshold or 128
+    local ramp = opts.ramp or "@%#*+=-:. "
+    local n_levels = len(ramp)
+    local lines = []
+    for y = 0, self.height - 1 do
+        local row = []
+        local base = y * self.width
+        for x = 0, self.width - 1 do
+            local v = self.data[base + x]
+            if two then
+                row[] = (v < thr) and dark_ch or light_ch
+            else
+                local idx = (v * (n_levels - 1)) // 255 + 1
+                if idx < 1 then idx = 1 end
+                if idx > n_levels then idx = n_levels end
+                row[] = string.sub(ramp, idx, idx)
+            end
+        end
+        lines[] = string.join(row, "")
+    end
+    return string.join(lines, "\n")
+end
+
+-- img:save(file_path) → true|error (dispatches by extension: .png, .bmp, .pgm, .pbm)
+function Image.save(self, file_path)
+    local ext = string.lower(path.ext(file_path))
+    if ext == ".png" then
+        return M.save_png(self, file_path)
+    elseif ext == ".bmp" then
+        return M.save_bmp(self, file_path)
+    elseif ext == ".pgm" or ext == ".pnm" then
+        return M.save_pgm(self, file_path)
+    elseif ext == ".pbm" then
+        return M.save_pbm(self, file_path)
+    else
+        return M.save_png(self, file_path)
+    end
+end
+
+-- image.new(width, height [, fill]) → Image (default fill = 255 white)
+function M.new(width, height, fill)
+    local bg = fill
+    if bg == nil then bg = 255 end
+    local n = width * height
+    local data = int_array(n)
+    for _ = 0, n - 1 do
+        data[] = bg
+    end
+    local img = {}
+    img.width = width
+    img.height = height
+    img.data = data
+    img.binary = false
+    for k, fn in Image do
+        img[k] = fn
+    end
+    return img
+end
+
+-- the gray of an ASCII art character: "." " " "0" white; "#" "@" "█" "1" "*"
+-- black; "%" "▓" dark, "+" "=" "▒" mid, "-" ":" "░" light gray; anything else black
+local function ascii_gray(ch)
+    if ch == "." or ch == " " or ch == "0" then return 255 end
+    if ch == "%" or ch == "▓" then return 64 end
+    if ch == "+" or ch == "=" or ch == "▒" then return 120 end
+    if ch == "-" or ch == ":" or ch == "░" then return 180 end
+    return 0
+end
+
+-- image.from_ascii(art [, opts]) → Image
+-- One pixel per character (UTF-8 characters, so "█▓▒░" are one each); see
+-- ascii_gray for the levels. opts: { scale = 1, pad = 0, binary = false }:
+-- `binary` makes every character but "." " " "0" black. Empty first and
+-- last lines are dropped.
+function M.from_ascii(art, opts)
+    opts = opts or {}
+    local raw_lines = string.splitlines(art)
+    local lines = []
+    for _, line in raw_lines do
+        lines[] = utf8.valid(line) and utf8.chars(line) or string.split(line, "")
+    end
+    if len(lines) > 0 and len(lines[0]) == 0 then
+        del lines[0]
+    end
+    if len(lines) > 0 and len(lines[-1]) == 0 then
+        del lines[len(lines) - 1]
+    end
+    local h = len(lines)
+    local w = 0
+    for _, line in lines do
+        if len(line) > w then w = len(line) end
+    end
+    local scale = opts.scale or 1
+    local pad = opts.pad or 0
+    local binary = opts.binary == true
+    local img = M.new(w * scale + pad * 2, h * scale + pad * 2, 255)
+    img.binary = binary
+    for y = 0, h - 1 do
+        local line = lines[y]
+        for x = 0, len(line) - 1 do
+            local v = ascii_gray(line[x])
+            if binary and v ~= 255 then v = 0 end
+            for sy = 0, scale - 1 do
+                for sx = 0, scale - 1 do
+                    img:set(pad + x * scale + sx, pad + y * scale + sy, v)
+                end
+            end
+        end
+    end
+    return img
+end
+
+-- Binary helpers
+local function u16le(s, pos)
+    local b0 = string.byte(s, pos)
+    local b1 = string.byte(s, pos + 1)
+    return b0 + b1 * 256
+end
+
+local function u32le(s, pos)
+    local b0 = string.byte(s, pos)
+    local b1 = string.byte(s, pos + 1)
+    local b2 = string.byte(s, pos + 2)
+    local b3 = string.byte(s, pos + 3)
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+end
+
+local function i32le(s, pos)
+    local v = u32le(s, pos)
+    if v >= 2147483648 then
+        return v - 4294967296
+    end
+    return v
+end
+
+local function u32be(s, pos)
+    local b0 = string.byte(s, pos)
+    local b1 = string.byte(s, pos + 1)
+    local b2 = string.byte(s, pos + 2)
+    local b3 = string.byte(s, pos + 3)
+    return b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+end
+
+local function pack_u16le(n)
+    return string.char(n % 256, (n // 256) % 256)
+end
+
+local function pack_u32le(n)
+    return string.char(
+        n % 256,
+        (n // 256) % 256,
+        (n // 65536) % 256,
+        (n // 16777216) % 256
+    )
+end
+
+local function pack_u32be(n)
+    return string.char(
+        (n // 16777216) % 256,
+        (n // 65536) % 256,
+        (n // 256) % 256,
+        n % 256
+    )
+end
+
+local function rgb_to_luma(r, g, b)
+    return (r * 77 + g * 150 + b * 29 + 128) // 256
+end
+
+-- Parse PNM (P1..P6: PBM, PGM, PPM)
+function M.decode_pnm(bytes)
+    if len(bytes) < 3 or string.sub(bytes, 1, 1) ~= "P" then
+        return error("image.decode_pnm: invalid PNM header")
+    end
+    local magic = string.sub(bytes, 1, 2)
+    local pos = 3
+    local n = len(bytes)
+
+    local function next_token()
+        while pos <= n do
+            local b = string.byte(bytes, pos)
+            if b == 35 then
+                while pos <= n and string.byte(bytes, pos) ~= 10 do
+                    pos += 1
+                end
+            elseif b == 32 or b == 9 or b == 10 or b == 13 then
+                pos += 1
+            else
+                break
+            end
+        end
+        if pos > n then return nil end
+        local start = pos
+        while pos <= n do
+            local b = string.byte(bytes, pos)
+            if b == 32 or b == 9 or b == 10 or b == 13 or b == 35 then
+                break
+            end
+            pos += 1
+        end
+        return string.sub(bytes, start, pos - 1)
+    end
+
+    local w_tok = next_token()
+    local h_tok = next_token()
+    if not w_tok or not h_tok then
+        return error("image.decode_pnm: truncated dimensions")
+    end
+    local w = tonumber(w_tok)
+    local h = tonumber(h_tok)
+    if not w or not h or w <= 0 or h <= 0 then
+        return error("image.decode_pnm: invalid dimensions")
+    end
+
+    local maxval = 255
+    if magic ~= "P1" and magic ~= "P4" then
+        local m_tok = next_token()
+        if not m_tok then
+            return error("image.decode_pnm: missing maxval")
+        end
+        maxval = tonumber(m_tok) or 255
+    end
+    pos += 1
+
+    local img = M.new(w, h, 255)
+    if magic == "P5" then
+        if pos + w * h - 1 > n then
+            return error("image.decode_pnm: truncated P5 data")
+        end
+        for i = 0, w * h - 1 do
+            local v = string.byte(bytes, pos + i)
+            if maxval ~= 255 then
+                v = (v * 255) // maxval
+            end
+            img.data[i] = v
+        end
+    elseif magic == "P6" then
+        if pos + w * h * 3 - 1 > n then
+            return error("image.decode_pnm: truncated P6 data")
+        end
+        for i = 0, w * h - 1 do
+            local base = pos + i * 3
+            local r = string.byte(bytes, base)
+            local g = string.byte(bytes, base + 1)
+            local b = string.byte(bytes, base + 2)
+            if maxval ~= 255 then
+                r = (r * 255) // maxval
+                g = (g * 255) // maxval
+                b = (b * 255) // maxval
+            end
+            img.data[i] = rgb_to_luma(r, g, b)
+        end
+    elseif magic == "P2" then
+        for i = 0, w * h - 1 do
+            local tok = next_token()
+            if not tok then break end
+            local v = tonumber(tok) or 0
+            if maxval ~= 255 then
+                v = (v * 255) // maxval
+            end
+            img.data[i] = v
+        end
+    elseif magic == "P3" then
+        for i = 0, w * h - 1 do
+            local rt = next_token()
+            local gt = next_token()
+            local bt = next_token()
+            if not rt or not gt or not bt then break end
+            local r = (tonumber(rt) or 0) * 255 // maxval
+            local g = (tonumber(gt) or 0) * 255 // maxval
+            local b = (tonumber(bt) or 0) * 255 // maxval
+            img.data[i] = rgb_to_luma(r, g, b)
+        end
+    elseif magic == "P1" then
+        for i = 0, w * h - 1 do
+            local tok = next_token()
+            if not tok then break end
+            img.data[i] = (tok == "1") and 0 or 255
+        end
+    elseif magic == "P4" then
+        local row_bytes = (w + 7) // 8
+        for y = 0, h - 1 do
+            for x = 0, w - 1 do
+                local b_idx = pos + y * row_bytes + (x // 8)
+                local b = string.byte(bytes, b_idx) or 0
+                local bit = (b >> (7 - (x & 7))) & 1
+                img.data[y * w + x] = (bit == 1) and 0 or 255
+            end
+        end
+    else
+        return error("image.decode_pnm: unsupported magic " .. magic)
+    end
+    return img
+end
+
+-- Encode PGM (P5 binary grayscale)
+function M.encode_pgm(img)
+    local header = `P5\n${img.width} ${img.height}\n255\n`
+    local chunks = [header]
+    local w = img.width
+    local h = img.height
+    for y = 0, h - 1 do
+        local row = []
+        local base = y * w
+        for x = 0, w - 1 do
+            row[] = string.char(img.data[base + x])
+        end
+        chunks[] = string.join(row, "")
+    end
+    return string.join(chunks, "")
+end
+
+function M.save_pgm(img, file_path)
+    return fs.write(file_path, M.encode_pgm(img))
+end
+
+-- Encode PBM (P4 binary 1-bit monochrome)
+function M.encode_pbm(img)
+    local w = img.width
+    local h = img.height
+    local header = `P4\n${w} ${h}\n`
+    local chunks = [header]
+    local row_bytes = (w + 7) // 8
+    for y = 0, h - 1 do
+        local row = []
+        local base = y * w
+        for b = 0, row_bytes - 1 do
+            local byte_val = 0
+            for bit = 0, 7 do
+                local x = b * 8 + bit
+                local dark = (x < w and img.data[base + x] < 128) and 1 or 0
+                byte_val = (byte_val << 1) | dark
+            end
+            row[] = string.char(byte_val)
+        end
+        chunks[] = string.join(row, "")
+    end
+    return string.join(chunks, "")
+end
+
+function M.save_pbm(img, file_path)
+    return fs.write(file_path, M.encode_pbm(img))
+end
+
+-- Decode uncompressed BMP (1-bit, 8-bit, 24-bit, 32-bit)
+function M.decode_bmp(bytes)
+    if len(bytes) < 54 or string.sub(bytes, 1, 2) ~= "BM" then
+        return error("image.decode_bmp: invalid BMP header")
+    end
+    local data_offset = u32le(bytes, 11)
+    local dib_size = u32le(bytes, 15)
+    local w = i32le(bytes, 19)
+    local h_raw = i32le(bytes, 23)
+    local bpp = u16le(bytes, 29)
+    local compression = u32le(bytes, 31)
+    if compression ~= 0 and compression ~= 3 then
+        return error("image.decode_bmp: compressed BMP not supported")
+    end
+    local top_down = false
+    local h = h_raw
+    if h_raw < 0 then
+        top_down = true
+        h = -h_raw
+    end
+    if w <= 0 or h <= 0 then
+        return error("image.decode_bmp: invalid BMP dimensions")
+    end
+
+    local palette = []
+    if bpp <= 8 then
+        local pal_offset = 14 + dib_size + 1
+        local num_colors = 1 << bpp
+        for i = 0, num_colors - 1 do
+            local p = pal_offset + i * 4
+            if p + 2 <= len(bytes) then
+                local b = string.byte(bytes, p)
+                local g = string.byte(bytes, p + 1)
+                local r = string.byte(bytes, p + 2)
+                palette[] = rgb_to_luma(r, g, b)
+            else
+                palette[] = (i * 255) // (num_colors - 1)
+            end
+        end
+    end
+
+    local img = M.new(w, h, 255)
+    local row_stride = ((w * bpp + 31) // 32) * 4
+    for row = 0, h - 1 do
+        local y = top_down and row or (h - 1 - row)
+        local row_pos = data_offset + 1 + row * row_stride
+        if bpp == 24 or bpp == 32 then
+            local step = bpp // 8
+            for x = 0, w - 1 do
+                local p = row_pos + x * step
+                local b = string.byte(bytes, p) or 0
+                local g = string.byte(bytes, p + 1) or 0
+                local r = string.byte(bytes, p + 2) or 0
+                img.data[y * w + x] = rgb_to_luma(r, g, b)
+            end
+        elseif bpp == 8 then
+            for x = 0, w - 1 do
+                local idx = string.byte(bytes, row_pos + x) or 0
+                img.data[y * w + x] = palette[idx] or idx
+            end
+        elseif bpp == 1 then
+            for x = 0, w - 1 do
+                local b = string.byte(bytes, row_pos + (x // 8)) or 0
+                local bit = (b >> (7 - (x & 7))) & 1
+                img.data[y * w + x] = palette[bit] or (bit * 255)
+            end
+        else
+            return error(`image.decode_bmp: unsupported bpp ${bpp}`)
+        end
+    end
+    return img
+end
+
+-- Encode 24-bit BMP
+function M.encode_bmp(img)
+    local w = img.width
+    local h = img.height
+    local row_stride = ((w * 3 + 3) // 4) * 4
+    local pad_len = row_stride - w * 3
+    local pad_str = string.rep("\0", pad_len)
+    local data_size = row_stride * h
+    local file_size = 54 + data_size
+
+    local chunks = [
+        "BM",
+        pack_u32le(file_size),
+        pack_u32le(0),
+        pack_u32le(54),
+        pack_u32le(40),
+        pack_u32le(w),
+        pack_u32le(h),
+        pack_u16le(1),
+        pack_u16le(24),
+        pack_u32le(0),
+        pack_u32le(data_size),
+        pack_u32le(2835),
+        pack_u32le(2835),
+        pack_u32le(0),
+        pack_u32le(0),
+    ]
+
+    for row = 0, h - 1 do
+        local y = h - 1 - row
+        local base = y * w
+        local line = []
+        for x = 0, w - 1 do
+            local v = img.data[base + x]
+            line[] = string.char(v, v, v)
+        end
+        if pad_len > 0 then
+            line[] = pad_str
+        end
+        chunks[] = string.join(line, "")
+    end
+    return string.join(chunks, "")
+end
+
+function M.save_bmp(img, file_path)
+    return fs.write(file_path, M.encode_bmp(img))
+end
+
+local function paeth_predictor(a, b, c)
+    local p = a + b - c
+    local pa = math.abs(p - a)
+    local pb = math.abs(p - b)
+    local pc = math.abs(p - c)
+    if pa <= pb and pa <= pc then
+        return a
+    elseif pb <= pc then
+        return b
+    else
+        return c
+    end
+end
+
+-- Decode PNG (1-bit and 8-bit Grayscale, RGB, Palette, Grayscale+Alpha, RGBA)
+function M.decode_png(bytes)
+    local sig = "\x89PNG\r\n\x1a\n"
+    if len(bytes) < 33 or string.sub(bytes, 1, 8) ~= sig then
+        return error("image.decode_png: invalid PNG signature")
+    end
+    local pos = 9
+    local n = len(bytes)
+    local w = 0
+    local h = 0
+    local bit_depth = 8
+    local color_type = 0
+    local interlace = 0
+    local idat_chunks = []
+    local palette = []
+
+    while pos + 8 <= n do
+        local length = u32be(bytes, pos)
+        local ctype = string.sub(bytes, pos + 4, pos + 7)
+        local data_start = pos + 8
+        local data_end = data_start + length - 1
+        if data_end + 4 > n then
+            return error("image.decode_png: truncated chunk " .. ctype)
+        end
+        if ctype == "IHDR" then
+            w = u32be(bytes, data_start)
+            h = u32be(bytes, data_start + 4)
+            bit_depth = string.byte(bytes, data_start + 8)
+            color_type = string.byte(bytes, data_start + 9)
+            interlace = string.byte(bytes, data_start + 12)
+            if interlace ~= 0 then
+                return error("image.decode_png: interlaced PNG not supported")
+            end
+            if bit_depth ~= 8 and bit_depth ~= 1 then
+                return error(`image.decode_png: unsupported bit depth ${bit_depth}`)
+            end
+        elseif ctype == "PLTE" then
+            local count = length // 3
+            for i = 0, count - 1 do
+                local p = data_start + i * 3
+                local r = string.byte(bytes, p)
+                local g = string.byte(bytes, p + 1)
+                local b = string.byte(bytes, p + 2)
+                palette[] = rgb_to_luma(r, g, b)
+            end
+        elseif ctype == "IDAT" then
+            idat_chunks[] = string.sub(bytes, data_start, data_end)
+        elseif ctype == "IEND" then
+            break
+        end
+        pos = data_end + 5
+    end
+
+    if w <= 0 or h <= 0 or len(idat_chunks) == 0 then
+        return error("image.decode_png: missing IHDR or IDAT")
+    end
+
+    local compressed = string.join(idat_chunks, "")
+    local raw = compress.inflate(compressed, {format = "zlib"})?
+
+    local channels = 1
+    if color_type == 0 then
+        channels = 1
+    elseif color_type == 2 then
+        channels = 3
+    elseif color_type == 3 then
+        channels = 1
+    elseif color_type == 4 then
+        channels = 2
+    elseif color_type == 6 then
+        channels = 4
+    else
+        return error(`image.decode_png: unsupported color_type ${color_type}`)
+    end
+
+    local bpp = (bit_depth == 1) and 1 or channels
+    local stride = (bit_depth == 1) and ((w + 7) // 8) or (w * channels)
+    local expected_len = h * (1 + stride)
+    if len(raw) < expected_len then
+        return error("image.decode_png: decompressed data shorter than expected")
+    end
+
+    local prev_row = int_array(stride)
+    local curr_row = int_array(stride)
+    for _ = 0, stride - 1 do
+        prev_row[] = 0
+        curr_row[] = 0
+    end
+
+    local img = M.new(w, h, 255)
+    local rpos = 1
+
+    for y = 0, h - 1 do
+        local filter = string.byte(raw, rpos)
+        rpos += 1
+        for i = 0, stride - 1 do
+            local x_byte = string.byte(raw, rpos + i)
+            local a = (i >= bpp) and curr_row[i - bpp] or 0
+            local b = prev_row[i]
+            local c = (i >= bpp) and prev_row[i - bpp] or 0
+            local recon = x_byte
+            if filter == 1 then
+                recon = (x_byte + a) & 0xFF
+            elseif filter == 2 then
+                recon = (x_byte + b) & 0xFF
+            elseif filter == 3 then
+                recon = (x_byte + ((a + b) >> 1)) & 0xFF
+            elseif filter == 4 then
+                recon = (x_byte + paeth_predictor(a, b, c)) & 0xFF
+            end
+            curr_row[i] = recon
+        end
+        rpos += stride
+
+        if bit_depth == 1 then
+            for x = 0, w - 1 do
+                local byte_v = curr_row[x >> 3]
+                local bit = (byte_v >> (7 - (x & 7))) & 1
+                if color_type == 3 and len(palette) > bit then
+                    img.data[y * w + x] = palette[bit]
+                else
+                    img.data[y * w + x] = bit * 255
+                end
+            end
+        elseif color_type == 0 then
+            for x = 0, w - 1 do
+                img.data[y * w + x] = curr_row[x]
+            end
+        elseif color_type == 3 then
+            for x = 0, w - 1 do
+                local idx = curr_row[x]
+                img.data[y * w + x] = palette[idx] or idx
+            end
+        elseif color_type == 4 then
+            for x = 0, w - 1 do
+                local lum = curr_row[x * 2]
+                local alpha = curr_row[x * 2 + 1]
+                img.data[y * w + x] = (lum * alpha + 255 * (255 - alpha)) // 255
+            end
+        elseif color_type == 2 then
+            for x = 0, w - 1 do
+                local base = x * 3
+                img.data[y * w + x] = rgb_to_luma(curr_row[base], curr_row[base + 1], curr_row[base + 2])
+            end
+        elseif color_type == 6 then
+            for x = 0, w - 1 do
+                local base = x * 4
+                local lum = rgb_to_luma(curr_row[base], curr_row[base + 1], curr_row[base + 2])
+                local alpha = curr_row[base + 3]
+                img.data[y * w + x] = (lum * alpha + 255 * (255 - alpha)) // 255
+            end
+        end
+
+        for i = 0, stride - 1 do
+            prev_row[i] = curr_row[i]
+        end
+    end
+
+    return img
+end
+
+local function make_png_chunk(ctype, data)
+    local crc = hash.crc32(ctype .. data)
+    return pack_u32be(len(data)) .. ctype .. data .. pack_u32be(crc)
+end
+
+-- Encode 8-bit grayscale PNG
+function M.encode_png(img)
+    local w = img.width
+    local h = img.height
+    local ihdr = pack_u32be(w) .. pack_u32be(h) .. string.char(8, 0, 0, 0, 0)
+
+    local rows = []
+    for y = 0, h - 1 do
+        local line = ["\0"]
+        local base = y * w
+        for x = 0, w - 1 do
+            line[] = string.char(img.data[base + x])
+        end
+        rows[] = string.join(line, "")
+    end
+    local raw = string.join(rows, "")
+    local compressed = compress.deflate(raw)
+
+    return "\x89PNG\r\n\x1a\n" ..
+        make_png_chunk("IHDR", ihdr) ..
+            make_png_chunk("IDAT", compressed) ..
+                make_png_chunk("IEND", "")
+end
+
+function M.save_png(img, file_path)
+    return fs.write(file_path, M.encode_png(img))
+end
+
+-- image.decode(bytes) → Image|error (auto-detects PNG, BMP, PNM)
+function M.decode(bytes)
+    if len(bytes) < 2 then
+        return error("image.decode: empty or truncated image buffer")
+    end
+    if len(bytes) >= 8 and string.sub(bytes, 1, 8) == "\x89PNG\r\n\x1a\n" then
+        return M.decode_png(bytes)
+    elseif string.sub(bytes, 1, 2) == "BM" then
+        return M.decode_bmp(bytes)
+    elseif string.sub(bytes, 1, 1) == "P" then
+        local c2 = string.sub(bytes, 2, 2)
+        if c2 >= "1" and c2 <= "6" then
+            return M.decode_pnm(bytes)
+        end
+
+    end
+    return error("image.decode: unsupported image format (expected PNG, BMP, or PNM/PGM/PPM/PBM)")
+end
+
+-- image.load(file_path) → Image|error
+function M.load(file_path)
+    local bytes = fs.read(file_path)?
+    return M.decode(bytes)
+end
+
+return M

@@ -1,0 +1,27 @@
+-- pixels
+4	3	255	255	false
+255	0	99	true	false	true
+255	0	0
+-- ASCII art
+4	2	0	255	64	120
+180	180	0	180
+@ #+
+--@-
+#.##
+..#.
+X XX
+  X 
+6	6	true	255	0	0	255	0
+-- encode and decode
+png	true
+bmp	true
+pgm	true
+pbm	4	2	0	255	0	0
+P2	3	0	128	255
+P3	true	true
+image.decode: unsupported image format (expected PNG, BMP, or PNM/PGM/PPM/PBM)
+-- files
+.png	true	true
+.bmp	true	true
+.pgm	true	true
+.pbm	true	true

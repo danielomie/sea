@@ -24,6 +24,7 @@ pure-Sea libraries work out of the box.
 | `stream` | built in: `require("sea/stream")` (`libs/stream/stream.sea`) | pure Sea | — |
 | `log` | built in: `require("sea/log")` (`libs/log/log.sea`) | pure Sea | — |
 | `template` | `libs/template/template` | pure Sea | — |
+| `image` | `libs/image/image` | pure Sea (PNG through `compress`) | `make -C libs/compress` for PNG |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
@@ -1501,6 +1502,51 @@ data.bold = function(text) return "<b>" .. text .. "</b>" end
 data.who = "world"
 print(template.render("{{#bold}}hi {{who}}{{/bold}}", data))   -- <b>hi world</b>
 ```
+
+---
+
+## `image`
+
+Grayscale images in pure Sea: PNG, BMP and PGM/PPM/PBM read and written,
+ASCII art in and out. Used by the OCR and QR code libraries. PNG goes
+through `libs/compress` (build it with `make -C libs/compress`); the other
+formats need nothing.
+
+```sea
+local image = require("../libs/image/image")   -- relative to the requiring file
+
+local img = image.load("scan.png")?             -- PNG, BMP or PNM, by content
+print(img.width, img.height, img:get(10, 20))   -- 0 (black) .. 255 (white)
+img:set(0, 0, 0)
+img:save("copy.bmp")?                           -- the format by extension
+print(image.from_ascii("#.#\n.#.", {scale = 4}):to_ascii({threshold = 128}))
+```
+
+An image is a table `{width, height, data, binary}`: `data` is an
+`int_array` of `width * height` gray levels, row by row
+(`data[y * width + x]`, 0 black, 255 white); `binary` marks an image of only
+black and white. Color files are read as their luminance (an alpha channel
+is composed over white); 1-bit and 8-bit PNG (gray, RGB, palette, with
+alpha), 1/8/24/32-bit BMP and P1–P6 PNM are read.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `image.new` | `new(width, height [, fill]) → image` | A new image (`fill` default 255, white) |
+| `image.load` | `load(path) → image\|error` | Read a file (the format is detected from its bytes) |
+| `image.decode` | `decode(bytes) → image\|error` | The same, from a string |
+| `image.decode_png`, `decode_bmp`, `decode_pnm` | `decode_png(bytes) → image\|error` | One format |
+| `image.encode_png`, `encode_bmp`, `encode_pgm`, `encode_pbm` | `encode_png(img) → string` | Encode (PBM: pixels below 128 are black) |
+| `image.save_png`, `save_bmp`, `save_pgm`, `save_pbm` | `save_png(img, path) → true\|error` | Encode and write |
+| `image.from_ascii` | `from_ascii(art [, opts]) → image` | One pixel per character: `.` ` ` `0` white; `#` `@` `█` `1` `*` black; `%` `▓` dark, `+` `=` `▒` mid, `-` `:` `░` light gray; anything else black. `opts`: `scale` (pixels per character, default 1), `pad` (white border), `binary` (every character but `.` ` ` `0` black). Empty first and last lines are dropped |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `img:get` | `get(x, y) → int` | The gray level (255 outside the image) |
+| `img:set` | `set(x, y, v)` | Set it (clamped to 0..255; outside the image: nothing) |
+| `img:is_dark`, `img:is_ink` | `is_dark(x, y [, threshold]) → bool` | Darker than `threshold` (default 128) |
+| `img:clone` | `clone() → image` | A copy |
+| `img:to_ascii` | `to_ascii([opts]) → string` | One character per pixel: by gray level through `opts.ramp` (default `"@%#*+=-:. "`), or with any of `threshold` (default 128), `dark` (`"#"`), `light` (`"."`) as two characters |
+| `img:save` | `save(path) → true\|error` | By extension: `.png`, `.bmp`, `.pgm`/`.pnm`, `.pbm` (anything else: PNG) |
 
 ---
 
