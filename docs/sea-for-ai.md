@@ -274,6 +274,8 @@ print(string.join(keys, " "))         -- → a b c
 
 `int_array(n)` and `float_array(n)` are typed numeric arrays (contiguous,
 fast; same `[]=`, indexing and `len`; iterate them with a numeric `for`).
+`n` is a capacity: the array starts empty, and writing past the end grows it
+with zeros.
 
 ---
 

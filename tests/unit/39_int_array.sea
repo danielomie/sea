@@ -36,3 +36,14 @@ end
 print(len(b))         -- 100
 print(b[0])           -- 0
 print(b[99])          -- 99
+
+-- writing past the end grows the array, filling with zeros
+local c = int_array(8)
+for x = 0, 7 do c[x] = 0 end
+c[10] = 5
+c[3] += 2
+print(len(c), c[3], c[9], c[10])   -- 11 2 0 5
+local f = float_array()
+f[2] = 1.5
+f[-1] *= 2
+print(len(f), f[0], f[2])          -- 3 0 3

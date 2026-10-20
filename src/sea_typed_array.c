@@ -36,9 +36,12 @@ int64_t sea_int_array_get(SeaIntArray *a, int64_t idx) {
     return a->data[(uint32_t)idx];
 }
 
+/* Writing past the end grows the array, filling the gap with zeros (a plain
+ * array fills it with nil). */
 void sea_int_array_set(SeaIntArray *a, int64_t idx, int64_t v) {
     if (idx < 0) idx += (int64_t)a->len;
-    if (idx < 0 || (uint64_t)idx >= a->len) return;
+    if (idx < 0 || idx > (int64_t)UINT32_MAX - 1) return;
+    while ((uint64_t)idx >= a->len) sea_int_array_push(a, 0);
     a->data[(uint32_t)idx] = v;
 }
 
@@ -79,7 +82,8 @@ double sea_float_array_get(SeaFloatArray *a, int64_t idx) {
 
 void sea_float_array_set(SeaFloatArray *a, int64_t idx, double v) {
     if (idx < 0) idx += (int64_t)a->len;
-    if (idx < 0 || (uint64_t)idx >= a->len) return;
+    if (idx < 0 || idx > (int64_t)UINT32_MAX - 1) return;
+    while ((uint64_t)idx >= a->len) sea_float_array_push(a, 0.0);
     a->data[(uint32_t)idx] = v;
 }
 

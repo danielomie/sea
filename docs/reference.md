@@ -1568,7 +1568,7 @@ No per-element reference counting — more efficient for numeric data.
 local ia = int_array()      -- typed int64 array
 local fa = float_array(64)  -- with initial capacity hint
 ia[] = 42                   -- append
-ia[0] = 99                  -- set (0-based)
+ia[0] = 99                  -- set (0-based); past the end grows, filling with 0
 v = ia[0]                   -- get
 len(ia)                     -- count
 -- Note: for-in is NOT supported on typed arrays; use numeric for
