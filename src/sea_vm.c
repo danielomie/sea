@@ -2599,13 +2599,13 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         if (SEA_LIKELY(sea_is_int(idx_v) && sea_is_int(limit_v) && sea_is_int(step_v))) {
             int64_t step = sea_as_int(step_v);
             if (SEA_LIKELY(step > 0)) {
-                /* Positive step: increment NaN-boxed idx directly (no decode/encode).
-                 * idx_v + step == sea_int_val(sea_as_int(idx_v) + step) for non-overflow values.
-                 * Both new_idx and limit_v carry the same INT tag, so uint64_t comparison
-                 * correctly mirrors signed comparison for non-negative payloads. */
-                SeaValue new_idx = idx_v + (SeaValue)step;
+                /* Decoded, not the raw NaN-boxed words: a negative payload
+                 * compares above a positive one as raw bits, and -1 + 1
+                 * carries into the tag (for i = -1, 1 ran once). */
+                int64_t idx   = sea_as_int(idx_v) + step;
+                SeaValue new_idx = sea_int_val(idx);
                 REG(a) = new_idx;
-                if (new_idx <= limit_v) { REG(a+3) = new_idx; ip += sbx; JIT_BACKEDGE(); }
+                if (idx <= sea_as_int(limit_v)) { REG(a+3) = new_idx; ip += sbx; JIT_BACKEDGE(); }
             } else {
                 int64_t idx   = sea_as_int(idx_v) + step;
                 int64_t limit = sea_as_int(limit_v);
@@ -2630,9 +2630,10 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         uint32_t i = ip[-1];
         int a = SEA_INSTR_A(i);
         int sbx = SEA_INSTR_sBx(i);
-        SeaValue new_idx = REG(a) + 1;  /* raw NaN-boxed increment: safe for idx < limit < 2^47 */
+        int64_t idx = sea_as_int(REG(a)) + 1;  /* decoded: see FOR_LOOP */
+        SeaValue new_idx = sea_int_val(idx);
         REG(a) = new_idx;
-        if (new_idx <= REG(a+1)) { REG(a+3) = new_idx; ip += sbx; JIT_BACKEDGE(); }
+        if (idx <= sea_as_int(REG(a+1))) { REG(a+3) = new_idx; ip += sbx; JIT_BACKEDGE(); }
         DISPATCH();
     }
     lbl_FOR_LOOP_INT: {
@@ -2642,9 +2643,10 @@ static int vm_run_inner(SeaVM *vm, int base_frame, bool top, bool unwind) {
         int sbx = SEA_INSTR_sBx(i);
         int64_t step = sea_as_int(REG(a+2));
         if (SEA_LIKELY(step > 0)) {
-            SeaValue new_idx = REG(a) + (SeaValue)step;
+            int64_t idx = sea_as_int(REG(a)) + step;  /* decoded: see FOR_LOOP */
+            SeaValue new_idx = sea_int_val(idx);
             REG(a) = new_idx;
-            if (new_idx <= REG(a+1)) { REG(a+3) = new_idx; ip += sbx; JIT_BACKEDGE(); }
+            if (idx <= sea_as_int(REG(a+1))) { REG(a+3) = new_idx; ip += sbx; JIT_BACKEDGE(); }
         } else {
             int64_t idx = sea_as_int(REG(a)) + step;
             SeaValue new_idx = sea_int_val(idx);

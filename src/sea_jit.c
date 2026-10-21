@@ -979,14 +979,16 @@ static void emit_instr(JitCtx *J, int idx) {
         gcc_jit_block *pos = newblk(J), *neg = newblk(J);
         gcc_jit_block_end_with_conditional(fast, NULL,
             cmp(J, GCC_JIT_COMPARISON_GT, as_int(J, reg(J, a + 2)), ci64(J, 0)), pos, neg);
-        /* positive step: raw NaN-boxed increment + unsigned compare */
+        /* positive step: decode, signed compare (the raw NaN-boxed words
+         * do not order negative payloads below positive ones, and -1 + 1
+         * carries into the tag) */
         {
-            gcc_jit_rvalue *ni = bin(J, GCC_JIT_BINARY_OP_PLUS, J->u64, reg(J, a),
-                gcc_jit_context_new_cast(J->ctx, NULL, as_int(J, reg(J, a + 2)), J->u64));
-            store(J, pos, a, ni);
+            gcc_jit_rvalue *idxv = bin(J, GCC_JIT_BINARY_OP_PLUS, J->i64,
+                                       as_int(J, reg(J, a)), as_int(J, reg(J, a + 2)));
+            store(J, pos, a, int_val(J, idxv));
             gcc_jit_block *cont = newblk(J);
             gcc_jit_block_end_with_conditional(pos, NULL,
-                cmp(J, GCC_JIT_COMPARISON_LE, reg(J, a), reg(J, a + 1)), cont, blk_at(J, next));
+                cmp(J, GCC_JIT_COMPARISON_LE, as_int(J, reg(J, a)), as_int(J, reg(J, a + 1))), cont, blk_at(J, next));
             store(J, cont, a + 3, reg(J, a));
             go(J, cont, target);
         }
@@ -1005,11 +1007,11 @@ static void emit_instr(JitCtx *J, int idx) {
     }
     case OP_FOR_LOOP_STEP1: {
         int target = idx + 1 + SEA_INSTR_sBx(in);
-        gcc_jit_rvalue *ni = bin(J, GCC_JIT_BINARY_OP_PLUS, J->u64, reg(J, a), cu64(J, 1));
-        store(J, blk, a, ni);
+        gcc_jit_rvalue *idxv = bin(J, GCC_JIT_BINARY_OP_PLUS, J->i64, as_int(J, reg(J, a)), ci64(J, 1));
+        store(J, blk, a, int_val(J, idxv));
         gcc_jit_block *cont = newblk(J);
         gcc_jit_block_end_with_conditional(blk, NULL,
-            cmp(J, GCC_JIT_COMPARISON_LE, reg(J, a), reg(J, a + 1)), cont, blk_at(J, next));
+            cmp(J, GCC_JIT_COMPARISON_LE, as_int(J, reg(J, a)), as_int(J, reg(J, a + 1))), cont, blk_at(J, next));
         store(J, cont, a + 3, reg(J, a));
         go(J, cont, target);
         break;
@@ -1020,12 +1022,12 @@ static void emit_instr(JitCtx *J, int idx) {
         gcc_jit_block_end_with_conditional(blk, NULL,
             cmp(J, GCC_JIT_COMPARISON_GT, as_int(J, reg(J, a + 2)), ci64(J, 0)), pos, neg);
         {
-            gcc_jit_rvalue *ni = bin(J, GCC_JIT_BINARY_OP_PLUS, J->u64, reg(J, a),
-                gcc_jit_context_new_cast(J->ctx, NULL, as_int(J, reg(J, a + 2)), J->u64));
-            store(J, pos, a, ni);
+            gcc_jit_rvalue *idxv = bin(J, GCC_JIT_BINARY_OP_PLUS, J->i64,
+                                       as_int(J, reg(J, a)), as_int(J, reg(J, a + 2)));
+            store(J, pos, a, int_val(J, idxv));
             gcc_jit_block *cont = newblk(J);
             gcc_jit_block_end_with_conditional(pos, NULL,
-                cmp(J, GCC_JIT_COMPARISON_LE, reg(J, a), reg(J, a + 1)), cont, blk_at(J, next));
+                cmp(J, GCC_JIT_COMPARISON_LE, as_int(J, reg(J, a)), as_int(J, reg(J, a + 1))), cont, blk_at(J, next));
             store(J, cont, a + 3, reg(J, a));
             go(J, cont, target);
         }
