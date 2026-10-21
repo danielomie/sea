@@ -17,7 +17,7 @@ bin/sea fmt -l .      # sea fmt / doc / test: Sea scripts in tools/, embedded at
                       # MODULES in the Makefile embeds Sea modules for require("sea/...")
                       # (sea/test = libs/test/test.sea, sea/check = tools/lib/check.sea,
                       # sea/stream = libs/stream/stream.sea, sea/flags = libs/flags/flags.sea,
-                      # sea/log = libs/log/log.sea;
+                      # sea/log = libs/log/log.sea, sea/dotenv = libs/dotenv/dotenv.sea;
                       # the tools parse their arguments with sea/flags)
                       # into gen/sea_modules.h
 
@@ -104,10 +104,10 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
    there: `require("json")` → `lib/sea/json/json.so`). tools/lib/check.sea, tools/build.sea and
    tools/lsp.sea repeat this search: keep them in sync with `src/sea_stdlib.c`
 
-Before the search: built-in modules, the embedded `sea/test`/`sea/check`/`sea/stream`/`sea/flags`/`sea/log`, then (in a
+Before the search: built-in modules, the embedded `sea/test`/`sea/check`/`sea/stream`/`sea/flags`/`sea/log`/`sea/dotenv`, then (in a
 `sea build` executable) the bundled modules.
 
-Native libraries are `.so` files exposing a `sea_open` entry point. `json` and `csv` are also compiled into the binary (`EMBED_LIBS` in the Makefile: `-Dsea_open=sea_open_<name>`, registered by `sea_lib_embedded_register`), so they are globals. The `libs/` directory contains: `console`, `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `websocket`, `duckdb`, `sqlite` (Sea + native) and `flags`, `test`, `template`, `stream`, `log`, `image`, `truetype` (pure Sea; `test`, `stream`, `flags` and `log` are embedded as `sea/test`, `sea/stream`, `sea/flags`, `sea/log`) — see `docs/libs.md`.
+Native libraries are `.so` files exposing a `sea_open` entry point. `json` and `csv` are also compiled into the binary (`EMBED_LIBS` in the Makefile: `-Dsea_open=sea_open_<name>`, registered by `sea_lib_embedded_register`), so they are globals. The `libs/` directory contains: `console`, `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `tensor` (native `.so`), `http`, `ssl`, `jwt`, `websocket`, `duckdb`, `sqlite` (Sea + native) and `flags`, `test`, `template`, `stream`, `log`, `dotenv`, `image`, `truetype` (pure Sea; `test`, `stream`, `flags`, `log` and `dotenv` are embedded as `sea/test`, `sea/stream`, `sea/flags`, `sea/log`, `sea/dotenv`) — see `docs/libs.md`.
 TCP sockets are the built-in `net` module (`src/sea_lib_net.c`); `libs/ssl` and `libs/http` build on it.
 The parser is also exposed to Sea code as the built-in `sea/parser` module (`src/sea_lib_parser.c`:
 parse, tokenize, check, walk, format). Changing the AST (`sea_ast.h`) or the parser means updating

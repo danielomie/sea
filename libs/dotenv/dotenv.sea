@@ -1,0 +1,224 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- dotenv — read .env files into the environment
+--
+--   local dotenv = require("sea/dotenv")
+--   dotenv.load()                         -- ./.env, if there is one
+--   print(os.getenv("API_KEY"))
+--
+-- The format (as python-dotenv and the dotenv family):
+--   # a comment
+--   KEY=value                  spaces around = and the value are trimmed
+--   export KEY=value           "export " is allowed and ignored
+--   KEY=value # comment        a # after a space starts a comment
+--   KEY='literal $text'        single quotes: as written, no expansion
+--   KEY="line 1\nline 2"       double quotes: \n \t \r \" \\ \$ escapes and
+--                              expansion; the value may span lines
+--   KEY=`literal`              backquotes: as written
+--   KEY=${OTHER}/bin           $VAR, ${VAR} and ${VAR:-default} expand to
+--                              earlier keys of the file, else the environment
+--   KEY=                       an empty value
+--
+-- dotenv.load([path [, opts]]) → table | error
+--   Sets the variables (os.setenv) and returns them. Without a path it reads
+--   ./.env and a missing file is fine; a given path must exist.
+--   opts.override = true replaces variables already set (by default the
+--   environment wins, so real settings beat the file); opts.search = true
+--   looks for the file in the parent directories too.
+-- dotenv.values([path [, opts]]) → table | error   the same, without os.setenv
+-- dotenv.parse(text [, env]) → table | error        parse a string (env: a
+--   table to expand against instead of the environment)
+-- dotenv.find([name]) → path | nil                  the nearest .env upwards
+-- dotenv.stringify(table) → text                    a .env text, keys sorted
+
+local M = {}
+
+local NAME = "^[A-Za-z_][A-Za-z0-9_.-]*$"
+
+local function lookup(name, vars, env)
+    local v = vars[name]
+    if v ~= nil then return v end
+    if env ~= nil then return env[name] end
+    return os.getenv(name)
+end
+
+-- expand $VAR, ${VAR} and ${VAR:-default}
+local function expand(s, vars, env)
+    if not string.contains(s, "$") then return s end
+    local out = []
+    local i = 1
+    local n = len(s)
+    while i <= n do
+        local ch = string.sub(s, i, i)
+        if ch == "$" and string.sub(s, i + 1, i + 1) == "{" then
+            local close = string.find(s, "}", i + 2)
+            if close == nil then
+                out[] = string.sub(s, i)
+                break
+            end
+            local inner = string.sub(s, i + 2, close - 1)
+            local name = inner
+            local fallback = nil
+            local sep = string.find(inner, ":-")
+            if sep ~= nil then
+                name = string.sub(inner, 1, sep - 1)
+                fallback = string.sub(inner, sep + 2)
+            end
+            local v = lookup(name, vars, env)
+            if (v == nil or v == "") and fallback ~= nil then v = expand(fallback, vars, env) end
+            out[] = v or ""
+            i = close + 1
+        elseif ch == "$" then
+            local m = re.captures("^([A-Za-z_][A-Za-z0-9_]*)", string.sub(s, i + 1))
+            if m ~= nil then
+                out[] = lookup(m[1], vars, env) or ""
+                i += 1 + len(m[1])
+            else
+                out[] = "$"
+                i += 1
+            end
+        else
+            out[] = ch
+            i += 1
+        end
+    end
+    return string.join(out, "")
+end
+
+local ESCAPES = {n = "\n", t = "\t", r = "\r", ["\""] = "\"", ["\\"] = "\\", ["$"] = "\x00DOLLAR\x00"}
+
+-- dotenv.parse(text [, env]) → table | error
+function M.parse(text, env)
+    local vars = {}
+    local lines = string.splitlines(text)
+    local i = 0
+    while i < len(lines) do
+        local lineno = i + 1
+        local line = string.trim(lines[i])
+        i += 1
+        if line ~= "" and not string.starts_with(line, "#") then
+            if string.starts_with(line, "export ") then line = string.trim(string.sub(line, 8)) end
+            local eq = string.find(line, "=")
+            if eq == nil then return error(`dotenv: line ${lineno}: expected KEY=value`) end
+            local key = string.trim(string.sub(line, 1, eq - 1))
+            if re.match(NAME, key) == nil then return error(`dotenv: line ${lineno}: invalid name '${key}'`) end
+            local rest = string.trim(string.sub(line, eq + 1))
+            local q = string.sub(rest, 1, 1)
+            local value
+            if q == "\"" or q == "'" or q == "`" then
+                -- the value runs to the matching quote, maybe on a later line
+                local body = string.sub(rest, 2)
+                local function closing(s)
+                    local j = 1
+                    while j <= len(s) do
+                        local c = string.sub(s, j, j)
+                        if c == "\\" and q == "\"" then
+                            j += 2
+                        elseif c == q then
+                            return j
+                        else
+                            j += 1
+                        end
+                    end
+                    return nil
+                end
+                local close = closing(body)
+                while close == nil do
+                    if i >= len(lines) then return error(`dotenv: line ${lineno}: unterminated ${q}`) end
+                    body ..= "\n" .. lines[i]
+                    i += 1
+                    close = closing(body)
+                end
+                local after = string.trim(string.sub(body, close + 1))
+                if after ~= "" and not string.starts_with(after, "#") then
+                    return error(`dotenv: line ${lineno}: unexpected text after the closing quote`)
+                end
+                value = string.sub(body, 1, close - 1)
+                if q == "\"" then
+                    value = re.gsub("\\\\(.)", value, function(m)
+                        return ESCAPES[m.groups[1]] or m.text
+                    end)
+                    value = expand(value, vars, env)
+                    value = string.replace(value, "\x00DOLLAR\x00", "$")
+                end
+            else
+                local hash = re.match("\\s#", rest)
+                if hash ~= nil then rest = string.trim(string.sub(rest, 1, hash.start - 1)) end
+                if rest == "#" or string.starts_with(rest, "#") then rest = "" end
+                value = expand(rest, vars, env)
+            end
+            vars[key] = value
+        end
+    end
+    return vars
+end
+
+-- dotenv.find([name]) → the path of the nearest file named name (default
+-- ".env") in the current directory or a parent, or nil
+function M.find(name)
+    name = name or ".env"
+    local dir = fs.cwd()
+    while true do
+        local p = path.join(dir, name)
+        if fs.isfile(p) then return p end
+        local up = path.dirname(dir)
+        if up == dir then return nil end
+        dir = up
+    end
+end
+
+local function read(p, opts)
+    opts = opts or {}
+    local optional = p == nil
+    if p == nil then
+        p = opts.search and M.find(".env") or ".env"
+        if p == nil then return {} end
+    elseif opts.search and not fs.isfile(p) then
+        p = M.find(path.basename(p)) or p
+    end
+    if not fs.isfile(p) then
+        if optional then return {} end
+        return error(`dotenv: ${p}: no such file`)
+    end
+    local text = fs.read(p)?
+    local vars = M.parse(text)
+    if is_error(vars) then return error(`${p}: ${vars.message}`) end
+    return vars
+end
+
+-- dotenv.values([path [, opts]]) → table | error (the environment untouched)
+function M.values(p, opts)
+    return read(p, opts)
+end
+
+-- dotenv.load([path [, opts]]) → table | error
+function M.load(p, opts)
+    opts = opts or {}
+    local vars = read(p, opts)?
+    for k, v in vars do
+        if opts.override or os.getenv(k) == nil then os.setenv(k, v)? end
+    end
+    return vars
+end
+
+-- dotenv.stringify(table) → .env text (values quoted when needed)
+function M.stringify(vars)
+    local keys = list.keys(vars)
+    sort.sort(keys)
+    local out = []
+    for _, k in keys do
+        local v = tostring(vars[k])
+        if re.match("^[A-Za-z0-9_./:@%+,-]*$", v) == nil then
+            v = string.replace(v, "\\", "\\\\")
+            v = string.replace(v, "\"", "\\\"")
+            v = string.replace(v, "\n", "\\n")
+            v = string.replace(v, "$", "\\$")
+            v = `"${v}"`
+        end
+        out[] = `${k}=${v}`
+    end
+    return string.join(out, "\n") .. (len(out) > 0 and "\n" or "")
+end
+
+return M

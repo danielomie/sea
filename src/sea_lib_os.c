@@ -18,6 +18,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/random.h>
+#include <pthread.h>
+#include <stdbool.h>
 
 // os.exit(code?)
 static SeaValue os_exit(SeaVM *vm, int argc, SeaValue *args) {
@@ -30,12 +32,72 @@ static SeaValue os_exit(SeaVM *vm, int argc, SeaValue *args) {
 }
 
 // os.getenv(name)
+/* The environment is process-wide and setenv() may move it while another
+ * scheduler thread reads it: every os.* access goes through this lock. */
+static pthread_mutex_t env_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static SeaValue os_getenv(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
     if (argc < 1 || !sea_is_string(args[0])) return SEA_NIL_VAL;
+    pthread_mutex_lock(&env_lock);
     const char *val = getenv(SEA_AS_STRING(args[0])->data);
-    if (!val) return SEA_NIL_VAL;
-    return sea_obj_val(&sea_string_from_cstr(val)->obj);
+    SeaValue r = val ? sea_obj_val(&sea_string_from_cstr(val)->obj) : SEA_NIL_VAL;
+    pthread_mutex_unlock(&env_lock);
+    return r;
+}
+
+static bool valid_env_name(SeaString *s) {
+    if (s->len == 0) return false;
+    for (uint32_t i = 0; i < s->len; i++) {
+        if (s->data[i] == '=' || s->data[i] == '\0') return false;
+    }
+    return true;
+}
+
+/* os.setenv(name, value) → true | error — for this process and the
+ * processes it starts afterwards */
+static SeaValue os_setenv(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 2 || !sea_is_string(args[0]) || !sea_is_string(args[1]))
+        return sea_make_error_str(vm, "os.setenv: expects (name, value) strings");
+    SeaString *name = SEA_AS_STRING(args[0]), *value = SEA_AS_STRING(args[1]);
+    if (!valid_env_name(name)) return sea_make_error_str(vm, "os.setenv: invalid variable name");
+    if (memchr(value->data, '\0', value->len)) return sea_make_error_str(vm, "os.setenv: value contains a NUL byte");
+    pthread_mutex_lock(&env_lock);
+    int rc = setenv(name->data, value->data, 1);
+    pthread_mutex_unlock(&env_lock);
+    if (rc != 0) return sea_make_error_str(vm, "os.setenv: cannot set the variable");
+    return SEA_TRUE_VAL;
+}
+
+/* os.unsetenv(name) → true | error */
+static SeaValue os_unsetenv(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || !sea_is_string(args[0])) return sea_make_error_str(vm, "os.unsetenv: expects a name");
+    SeaString *name = SEA_AS_STRING(args[0]);
+    if (!valid_env_name(name)) return sea_make_error_str(vm, "os.unsetenv: invalid variable name");
+    pthread_mutex_lock(&env_lock);
+    unsetenv(name->data);
+    pthread_mutex_unlock(&env_lock);
+    return SEA_TRUE_VAL;
+}
+
+extern char **environ;
+
+/* os.environ() → map name → value (a copy) */
+static SeaValue os_environ(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm; (void)argc; (void)args;
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    pthread_mutex_lock(&env_lock);
+    for (char **e = environ; e && *e; e++) {
+        const char *eq = strchr(*e, '=');
+        if (!eq) continue;
+        SeaString *v = sea_string_from_cstr(eq + 1);
+        SeaString *k = sea_string_new(*e, (uint32_t)(eq - *e));
+        sea_table_set(t, sea_obj_val(&k->obj), sea_obj_val(&v->obj));
+        sea_obj_release(&k->obj);
+        sea_obj_release(&v->obj);
+    }
+    pthread_mutex_unlock(&env_lock);
+    return sea_obj_val(&t->obj);
 }
 
 /* os.exec(cmd) → {code=N, output="..."}
@@ -269,6 +331,9 @@ void sea_lib_os_register(SeaVM *vm) {
 
     mod_set(vm, mod, "exit",     os_exit);
     mod_set(vm, mod, "getenv",   os_getenv);
+    mod_set(vm, mod, "setenv",   os_setenv);
+    mod_set(vm, mod, "unsetenv", os_unsetenv);
+    mod_set(vm, mod, "environ",  os_environ);
     mod_set(vm, mod, "exec",     os_exec);
     mod_set(vm, mod, "readfile", os_readfile);
     mod_set(vm, mod, "filesize", os_filesize);

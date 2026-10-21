@@ -23,6 +23,7 @@ pure-Sea libraries work out of the box.
 | `test` | `libs/test/test` | pure Sea | — |
 | `stream` | built in: `require("sea/stream")` (`libs/stream/stream.sea`) | pure Sea | — |
 | `log` | built in: `require("sea/log")` (`libs/log/log.sea`) | pure Sea | — |
+| `dotenv` | built in: `require("sea/dotenv")` (`libs/dotenv/dotenv.sea`) | pure Sea | — |
 | `template` | `libs/template/template` | pure Sea | — |
 | `image` | `libs/image/image` | pure Sea (PNG through `compress`) | `make -C libs/compress` for PNG |
 | `truetype` | `libs/truetype/truetype` | pure Sea (uses `image`) | — |
@@ -1443,6 +1444,35 @@ A logger has the same functions as methods: `l:info(msg, fields)`,
 `l:log(level, msg, fields)`. Fields come out in the order of their literal
 (a map's in key order), the logger's before the call's. In text format, a
 value whose text has spaces, quotes or `=` is quoted (`key="a b"`).
+
+## `dotenv`
+
+Reads `.env` files into the environment (with `os.setenv`). Pure Sea, built
+into the `sea` binary as `require("sea/dotenv")` (`libs/dotenv/dotenv.sea`).
+
+```sea
+local dotenv = require("sea/dotenv")
+dotenv.load()?                          -- ./.env when there is one
+local key = os.getenv("API_KEY")
+```
+
+| Function | Description |
+|----------|-------------|
+| `dotenv.load([path [, opts]]) → table\|error` | Set the file's variables and return them. Without `path` it reads `./.env`, and a missing file is fine (an empty table); a given `path` must exist. `opts.override = true` replaces variables already set (by default the environment wins, so real settings beat the file); `opts.search = true` looks in the parent directories too |
+| `dotenv.values([path [, opts]]) → table\|error` | The same without touching the environment |
+| `dotenv.parse(text [, env]) → table\|error` | Parse a string; `env` is a table to expand `$VAR` against instead of the environment |
+| `dotenv.find([name]) → path\|nil` | The nearest file named `name` (default `.env`) in the current directory or a parent |
+| `dotenv.stringify(table) → string` | A `.env` text, keys sorted, values quoted when needed (it parses back to the same table) |
+
+**Format:**
+- Blank lines and `# comments` are skipped.
+- `KEY=value`: spaces around `=` and the value are trimmed, and an optional `export ` before the name is ignored.
+- Names are letters, digits, `_`, `.` and `-`, not starting with a digit.
+- Unquoted values: a `#` after a space starts a comment.
+- `'single quotes'` and `` `backquotes` ``: the text as written.
+- `"double quotes"`: the escapes `\n \t \r \" \\ \$`, and the value may span lines.
+- Expansion: `$VAR`, `${VAR}` and `${VAR:-default}` expand in unquoted and double-quoted values, to earlier keys of the file first, then the environment.
+- Errors name the line: `dotenv: line 3: unterminated "`.
 
 ## `template`
 

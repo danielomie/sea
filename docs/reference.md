@@ -807,6 +807,9 @@ end
 |----------|-----------|-------------|
 | `os.exit` | `exit([code])` | Terminate the process with exit code (default 0) |
 | `os.getenv` | `getenv(name) → string\|nil` | Read an environment variable |
+| `os.setenv` | `setenv(name, value) → true\|error` | Set an environment variable, for this process and the processes it starts afterwards (`process.run`, `process.spawn`). A name with `=` or a NUL byte is an error. The environment is shared by every goroutine |
+| `os.unsetenv` | `unsetenv(name) → true\|error` | Remove an environment variable |
+| `os.environ` | `environ() → map` | A copy of the whole environment, name → value |
 | `os.exec` | `exec(cmd) → {code=int, output=string}` | Run a shell command; captures stdout+stderr (blocks its thread; module `process` runs commands without a shell, with stdin, env, timeouts and streaming) |
 | `os.readfile` | `readfile(path) → string\|nil` | Read entire file contents as a string (module `fs` has the full set: `fs.read` reports why a read failed) |
 | `os.filesize` | `filesize(path) → int\|nil` | File size in bytes, or `nil` if not found |
@@ -1872,7 +1875,7 @@ local http = require("./libs/http/http")
 Built-in modules (`math`, `string`, `utf8`, `re`, `encoding`, `hash`, `io`,
 `os`, `fs`, `path`, `process`, `sync`, `net`, `time`, `gc`, `sort`, `bigint`,
 `json`, `csv`, `list`,
-`sea/parser`, and the Sea modules `sea/test`, `sea/check`, `sea/stream`, `sea/flags` and `sea/log`) are found
+`sea/parser`, and the Sea modules `sea/test`, `sea/check`, `sea/stream`, `sea/flags`, `sea/log` and `sea/dotenv`) are found
 first, then, in an executable made by `sea build`, the modules bundled in
 it. An absolute path (`require("/opt/sea/libs/yaml/yaml")`) names the file
 itself, tried as `.sea`, `/init.sea`, then `.so`. Otherwise the search order

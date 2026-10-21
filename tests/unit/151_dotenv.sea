@@ -1,0 +1,58 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- Test: os.setenv / os.unsetenv / os.environ and sea/dotenv
+local dotenv = require("sea/dotenv")
+
+print(os.setenv("SEA_T151", "valor com espaço"), os.getenv("SEA_T151"))
+print(os.environ()["SEA_T151"])
+print(process.run("printf %s \"$SEA_T151\"").stdout)
+os.unsetenv("SEA_T151")
+print(os.getenv("SEA_T151"))
+print(os.setenv("A=B", "x"), os.setenv("", "x"))
+
+local text = [[
+# comentário
+export API_KEY = abc123   # chave
+EMPTY=
+BIN=${SEA_T151_MISSING:-/opt}/bin
+SINGLE='literal $API_KEY # não é comentário'
+DOUBLE="l1\nl2 \"q\" $API_KEY \$lit"
+MULTI="primeira
+segunda"
+BACK=`crase`
+URL=http://x.com/#frag
+REF=$API_KEY-${EMPTY:-vazio}
+]]
+local v = dotenv.parse(text)
+for _, k in list.keys(v) do print(k, json.encode(v[k])) end
+print(dotenv.parse("SEM_IGUAL"))
+print(dotenv.parse("1X=2"))
+print(dotenv.parse("A=\"aberto"))
+print(dotenv.parse("A='x' lixo"))
+print(json.encode(dotenv.parse("X=$Y", {Y = "do env"})))
+
+-- stringify reads back the same
+local back = dotenv.parse(dotenv.stringify({A = "simples", B = "a b", C = "x\"y$z\nw"}))
+print(back.A, back.B, json.encode(back.C))
+
+-- load: the environment wins unless override
+local dir = fs.tempdir("dotenv")
+fs.write(path.join(dir, ".env"), "SEA_T151_A=do arquivo\nSEA_T151_B=do arquivo\n")
+os.setenv("SEA_T151_B", "do ambiente")
+local loaded = dotenv.load(path.join(dir, ".env"))
+print(loaded.SEA_T151_A, os.getenv("SEA_T151_A"), os.getenv("SEA_T151_B"))
+dotenv.load(path.join(dir, ".env"), {override = true})
+print(os.getenv("SEA_T151_B"))
+local missing = dotenv.load(path.join(dir, "nao_existe.env"))
+print(is_error(missing), string.ends_with(missing.message, "nao_existe.env: no such file"))
+
+-- without a path: ./.env if present (search = true: parents too)
+local sub = path.join(dir, "a", "b")
+fs.mkdir(sub, {parents = true})
+local old = fs.cwd()
+fs.chdir(sub)
+print(json.encode(dotenv.values()))
+print(dotenv.values(nil, {search = true}).SEA_T151_A)
+print(dotenv.find() == path.join(fs.realpath(dir), ".env"))
+fs.chdir(old)

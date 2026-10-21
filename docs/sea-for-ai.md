@@ -496,8 +496,8 @@ print(geometry.area(3, 4))
 - Built-in modules need no `require` (they are globals):
   `math string utf8 re encoding hash io os fs path process sync time net gc
   sort list bigint json csv`. `require("sea/parser")`, `require("sea/test")`,
-  `require("sea/check")`, `require("sea/stream")`, `require("sea/flags")`
-  and `require("sea/log")` are built in too.
+  `require("sea/check")`, `require("sea/stream")`, `require("sea/flags")`,
+  `require("sea/log")` and `require("sea/dotenv")` are built in too.
 - Doc comments: a comment block at the top of the file documents the
   module; `--` lines right above a function document it, by convention
   starting with the signature (`-- name(args) → result`). `sea doc` reads

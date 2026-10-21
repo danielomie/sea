@@ -1,0 +1,26 @@
+true	valor com espaço
+valor com espaço
+valor com espaço
+nil
+error(os.setenv: invalid variable name)	error(os.setenv: invalid variable name)
+API_KEY	"abc123"
+BACK	"crase"
+BIN	"/opt/bin"
+DOUBLE	"l1\nl2 \"q\" abc123 $lit"
+EMPTY	""
+MULTI	"primeira\nsegunda"
+REF	"abc123-vazio"
+SINGLE	"literal $API_KEY # não é comentário"
+URL	"http://x.com/#frag"
+error(dotenv: line 1: expected KEY=value)
+error(dotenv: line 1: invalid name '1X')
+error(dotenv: line 1: unterminated ")
+error(dotenv: line 1: unexpected text after the closing quote)
+{"X":"do env"}
+simples	a b	"x\"y$z\nw"
+do arquivo	do arquivo	do ambiente
+do arquivo
+true	true
+{}
+do arquivo
+true

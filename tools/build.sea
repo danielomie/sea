@@ -71,6 +71,7 @@ builtin["sea/check"] = true
 builtin["sea/stream"] = true
 builtin["sea/flags"] = true
 builtin["sea/log"] = true
+builtin["sea/dotenv"] = true
 
 -- The libraries installed with the sea binary (make install): lib/sea next to
 -- its bin/ directory, as require looks; nil when there is none
