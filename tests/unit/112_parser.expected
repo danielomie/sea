@@ -48,3 +48,8 @@ local t = b:add(1)
 local h = cfg
     .db.host
 local u = b:add(1):add(2)
+q:a()
+    :b(function(s)
+        s:c()
+    end)
+    :d()

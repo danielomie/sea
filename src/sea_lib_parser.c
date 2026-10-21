@@ -911,13 +911,18 @@ static int node_end_line(Obj *n) {
  * own stays there, one level in:
  *     b:add("a")
  *         :add("b") */
-static void chain_break(Printer *P, Obj *n, Obj *obj) {
+/* A ':' or '.' that the source put on a new line stays there, one level in.
+ * Returns 1 when it broke the line: the caller then prints the method's
+ * arguments one level in too, so a function passed there keeps its body
+ * under the chain. */
+static int chain_break(Printer *P, Obj *n, Obj *obj) {
     int l = node_line(n), e = node_end_line(obj);
-    if (l <= 0 || e <= 0 || l <= e) return;
+    if (l <= 0 || e <= 0 || l <= e) return 0;
     outc(P, '\n');
     P->depth++;
     indent(P);
     P->depth--;
+    return 1;
 }
 static int node_col(Obj *n)  { return n ? (int)tget_int(n, "col") : 0; }
 
@@ -1653,11 +1658,13 @@ static void print_expr(Printer *P, SeaValue v) {
         Obj *obj = need(P, n, "object");
         if (!obj) goto done;
         print_paren(P, sea_obj_val(obj), postfix_paren(obj));
-        chain_break(P, n, obj);
+        int broke = chain_break(P, n, obj);
         outc(P, ':');
         print_name(P, tget_str(n, "method"), "method");
         outc(P, '(');
+        P->depth += broke;
         print_args(P, n);
+        P->depth -= broke;
         outc(P, ')');
     } else if (strcmp(type, "propagate") == 0) {
         Obj *e = need(P, n, "expr");

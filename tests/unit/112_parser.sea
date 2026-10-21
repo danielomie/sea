@@ -74,3 +74,5 @@ print(parser.parse_file("tests/unit/no_such_file.sea").message)
 
 -- a chain broken before ':' or '.' keeps its lines, one level in
 printf("%s", parser.format("local t = b:add(1)\n  :add(2)\n:text()\nlocal h = cfg\n.db.host\nlocal u = b:add(1):add(2)\n"))
+-- a function passed in a broken chain keeps its body under the chain
+printf("%s", parser.format("q:a()\n:b(function(s)\ns:c()\nend)\n:d()\n"))
