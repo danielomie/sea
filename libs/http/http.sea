@@ -293,6 +293,9 @@ local function normalize(resp)
     r["headers"] = resp.headers
     r["close"] = resp.close
     if status == 101 and type(resp.upgrade) == "function" then r["upgrade"] = resp.upgrade end
+    if type(resp.stream) == "function" and status >= 200 and status ~= 204 and status ~= 304 then
+        r["stream"] = resp.stream
+    end
     return r
 end
 
@@ -318,15 +321,54 @@ local function render_response(resp, head_only, keep_alive, date)
     end
     if not has_ct and not no_body then out[] = "Content-Type: text/plain; charset=utf-8\r\n" end
     out[] = "Date: " .. date .. "\r\n"
-    if not no_body then out[] = "Content-Length: " .. len(body) .. "\r\n" end
+    if resp.stream then
+        out[] = "Transfer-Encoding: chunked\r\n"
+    elseif not no_body then
+        out[] = "Content-Length: " .. len(body) .. "\r\n"
+    end
     if resp.upgrade then
         out[] = "Connection: Upgrade\r\n"
     else
         out[] = keep_alive and "Connection: keep-alive\r\n" or "Connection: close\r\n"
     end
     out[] = "\r\n"
-    if not head_only and not no_body then out[] = body end
+    if not head_only and not no_body and not resp.stream then out[] = body end
     return string.join(out, "")
+end
+
+-- Run a streaming response's function: write(data) sends one chunk and
+-- returns false once the client is gone. Returns true when the body ended
+-- cleanly (the connection may then be kept).
+local function run_stream(fn, c, timeout, req, on_error)
+    local broken = false
+    local function write(data)
+        if broken then return false end
+        data = tostring(data)
+        if data == "" then return true end
+        local w = c_write(c, string.format("%x\r\n", len(data)) .. data .. "\r\n", timeout)
+        if is_error(w) then broken = true end
+        return not broken
+    end
+    local failed = nil
+    local function run()
+        defer function()
+            local e = recover()
+            if e ~= nil then failed = e end
+        end
+        fn(write)
+    end
+    run()
+    if failed ~= nil then
+        if on_error then
+            on_error(failed, req)
+        else
+            local m = is_error(failed) and failed.message or tostring(failed)
+            print("http: stream function failed on " .. req.method .. " " .. req.target .. ": " .. m)
+        end
+        return false -- no final chunk: the client sees a cut body
+    end
+    if broken then return false end
+    return not is_error(c_write(c, "0\r\n\r\n", timeout))
 end
 
 local function send_simple(c, status, msg, timeout)
@@ -681,6 +723,9 @@ local function serve_conn(srv, c, key, remote)
             print(head.method .. " " .. head.target .. " " .. resp.status .. " " ..
                   (time.since(t0) // time.Millisecond) .. "ms")
         end
+        if resp.stream and not is_error(w) and head.method ~= "HEAD" then
+            if not run_stream(resp.stream, c, o.write_timeout, req, srv.on_error) then return end
+        end
         if resp.upgrade and not is_error(w) then
             -- 101 Switching Protocols: the connection now belongs to the
             -- handler's upgrade function (srv.close() shuts it down too)
@@ -887,7 +932,78 @@ local function dial(u, o, timeout)
 end
 
 -- Read one response. Returns resp, reusable — or nil, message, got_any_bytes.
-local function read_response(c, method, timeout, max_body)
+-- Pass a 2xx body to on_data(piece) as it arrives (chunked, Content-Length
+-- or until close). on_data returning false stops the read. Returns
+-- reusable | nil, message.
+local function stream_body(c, head, rest, timeout, on_data)
+    local function emit(piece)
+        if piece == "" then return true end
+        return on_data(piece) ~= false
+    end
+    local function more(buf)
+        local chunk = c_read(c, 65536, timeout)
+        if is_error(chunk) then return nil, chunk.message end
+        if chunk == "" then return nil, "connection closed in the body" end
+        return buf .. chunk
+    end
+    if head.chunked then
+        local buf = rest
+        while true do
+            local eol = string.find(buf, "\r\n")
+            while eol == nil do
+                local b, e = more(buf)
+                if b == nil then return nil, e end
+                buf = b
+                eol = string.find(buf, "\r\n")
+            end
+            local size_text = string.split(string.sub(buf, 1, eol - 1), ";")[0]
+            local hex = string.trim(size_text)
+            local size = re.match("^[0-9A-Fa-f]+$", hex) ~= nil and tonumber("0x" .. hex) or nil
+            if size == nil then return nil, "malformed chunked body" end
+            buf = string.sub(buf, eol + 2)
+            if size == 0 then
+                -- no trailers: an empty line; else trailer lines ending in one
+                local function done(b)
+                    return string.sub(b, 1, 2) == "\r\n" or string.find(b, "\r\n\r\n") ~= nil
+                end
+                while not done(buf) do
+                    local b, e = more(buf)
+                    if b == nil then return nil, e end
+                    buf = b
+                end
+                return head.keep_alive
+            end
+            while len(buf) < size + 2 do
+                local b, e = more(buf)
+                if b == nil then return nil, e end
+                buf = b
+            end
+            if not emit(string.sub(buf, 1, size)) then return false end
+            buf = string.sub(buf, size + 3)
+        end
+    end
+    if head.content_length >= 0 then
+        local left = head.content_length - len(rest)
+        if not emit(rest) then return false end
+        while left > 0 do
+            local chunk = c_read(c, left > 65536 and 65536 or left, timeout)
+            if is_error(chunk) then return nil, chunk.message end
+            if chunk == "" then return nil, "connection closed in the body" end
+            left -= len(chunk)
+            if not emit(chunk) then return false end
+        end
+        return head.keep_alive
+    end
+    if not emit(rest) then return false end
+    while true do
+        local chunk = c_read(c, 65536, timeout)
+        if is_error(chunk) then return nil, chunk.message end
+        if chunk == "" then return false end
+        if not emit(chunk) then return false end
+    end
+end
+
+local function read_response(c, method, timeout, max_body, on_data)
     local buf = ""
     local head = nil
     while head == nil do
@@ -911,6 +1027,10 @@ local function read_response(c, method, timeout, max_body)
     local status = head.status
     if method == "HEAD" or status == 204 or status == 304 then
         body = ""
+    elseif on_data ~= nil and status >= 200 and status < 300 then
+        local ok, emsg = stream_body(c, head, rest, timeout, on_data)
+        if ok == nil then return nil, emsg, true end
+        reusable = ok
     elseif head.chunked or head.content_length >= 0 then
         local b, _, emsg = read_body(c, head, rest, max_body, timeout)
         if b == nil then return nil, emsg, true end
@@ -994,7 +1114,8 @@ local function do_request(method, url, o, redirects_left)
     if not has["user-agent"] then lines[] = "User-Agent: sea-http/1.1\r\n" end
     -- ask for gzip unless the caller set Accept-Encoding (then the body is
     -- theirs to decode) or turned decompression off
-    local decompress = o.decompress ~= false and not has["accept-encoding"]
+    -- (not with on_data: pieces go out as they arrive)
+    local decompress = o.decompress ~= false and not has["accept-encoding"] and o.on_data == nil
     if decompress then lines[] = "Accept-Encoding: gzip\r\n" end
     if not has["accept"] then lines[] = "Accept: */*\r\n" end
     if o.basic_auth and not has["authorization"] then
@@ -1030,7 +1151,7 @@ local function do_request(method, url, o, redirects_left)
             last_err = w.message
             if not reused then return make_error(last_err, url) end
         else
-            local r, info, got_bytes = read_response(c, method, timeout, max_body)
+            local r, info, got_bytes = read_response(c, method, timeout, max_body, o.on_data)
             if r ~= nil then
                 resp = r
                 reusable = info

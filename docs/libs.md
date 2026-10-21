@@ -710,6 +710,7 @@ Sockets come from the built-in `net` module: every network wait parks only the g
 | `tls` | — | Extra `ssl.connect` opts (`cert`, `key`, `sni`, `min_version`) |
 | `max_body_bytes` | 100 MB | Larger responses fail (also the limit for a decompressed body) |
 | `decompress` | `true` | Send `Accept-Encoding: gzip` and decode gzip/deflate responses. Off when you set `Accept-Encoding` yourself (the body is then yours to decode) |
+| `on_data` | — | `function(piece)`: a 2xx body is passed in pieces as they arrive (chunked, `Content-Length` or until close) instead of being collected; `resp.body` is then `""`. Returning `false` stops reading (the connection is closed). Other statuses still fill `resp.body`, so an error message can be read. Turns off `Accept-Encoding: gzip`. For server-sent events and LLM streams |
 
 The client sends `Host` (with the port when it is not the default), `User-Agent: sea-http/1.1`, `Accept: */*` and `Accept-Encoding: gzip` (unless given), and `Content-Length` (a non-string body is converted with `tostring`); it decodes chunked responses and skips 1xx interim responses.
 
@@ -776,6 +777,8 @@ The server supports keep-alive and pipelining, chunked request bodies, `Expect: 
 | `req:json()` | Decodes the body as JSON (an error value if it is not valid JSON) |
 
 **Response** (what the handler returns): a table/map `{status = 200, body = "", headers = {...}, close = false}`, or just a string (200, `text/plain`). A non-string `body` is converted with `tostring`. Header values may be arrays (repeated headers). `close = true` closes the connection after the response. Anything else — `nil`, an invalid status, a header with CR/LF — becomes a 500 and is logged. A handler that panics or hits a runtime error (indexing nil, …) also gets the client a 500; the error goes to `on_error` (by default printed with the request) and the server keeps running. Without a `Content-Type`, `text/plain; charset=utf-8` is used.
+**Streaming responses:** a response with `stream = function(write) ... end` (and no `body`) is sent with `Transfer-Encoding: chunked`: each `write(data)` sends one chunk at once and returns `false` once the client is gone. The response ends when the function returns; if it fails, the connection is closed without the final chunk, so the client sees a cut body. For server-sent events: `headers = {["Content-Type"] = "text/event-stream"}`.
+
 
 **Protocol upgrades:** a response with `status = 101` and an `upgrade`
 function switches protocols: after writing it (with `Connection: Upgrade`)

@@ -25,3 +25,7 @@ closed:	0
 gzip auto:	true	true	Accept-Encoding
 gzip raw:	gzip	true
 gzip refused:	6000
+stream:	200	chunked	true	70027	data: 1
+stream stop:	1
+stream error body:	500	{"error": "nope"}
+stream again:	70027
