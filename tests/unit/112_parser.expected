@@ -42,3 +42,9 @@ parser.format: invalid variable name 'end'
 code nested too deeply (limit 1000)
 block	true
 parser.parse_file: cannot read 'tests/unit/no_such_file.sea': No such file or directory
+local t = b:add(1)
+    :add(2)
+    :text()
+local h = cfg
+    .db.host
+local u = b:add(1):add(2)

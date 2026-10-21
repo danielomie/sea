@@ -1598,6 +1598,13 @@ end
 
 -- Call: obj is passed as first argument automatically
 obj:method(a, b)       -- equivalent to obj.method(obj, a, b)
+
+-- A chain may break before ':' or '.': a line that starts with one
+-- continues the expression above (sea fmt keeps the breaks, one level in)
+local sql = query:from("clientes")
+    :where("ativo = 1")
+    :order_by("nome")
+    :build()
 ```
 
 ### Multiple return values

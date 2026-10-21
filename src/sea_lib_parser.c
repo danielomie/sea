@@ -898,6 +898,27 @@ static void indent(Printer *P) {
 }
 
 static int node_line(Obj *n) { return n ? (int)tget_int(n, "line") : 0; }
+
+/* The line an expression's text ends on, as far as the AST tells: a call
+ * knows its ')'; anything else is taken to end on the line it starts. */
+static int node_end_line(Obj *n) {
+    if (!n) return 0;
+    int e = (int)tget_int(n, "end_line");
+    return e > 0 ? e : node_line(n);
+}
+
+/* A chained ':method()' or '.field' that the source put on a line of its
+ * own stays there, one level in:
+ *     b:add("a")
+ *         :add("b") */
+static void chain_break(Printer *P, Obj *n, Obj *obj) {
+    int l = node_line(n), e = node_end_line(obj);
+    if (l <= 0 || e <= 0 || l <= e) return;
+    outc(P, '\n');
+    P->depth++;
+    indent(P);
+    P->depth--;
+}
 static int node_col(Obj *n)  { return n ? (int)tget_int(n, "col") : 0; }
 
 /* The largest line number in a subtree, and whether it holds a select. */
@@ -1615,6 +1636,7 @@ static void print_expr(Printer *P, SeaValue v) {
         Obj *obj = need(P, n, "object");
         if (!obj) goto done;
         print_paren(P, sea_obj_val(obj), postfix_paren(obj));
+        chain_break(P, n, obj);
         size_t fl;
         const char *f = str_data(tget(n, "field"), &fl);
         if (!f) { fail(P, "'field' node without 'field'"); goto done; }
@@ -1631,6 +1653,7 @@ static void print_expr(Printer *P, SeaValue v) {
         Obj *obj = need(P, n, "object");
         if (!obj) goto done;
         print_paren(P, sea_obj_val(obj), postfix_paren(obj));
+        chain_break(P, n, obj);
         outc(P, ':');
         print_name(P, tget_str(n, "method"), "method");
         outc(P, '(');

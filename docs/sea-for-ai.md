@@ -347,6 +347,10 @@ st:push(2)
 print(st:pop(), len(st.items))        -- → 2  1
 ```
 
+A chain of calls may break before `:` or `.`: a line that starts with one
+continues the expression above (`b:add(1)` then `    :add(2)` on the next
+line); `sea fmt` keeps the breaks.
+
 Loop variables are fresh in each iteration, so closures and goroutines
 created in a loop keep that iteration's value (as in Go 1.22).
 
