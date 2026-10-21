@@ -351,6 +351,11 @@ A chain of calls may break before `:` or `.`: a line that starts with one
 continues the expression above (`b:add(1)` then `    :add(2)` on the next
 line); `sea fmt` keeps the breaks.
 
+A keyword may name a field or a method (`q:in(...)`, `q:or(...)`, `t.select`,
+`{end = 1}`, `function Query:and(...)`): after `.` or `:` and as a table key
+before `=` it can only be a name. Variables and parameters still cannot be
+keywords.
+
 Loop variables are fresh in each iteration, so closures and goroutines
 created in a loop keep that iteration's value (as in Go 1.22).
 

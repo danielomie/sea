@@ -1105,7 +1105,9 @@ static char *align_comments(Printer *P, size_t *len) {
 
 /* -- literals and names -- */
 
-static bool is_name(const char *s, size_t len) {
+/* letters, digits and _, not starting with a digit: a field or method name,
+ * or a table key before '=' (keywords allowed there: q:in, {or = f}) */
+static bool is_word(const char *s, size_t len) {
     if (!s || len == 0) return false;
     if (!(s[0] == '_' || (s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')))
         return false;
@@ -1114,7 +1116,12 @@ static bool is_name(const char *s, size_t len) {
         if (!(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
             return false;
     }
-    /* not a keyword */
+    return true;
+}
+
+/* a word that is not a keyword: a variable or parameter name */
+static bool is_name(const char *s, size_t len) {
+    if (!is_word(s, len)) return false;
     SeaLexer l;
     sea_lexer_init(&l, s);
     bool ok = l.current.type == TK_IDENT && (size_t)l.current.len == len;
@@ -1327,7 +1334,7 @@ static void print_args(Printer *P, Obj *call) {
 }
 
 static void print_name(Printer *P, const char *s, const char *what) {
-    if (!s || !is_name(s, strlen(s))) {
+    if (!s || !(strcmp(what, "method") == 0 ? is_word(s, strlen(s)) : is_name(s, strlen(s)))) {
         fail(P, "invalid %s name '%s'", what, s ? s : "(none)");
         return;
     }
@@ -1381,7 +1388,7 @@ static void print_field(Printer *P, Obj *f) {
     if (key) {
         size_t kl;
         const char *ks = is_type(key, "string") ? str_data(tget(key, "value"), &kl) : NULL;
-        if (ks && is_name(ks, kl)) {
+        if (ks && is_word(ks, kl)) {
             outs(P, ks);
         } else {
             outc(P, '[');
@@ -1645,7 +1652,7 @@ static void print_expr(Printer *P, SeaValue v) {
         size_t fl;
         const char *f = str_data(tget(n, "field"), &fl);
         if (!f) { fail(P, "'field' node without 'field'"); goto done; }
-        if (is_name(f, fl)) { outc(P, '.'); outs(P, f); }
+        if (is_word(f, fl)) { outc(P, '.'); outs(P, f); }
         else { outc(P, '['); print_quoted(P, f, fl); outc(P, ']'); }
     } else if (strcmp(type, "call") == 0) {
         Obj *callee = need(P, n, "callee");
@@ -1756,7 +1763,7 @@ static bool is_dotted(Obj *n) {
         if (!is_type(n, "field")) return false;
         size_t fl;
         const char *f = str_data(tget(n, "field"), &fl);
-        if (!f || !is_name(f, fl)) return false;
+        if (!f || !is_word(f, fl)) return false;
         n = as_node(tget(n, "object"));
     }
     return false;

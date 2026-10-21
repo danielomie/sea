@@ -482,6 +482,17 @@ An initial newline immediately after the opening bracket is ignored. The number 
 
 ## Keywords
 
+Keywords cannot name variables or parameters, but they can name fields and
+methods: after `.` or `:`, in `function t.name` / `function t:name`, and as a
+table key before `=`, the position says a name comes next.
+
+```sea
+local Query = {}
+function Query:in(field, values) ... end      -- q:in("uf", ["SP", "RJ"])
+function Query:or(fn) ... end                 -- q:or(function(g) ... end)
+local t = {select = 1, end = 2}               -- t.select, t.end
+```
+
 ### Literals / values
 
 | Keyword | Description |

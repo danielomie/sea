@@ -1,0 +1,32 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- A keyword can name a field or a method after '.' or ':', in a function
+-- definition, and as a table key before '=': the position says it is a name.
+
+local Query = {}
+function Query.in(self, field, values) return `${field} in [${string.join(values, ", ")}]` end
+function Query:or(f) return `or(${f(self)})` end
+function Query.select(self) return "select" end
+
+local q = {}
+for k, f in Query do q[k] = f end
+print(q:in("uf", ["SP", "RJ"]))
+print(q:or(function(s) return s:select() end))
+print(q.in(q, "id", [1]))
+
+local t = {and = 1, not = 2, end = 3, ["for"] = 4}
+print(t.and, t.not, t.end, t["for"])
+
+local m = [=]
+m.while = "loop"
+print(m.while, m["while"])
+
+-- a chain broken before a keyword method
+local r = q
+    :select()
+print(r)
+
+-- the formatter keeps these names bare
+local parser = require("sea/parser")
+printf("%s", parser.format("local t = {or = 1}\nprint(t.in, t:not(), x.y.end)\nfunction a.b:in() end\n"))

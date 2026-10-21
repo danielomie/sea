@@ -23,6 +23,22 @@ static SeaToken peek(SeaParser *p) {
     return sea_lexer_peek(&p->lexer);
 }
 
+/* A name after '.' or ':', in `function a.b:c`, or a table key before '=':
+ * an identifier or a keyword (q:in, t.select, {or = f}), since the position
+ * leaves no doubt that a name comes next. */
+static bool is_name_tok(SeaToken t) {
+    if (t.type == TK_IDENT) return true;
+    if (t.len <= 0) return false;
+    unsigned char c = (unsigned char)t.start[0];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')) return false;
+    for (int i = 1; i < t.len; i++) {
+        c = (unsigned char)t.start[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            return false;
+    }
+    return true;
+}
+
 static SeaToken advance(SeaParser *p) {
     SeaToken t = sea_lexer_next(&p->lexer);
     p->last_line = t.line;
@@ -289,7 +305,7 @@ static SeaNode* parse_primary(SeaParser *p) {
                 SeaNode *key = NULL;
                 SeaNode *val = NULL;
 
-                if (check(p, TK_IDENT) && peek(p).type == TK_ASSIGN) {
+                if (is_name_tok(cur(p)) && peek(p).type == TK_ASSIGN) {
                     // name = expr
                     SeaToken kt = cur(p);
                     advance(p); advance(p); // consume ident and =
@@ -602,7 +618,7 @@ static SeaNode* parse_postfix(SeaParser *p, SeaNode *left) {
         if (t.type == TK_DOT) {
             advance(p);
             SeaToken field_tok = cur(p);
-            if (field_tok.type != TK_IDENT) {
+            if (!is_name_tok(field_tok)) {
                 parser_error(p, "expected field name after '.'");
                 return left;
             }
@@ -639,7 +655,7 @@ static SeaNode* parse_postfix(SeaParser *p, SeaNode *left) {
             // Method call: expr:name(args)
             advance(p);
             SeaToken method_tok = cur(p);
-            if (method_tok.type != TK_IDENT) {
+            if (!is_name_tok(method_tok)) {
                 parser_error(p, "expected method name after ':'");
                 return left;
             }
@@ -1267,7 +1283,7 @@ static SeaNode* parse_function_stmt(SeaParser *p) {
     while (check(p, TK_DOT)) {
         advance(p);
         SeaToken ft = cur(p);
-        if (ft.type != TK_IDENT) {
+        if (!is_name_tok(ft)) {
             parser_error(p, "expected field name");
             break;
         }
@@ -1282,7 +1298,7 @@ static SeaNode* parse_function_stmt(SeaParser *p) {
     if (check(p, TK_COLON)) {
         advance(p);
         SeaToken mt = cur(p);
-        if (mt.type != TK_IDENT) {
+        if (!is_name_tok(mt)) {
             parser_error(p, "expected method name");
         } else {
             advance(p);

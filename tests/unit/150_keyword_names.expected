@@ -1,0 +1,9 @@
+uf in [SP, RJ]
+or(select)
+id in [1]
+1	2	3	4
+loop	loop
+select
+local t = {or = 1}
+print(t.in, t:not(), x.y.end)
+function a.b:in() end
