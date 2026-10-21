@@ -131,12 +131,12 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     Any other backslash sequence is a compile error: `"\d+"` must be
     `"\\d+"` (or the long string `[[\d+]]`), and a byte is `"\x01"`
     (Lua's decimal `"\1"` is an error).
-27. **Reserved words cannot be names**, not even field names: besides
-    Lua's (`and break do else elseif end false for function if in local nil
-    not or return then true while`), Sea reserves `const continue del go
-    defer panic select case default`. `t.default`, `{go = 1}` and
-    `local case = 1` are syntax errors; use other names, or
-    `t["default"]` for a key that must be spelled so.
+27. **Reserved words cannot name variables or parameters**: besides Lua's
+    (`and break do else elseif end false for function if in local nil not
+    or return then true while`), Sea reserves `const continue del go defer
+    panic select case default`, so `local case = 1` is a syntax error. They
+    can name fields and methods: `t.default`, `{go = 1}`, `q:in(...)` and
+    `function Query:or(...)` are fine.
 28. **`string.join(list, sep)`** joins an array or a positional table;
     `table.concat` does not exist.
 29. **Regexes in long strings:** `[[...]]` ends at the first `]]`, which a
