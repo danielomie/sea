@@ -71,6 +71,8 @@ local function module_fields(name)
     end
     local keys = {}
     for k, _ in m do keys[k] = true end
+    -- os.script exists only while a script runs (not in an embedded tool)
+    if name == "os" then keys.script = true end
     module_cache[name] = keys
     return keys
 end
