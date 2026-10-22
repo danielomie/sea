@@ -824,7 +824,7 @@ http.serve(8080, r)
 
 **Automatic responses:** 404 when no path matches; 405 with an `Allow` header when the path matches but the method does not. HEAD falls back to the GET route.
 
-**Middleware:** call `next(req)` to continue, or return a response to short-circuit. Responses are turned into mutable maps, so middleware can change `status`, `body` and `headers`; a `nil` from a handler becomes 500.
+**Middleware:** call `next(req)` to continue, or return a response to short-circuit. Responses are turned into mutable maps, so middleware can change `status`, `body` and `headers` (a `stream` or `upgrade` function is kept); a `nil` from a handler becomes 500.
 
 ### Utilities
 

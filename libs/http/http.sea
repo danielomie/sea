@@ -1416,6 +1416,8 @@ local function mutable_resp(resp)
     r["body"]    = resp.body or ""
     r["headers"] = hdrs
     r["close"]   = resp.close
+    r["stream"]  = resp.stream    -- streaming and protocol upgrades survive too
+    r["upgrade"] = resp.upgrade
     return r
 end
 

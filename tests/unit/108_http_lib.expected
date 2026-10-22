@@ -29,3 +29,4 @@ stream:	200	chunked	true	70027	data: 1
 stream stop:	1
 stream error body:	500	{"error": "nope"}
 stream again:	70027
+router stream:	200	chunked	"event: a\n\nevent: b\n\n"
