@@ -173,3 +173,33 @@ local after = http.get(ibase)
 print("stale pool:", json.encode(istatus), after.status, after.error)
 isrv.close()
 isrv.wait()
+
+-- behind a balancer (proxy_protocol): the PROXY v1 line gives the client's
+-- address; without it the connection is refused
+local psrv = http.listen(0, function(req) return http.text(req.remote_addr) end, {proxy_protocol = true})
+local function raw(port, data)
+    local fd = net.connect("127.0.0.1", port, 2000)
+    net.write(fd, data)
+    local got = ""
+    while true do
+        local chunk = net.read(fd, 65536, 2000)
+        if is_error(chunk) or chunk == "" then break end
+        got = got .. chunk
+    end
+    net.close(fd)
+    local body = string.find(got, "\r\n\r\n")
+    return body and string.sub(got, body + 4) or got
+end
+local req = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+print("proxy v4:", raw(psrv.port, "PROXY TCP4 203.0.113.7 10.0.0.1 51000 80\r\n" .. req))
+print("proxy v6:", raw(psrv.port, "PROXY TCP6 2001:db8::7 2001:db8::1 51000 80\r\n" .. req))
+print("proxy unknown:", string.starts_with(raw(psrv.port, "PROXY UNKNOWN\r\n" .. req), "127.0.0.1:"))
+print("proxy missing:", json.encode(raw(psrv.port, req)))
+print("proxy bad:", json.encode(raw(psrv.port, "PROXY TCP4 evil 10.0.0.1 1 80\r\n" .. req)))
+psrv.close()
+psrv.wait()
+-- without the option, the peer's address as before
+local nsrv = http.listen(0, function(req) return http.text(req.remote_addr) end)
+print("no proxy:", string.starts_with(raw(nsrv.port, req), "127.0.0.1:"))
+nsrv.close()
+nsrv.wait()

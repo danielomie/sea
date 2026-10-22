@@ -757,6 +757,7 @@ The client sends `Host` (with the port when it is not the default), `User-Agent:
 | `keep_alive` | `true` | `false` closes after every response |
 | `log` | `false` | Print one line per request: method, target, status, time |
 | `gzip` | `false` | `true`: gzip text-like responses (`text/*`, JSON, JavaScript, XML, SVG) of 1 KB or more for clients that accept it, adding `Vary: Accept-Encoding`; a number sets the minimum size. Responses that already have a `Content-Encoding` are left alone |
+| `proxy_protocol` | `false` | `true`: behind a load balancer, every connection starts with a PROXY protocol v1 line (`PROXY TCP4 <client ip> <dest ip> <client port> <dest port>`, before TLS); `req.remote_addr` is then the client's address (`PROXY UNKNOWN` keeps the peer). A connection without a valid line is closed: with the option on, only the balancer may connect, or anyone could claim any address |
 | `on_error` | prints | `on_error(err, req)`: called when a handler panics or hits a runtime error (the client gets a 500) |
 | `quiet` | `false` | (`serve` only) no "listening" line |
 

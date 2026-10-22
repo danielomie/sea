@@ -31,3 +31,9 @@ stream error body:	500	{"error": "nope"}
 stream again:	70027
 router stream:	200	chunked	"event: a\n\nevent: b\n\n"
 stale pool:	[200,200,200]	200	nil
+proxy v4:	203.0.113.7:51000
+proxy v6:	[2001:db8::7]:51000
+proxy unknown:	true
+proxy missing:	""
+proxy bad:	""
+no proxy:	true

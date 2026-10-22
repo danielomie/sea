@@ -468,6 +468,7 @@ local DEFAULTS = {
     keep_alive = true,
     log = false,
     gzip = false,              -- true (bodies >= 1 KB) or a minimum size in bytes
+    proxy_protocol = false,    -- true: every connection starts with a PROXY protocol v1 line
 }
 
 local function opt(o, k)
@@ -656,6 +657,34 @@ local function run_upgrade(fn, c, buffered, remote, req, on_error)
     end
 end
 
+-- PROXY protocol v1: the line a load balancer sends before the client's
+-- bytes ("PROXY TCP4 <client ip> <dest ip> <client port> <dest port>\r\n")
+-- → "ip:port" of the client, nil for "PROXY UNKNOWN" (keep the peer), or an
+-- error. Read a byte at a time: nothing past the line is consumed (TLS
+-- comes after it).
+local function read_proxy_line(fd, timeout)
+    local line = ""
+    while len(line) < 108 do                -- the spec's longest v1 line is 107 bytes
+        local ch = net.read(fd, 1, timeout)
+        if is_error(ch) or ch == "" then return error("proxy protocol: no header") end
+        line = line .. ch
+        if string.ends_with(line, "\r\n") then break end
+    end
+    if not string.ends_with(line, "\r\n") then return error("proxy protocol: header too long") end
+    local p = string.split(string.sub(line, 1, -3), " ")
+    if p[0] ~= "PROXY" then return error("proxy protocol: not a PROXY header") end
+    if p[1] == "UNKNOWN" then return nil end
+    if (p[1] ~= "TCP4" and p[1] ~= "TCP6") or len(p) ~= 6 then return error("proxy protocol: bad header") end
+    local port = tonumber(p[4])
+    if type(port) ~= "int" or port < 0 or port > 65535 then return error("proxy protocol: bad port") end
+    if p[1] == "TCP4" then
+        if re.match("^\\d{1,3}(\\.\\d{1,3}){3}$", p[2]) == nil then return error("proxy protocol: bad address") end
+        return p[2] .. ":" .. p[4]
+    end
+    if re.match("^[0-9a-fA-F:.]+$", p[2]) == nil then return error("proxy protocol: bad address") end
+    return "[" .. p[2] .. "]:" .. p[4]
+end
+
 -- One connection: requests in a loop while it stays keep-alive.
 local function serve_conn(srv, c, key, remote)
     local o = srv.opts
@@ -812,6 +841,17 @@ function M.listen(port, handler, opts)
                 local key = next_key
                 go (function()
                     local remote = net.peer(fd)
+                    if o.proxy_protocol then
+                        -- behind a balancer: the client's address comes first; a
+                        -- connection without it is refused (it did not come
+                        -- through the balancer, and could claim any address)
+                        local client = read_proxy_line(fd, o.read_timeout)
+                        if is_error(client) then
+                            net.close(fd)
+                            return
+                        end
+                        if client ~= nil then remote = client end
+                    end
                     local c
                     if ctx then
                         local h = ssl.handshake_server(ctx, fd, o.read_timeout)
