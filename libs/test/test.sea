@@ -500,7 +500,10 @@ function T.run(opts)
         if count_selected(s) == 0 then return end
         if s.parent ~= nil and format == "pretty" then say(indent .. s.name) end
         local inner = s.parent ~= nil and (indent .. "  ") or indent
-        local setup_err = run_hooks(s.before_all)
+        -- a skipped group runs none of its hooks (they often need what is missing)
+        local skipped = suite_skipped(s)
+        local setup_err = nil
+        if not skipped then setup_err = run_hooks(s.before_all) end
         for _, item in s.items do
             if item.items ~= nil then
                 if setup_err == nil then run_suite(item, inner) end
@@ -578,7 +581,8 @@ function T.run(opts)
                 end
             end
         end
-        local teardown = run_hooks(s.after_all)
+        local teardown = nil
+        if not skipped then teardown = run_hooks(s.after_all) end
         if teardown ~= nil then
             res.failed = res.failed + 1
             local f = {}

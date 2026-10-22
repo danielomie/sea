@@ -1,0 +1,415 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/clickhouse/clickhouse.sea — ClickHouse client for Sea (pure Sea)
+--
+-- Talks to ClickHouse's HTTP interface (port 8123, 8443 with TLS) through
+-- libs/http (`make -C libs/http libs/ssl`).
+--
+--   local clickhouse = require("../libs/clickhouse/clickhouse")
+--   local db = clickhouse.open("http://default:@localhost:8123/default")?
+--   local _ = db:exec("CREATE TABLE IF NOT EXISTS hits (at DateTime, url String, ms UInt32) ENGINE = MergeTree ORDER BY at")?
+--   local _ = db:insert("hits", [{at = "2026-10-21 10:00:00", url = "/", ms = 12}])?
+--   for _, r in db:query("SELECT url, avg(ms) AS ms FROM hits WHERE ms > {min:UInt32} GROUP BY url", {min = 5})? do
+--       print(r.url, r.ms)
+--   end
+--
+-- Parameters are ClickHouse's own query parameters, {name:Type} in the SQL
+-- and a table of values: the server parses them by type, so values are never
+-- pasted into the SQL. Failures are error values ("clickhouse: Code: 60.
+-- DB::Exception: ..."); clickhouse.error_code(e) gives the number.
+-- Every call is one HTTP request (connections are kept alive by libs/http),
+-- so a db can be shared by goroutines.
+
+local http = require("../http/http")
+
+local M = {}
+
+M.DEFAULT_PORT = 8123
+
+-- ---- values ------------------------------------------------------------------------
+
+local function is_time(v)
+    return type(v) == "table" and v.unix_nano ~= nil and v.format ~= nil
+end
+
+local function time_text(t)
+    return t:format("2006-01-02 15:04:05.999999999")
+end
+
+-- a value inside an Array/Tuple/Map literal
+local function literal(v)
+    local t = type(v)
+    if v == nil then return "NULL" end
+    if t == "string" then
+        return "'" .. string.replace(string.replace(v, "\\", "\\\\"), "'", "\\'") .. "'"
+    end
+    if t == "number" then
+        if isnan(v) then return "nan" end
+        if isinf(v) then return v > 0 and "inf" or "-inf" end
+        return string.format("%.17g", v)
+    end
+    if t == "array" then
+        local parts = []
+        for _, x in v do parts[] = literal(x) end
+        return "[" .. string.join(parts, ",") .. "]"
+    end
+    if is_time(v) then return "'" .. time_text(v) .. "'" end
+    if t == "table" or t == "map" or t == "struct" then
+        local parts = []
+        for _, k in sort.sorted(list.keys(v)) do parts[] = literal(k) .. ":" .. literal(v[k]) end
+        return "{" .. string.join(parts, ",") .. "}"
+    end
+    return tostring(v)
+end
+
+-- a query parameter's value, in the text form the server parses by type
+-- (top-level strings use the "escaped" format: backslash, tab, newline)
+local function param_text(v)
+    if v == nil then return "\\N" end
+    if type(v) == "string" then
+        return string.replace(string.replace(string.replace(v, "\\", "\\\\"), "\t", "\\t"), "\n", "\\n")
+    end
+    if is_time(v) then return time_text(v) end
+    return literal(v)
+end
+
+-- rows for JSONEachRow: Times as text
+local function row_json(row)
+    local copy = nil
+    for k, v in row do
+        if is_time(v) then
+            if copy == nil then
+                copy = {}
+                for k2, v2 in row do copy[k2] = v2 end
+            end
+            copy[k] = time_text(v)
+        end
+    end
+    return json.encode(copy or row)
+end
+
+local function decode(body)
+    return json.decode(body, {bigint = true})
+end
+
+-- ---- configuration -----------------------------------------------------------------
+
+-- clickhouse.parse_url(url) → config | error
+-- http(s)://user:password@host:port/database?key=value or
+-- clickhouse://... (secure=true for https). Other query keys are settings.
+function M.parse_url(url)
+    local m = re.match("^(https?|clickhouse)://(?:([^:@/]*)(?::([^@/]*))?@)?([^:/?]*)(?::(\\d+))?(?:/([^?]*))?(?:\\?(.*))?$", url)
+    if m == nil then return error(`clickhouse: bad URL '${url}'`) end
+    local g = m.groups
+    local function dec(s)
+        if s == nil or s == "" then return nil end
+        return encoding.url_decode(s)
+    end
+    local cfg = {}
+    cfg.secure = g[1] == "https"
+    cfg.user = dec(g[2])
+    cfg.password = dec(g[3])
+    cfg.host = dec(g[4])
+    if g[5] ~= nil and g[5] ~= "" then cfg.port = tonumber(g[5]) end
+    cfg.database = dec(g[6])
+    if g[7] ~= nil and g[7] ~= "" then
+        local settings = {}
+        for _, kv in string.split(g[7], "&") do
+            local p = string.split(kv, "=", 2)
+            local k = encoding.url_decode(p[0])
+            local v = len(p) > 1 and encoding.url_decode(p[1]) or ""
+            if k == "secure" then
+                cfg.secure = v == "true" or v == "1"
+            elseif k == "verify" then
+                cfg.verify = not (v == "false" or v == "0")
+            else
+                settings[k] = v
+            end
+        end
+        if len(settings) > 0 then cfg.settings = settings end
+    end
+    return cfg
+end
+
+-- ---- client ------------------------------------------------------------------------
+
+local Db = {}
+
+-- clickhouse.open([url] [, opts]) → db | error
+-- opts (override the URL): host, port (8123; 8443 when secure), secure
+-- (https), verify (false skips the certificate check), user ("default"),
+-- password, database, settings (sent with every query:
+-- {max_execution_time = 30}), timeout (ms per network wait, 300000),
+-- compress (true: gzip responses), session_id (a server session, for
+-- temporary tables and SET), ping (true: check the server now).
+function M.open(url, opts)
+    local cfg = {}
+    if type(url) == "string" then
+        cfg = M.parse_url(url)?
+    elseif url ~= nil then
+        opts = url
+    end
+    for k, v in opts or {} do cfg[k] = v end
+    cfg.host = cfg.host or "localhost"
+    cfg.port = cfg.port or (cfg.secure and 8443 or M.DEFAULT_PORT)
+    cfg.user = cfg.user or "default"
+    cfg.timeout = cfg.timeout or 300000
+    if cfg.compress == nil then cfg.compress = true end
+    local db = {}
+    db.cfg = cfg
+    db.base = `${cfg.secure and "https" or "http"}://${cfg.host}:${cfg.port}/`
+    for k, f in Db do db[k] = f end
+    if cfg.ping ~= false then
+        local ok = db:ping()
+        if is_error(ok) then return ok end
+    end
+    return db
+end
+
+-- clickhouse.error_code(err) → the server's error number (60 for an unknown
+-- table, ...), or nil
+function M.error_code(err)
+    if not is_error(err) then return nil end
+    local m = re.match("Code: (\\d+)\\.", err.message)
+    return m and tonumber(m.groups[1]) or nil
+end
+
+local function failure(resp)
+    if resp.status == 0 then return error(`clickhouse: ${resp.error}`) end
+    local text = string.trim(resp.body or "")
+    if string.starts_with(text, "{") then
+        -- a JSON format reports the exception inside the document
+        local d = json.decode(text)
+        if not is_error(d) and type(d.exception) == "string" then text = string.trim(d.exception) end
+    end
+    if text == "" then text = `HTTP ${resp.status} ${resp.reason}` end
+    return error("clickhouse: " .. text)
+end
+
+-- one request: sql in the body, the rest in the URL
+local function request(db, sql, params, opts, format, on_data)
+    local cfg = db.cfg
+    opts = opts or {}
+    local q = {}
+    for k, v in cfg.settings or {} do q[k] = tostring(v) end
+    for k, v in opts.settings or {} do q[k] = tostring(v) end
+    if cfg.database ~= nil then q.database = cfg.database end
+    if cfg.session_id ~= nil then q.session_id = cfg.session_id end
+    if opts.query_id ~= nil then q.query_id = opts.query_id end
+    if format ~= nil then q.default_format = format end
+    if format == "JSON" then
+        q.output_format_json_quote_64bit_integers = "0"
+        q.wait_end_of_query = "1"
+    elseif format == "JSONEachRow" then
+        q.output_format_json_quote_64bit_integers = "0"
+    end
+    if cfg.compress and on_data == nil then q.enable_http_compression = "1" end
+    for k, v in params or {} do q["param_" .. k] = param_text(v) end
+    local headers = {}
+    headers["X-ClickHouse-User"] = cfg.user
+    if cfg.password ~= nil then headers["X-ClickHouse-Key"] = cfg.password end
+    local h = {}
+    h.headers = headers
+    h.query = q
+    h.body = sql
+    h.content_type = "text/plain; charset=utf-8"
+    h.timeout = cfg.timeout
+    h.follow_redirects = false
+    if cfg.verify == false then h.verify = false end
+    if on_data ~= nil then h.on_data = on_data end
+    return http.request("POST", db.base, h)
+end
+
+local function summary(resp)
+    local s = {}
+    local raw = resp.headers["x-clickhouse-summary"]
+    if raw ~= nil then
+        local d = json.decode(raw)
+        if not is_error(d) then
+            for k, v in d do s[k] = tonumber(v) or v end
+        end
+    end
+    s.query_id = resp.headers["x-clickhouse-query-id"]
+    return s
+end
+
+-- db:result(sql [, params [, opts]]) → {columns = [{name, type}], rows,
+-- statistics = {elapsed, rows_read, bytes_read}, rows_before_limit} | error.
+-- opts: settings (for this query), query_id.
+function Db.result(db, sql, params, opts)
+    local resp = request(db, sql, params, opts, "JSON")
+    if not resp.ok then return failure(resp) end
+    if string.trim(resp.body) == "" then
+        local r = {}
+        r.columns = []
+        r.rows = []
+        return r
+    end
+    local d = decode(resp.body)
+    if is_error(d) then return error("clickhouse: bad JSON response: " .. string.sub(resp.body, -300)) end
+    local r = {}
+    r.columns = d.meta or []
+    r.rows = d.data or []
+    r.statistics = d.statistics
+    r.rows_before_limit = d.rows_before_limit_at_least
+    return r
+end
+
+-- db:query(sql [, params [, opts]]) → array of rows (tables keyed by column
+-- name). 64-bit integers that do not fit an int come back as bigints.
+function Db.query(db, sql, params, opts)
+    local r = db:result(sql, params, opts)
+    if is_error(r) then return r end
+    return r.rows
+end
+
+-- db:row(sql [, params [, opts]]) → the first row, or nil
+function Db.row(db, sql, params, opts)
+    local rows = db:query(sql, params, opts)
+    if is_error(rows) then return rows end
+    return rows[0]
+end
+
+-- db:value(sql [, params [, opts]]) → the first column of the first row,
+-- or nil
+function Db.value(db, sql, params, opts)
+    local r = db:result(sql, params, opts)
+    if is_error(r) then return r end
+    if len(r.rows) == 0 or len(r.columns) == 0 then return nil end
+    return r.rows[0][r.columns[0].name]
+end
+
+-- db:exec(sql [, params [, opts]]) → summary | error: for statements without
+-- results (CREATE, ALTER, INSERT ... SELECT, ...). The summary has the
+-- server's counters: read_rows, written_rows, written_bytes, ..., query_id.
+function Db.exec(db, sql, params, opts)
+    local resp = request(db, sql, params, opts, nil)
+    if not resp.ok then return failure(resp) end
+    return summary(resp)
+end
+
+-- db:each(sql, fn [, params [, opts]]) → rows seen | error
+-- Streams the result: fn(row) is called as rows arrive, so memory stays
+-- flat; returning false stops (the rest is not read).
+function Db.each(db, sql, fn, params, opts)
+    local pending = ""
+    local count = 0
+    local stopped = false
+    local bad = nil
+    local function feed(piece)
+        local data = pending .. piece
+        local pos = 1
+        while true do
+            local nl = string.find(data, "\n", pos)
+            if nl == nil then break end
+            local line = string.sub(data, pos, nl - 1)
+            pos = nl + 1
+            if line ~= "" then
+                local row = decode(line)
+                if not is_error(row) and len(row) == 1 and type(row.exception) == "string" then
+                    -- the server's exception, written in the row format
+                    bad = error("clickhouse: " .. string.trim(row.exception))
+                    return false
+                end
+                if is_error(row) then
+                    -- an exception in the middle of the stream arrives as text
+                    bad = error("clickhouse: " .. string.trim(line .. "\n" .. string.sub(data, pos)))
+                    return false
+                end
+                count += 1
+                if fn(row) == false then
+                    stopped = true
+                    return false
+                end
+            end
+        end
+        pending = string.sub(data, pos)
+        return true
+    end
+    local resp = request(db, sql, params, opts, "JSONEachRow", feed)
+    if bad ~= nil then return bad end
+    if stopped then return count end
+    if not resp.ok then return failure(resp) end
+    if string.trim(pending) ~= "" then
+        local row = decode(pending)
+        if is_error(row) then return error("clickhouse: " .. string.trim(pending)) end
+        count += 1
+        fn(row)
+    end
+    return count
+end
+
+-- db:raw(sql [, params [, opts]]) → the response body as the server wrote
+-- it: add a FORMAT clause (CSVWithNames, TSV, Parquet, Pretty, ...)
+function Db.raw(db, sql, params, opts)
+    local resp = request(db, sql, params, opts, nil)
+    if not resp.ok then return failure(resp) end
+    return resp.body
+end
+
+-- db:insert(table, rows [, opts]) → summary | error
+-- Rows are tables keyed by column name, sent as JSONEachRow (columns left
+-- out get their defaults; Times are sent as text). opts: settings,
+-- query_id, columns (a list, to name them explicitly), batch (rows per
+-- request, 100000).
+function Db.insert(db, table_name, rows, opts)
+    opts = opts or {}
+    local target = M.quote_ident(table_name)
+    if opts.columns ~= nil then
+        local q = []
+        for _, c in opts.columns do q[] = M.quote_ident(c) end
+        target ..= " (" .. string.join(q, ", ") .. ")"
+    end
+    local total = nil
+    for _, batch in list.chunk(rows, opts.batch or 100000) do
+        local lines = []
+        for _, r in batch do lines[] = row_json(r) end
+        local sql = `INSERT INTO ${target} FORMAT JSONEachRow\n` .. string.join(lines, "\n")
+        local s = db:exec(sql, nil, opts)
+        if is_error(s) then return s end
+        if total == nil then
+            total = s
+        else
+            for k, v in s do
+                if type(v) == "int" and type(total[k]) == "int" then total[k] += v end
+            end
+        end
+    end
+    if total == nil then total = {} end
+    return total
+end
+
+-- db:ping() → true | error (runs SELECT 1, so the user and password are
+-- checked too)
+function Db.ping(db)
+    local resp = request(db, "SELECT 1", nil, nil, nil)
+    if not resp.ok then return failure(resp) end
+    return true
+end
+
+-- db:version() → "24.8.14.39"
+function Db.version(db)
+    return db:value("SELECT version()")
+end
+
+-- db:close(): nothing to free (kept for symmetry with the other databases)
+function Db.close(db)
+    return true
+end
+
+-- clickhouse.quote_ident("my table") → "`my table`" (a dotted name is
+-- quoted part by part)
+function M.quote_ident(name)
+    local parts = []
+    for _, p in string.split(name, ".") do
+        parts[] = "`" .. string.replace(string.replace(p, "\\", "\\\\"), "`", "\\`") .. "`"
+    end
+    return string.join(parts, ".")
+end
+
+-- clickhouse.literal(v) → v as a ClickHouse literal ('text', [1,2], {'k':1},
+-- NULL), for the rare SQL that cannot take a parameter
+M.literal = literal
+
+return M

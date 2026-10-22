@@ -652,6 +652,8 @@ need a build first: `make -C libs/<name>`. `json` and `csv` are built in.
 | `http` | `libs/http/http` | Client (`http.get(url)`, `http.post(url, body, type)`, `resp.status`, `resp.body`, `resp:json()`) and server (`http.serve(port, function(req) return http.json(v) end)`, `http.router()`) |
 | `ssl`, `websocket`, `jwt` | `libs/<name>/<name>` | TLS, WebSockets, JSON Web Tokens |
 | `sqlite`, `duckdb` | `libs/<name>/<name>` | `local db = sqlite.open("app.db")?`, `db:exec(sql, params...)`, `db:query(sql, ...) → rows`, `db:row`, `db:value`, `db:transaction(fn)` |
+| `cockroach` | `libs/cockroach/cockroach` | CockroachDB/PostgreSQL (pure Sea): `crdb.open("postgresql://root@localhost:26257/defaultdb?sslmode=disable")?`, then as sqlite with `$1, $2` parameters; `db:insert/upsert(table, rows)`; `db:transaction(fn)` retries conflicts (40001) |
+| `clickhouse` | `libs/clickhouse/clickhouse` | ClickHouse over HTTP: `clickhouse.open("http://default:@localhost:8123/default")?`, `db:query(sql, {name = v})` with `{name:Type}` in the SQL, `db:exec`, `db:insert(table, rows)`, `db:each(sql, fn)` (streamed) |
 | `flags` | built in: `require("sea/flags")` | Command-line flags: `flags.string/int/number/bool/list(name, default, usage, {alias, choices})`, then `local files = flags.parse()`; `.value` holds each result |
 | `template` | `libs/template/template` | Text templates |
 | `console` | `libs/console/console` | Terminal colors, prompts, spinners |

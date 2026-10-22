@@ -102,7 +102,7 @@ any directory: `require("json")`, `require("http")`, `require("sqlite")`.
 | [Tour](docs/tour.md) | Example-driven introduction to the language |
 | [Sea for AI assistants](docs/sea-for-ai.md) | One file for Claude, Gemini, GPT...: the rules they get wrong, syntax, stdlib, translations (also [llms.txt](llms.txt), [AGENTS.md](AGENTS.md)) |
 | [Reference](docs/reference.md) | Syntax, operators, built-ins and the standard library |
-| [Libraries](docs/libs.md) | `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `websocket`, `test`, `template` |
+| [Libraries](docs/libs.md) | `json`, `yaml`, `toml`, `csv`, `compress`, `xml`, `console`, `http`, `ssl`, `jwt`, `flags`, `tensor`, `duckdb`, `sqlite`, `cockroach`, `clickhouse`, `websocket`, `test`, `template` |
 | [Memory model](docs/memory.md) | Reference counting without a GC: ownership, cycles, goroutines |
 | [Architecture](docs/architecture.md) | Compiler, VM, values, scheduler — how it fits together |
 | [JIT design](docs/feature_jit.md) | The optional JIT: design, phases, measurements (pt-BR) |

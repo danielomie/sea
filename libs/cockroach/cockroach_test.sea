@@ -1,0 +1,166 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/cockroach tests: bin/sea test libs/cockroach
+-- The server tests run when COCKROACH_URL points at a database where they
+-- may create tables, e.g. after `cockroach start-single-node --insecure`:
+--   COCKROACH_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable bin/sea test libs/cockroach
+
+local t = require("sea/test")
+local crdb = require("./cockroach")
+
+t.describe("offline", function()
+    t.it("SCRAM-SHA-256 matches RFC 7677", function()
+        local r = crdb.scram_final("pencil", "n=user,r=rOprNGfwEbeRWgbNEkqO",
+            "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+        t.eq(r.message, "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=")
+        t.eq(r.server_signature, "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=")
+        t.is_error(crdb.scram_final("pencil", "n=user,r=abc", "r=other,s=AAAA,i=1"), "SCRAM")
+    end)
+
+    t.it("parses URLs", function()
+        local c = crdb.parse_url("postgresql://ana:s%40gredo@db.example:26258/shop?sslmode=verify-full&sslrootcert=/c/ca.crt&connect_timeout=3&timezone=UTC")
+        t.eq(c.user, "ana")
+        t.eq(c.password, "s@gredo")
+        t.eq(c.host, "db.example")
+        t.eq(c.port, 26258)
+        t.eq(c.database, "shop")
+        t.eq(c.sslmode, "verify-full")
+        t.eq(c.sslrootcert, "/c/ca.crt")
+        t.eq(c.connect_timeout, 3000)
+        t.eq(c.settings, {timezone = "UTC"})
+        local d = crdb.parse_url("cockroachdb://localhost")
+        t.eq(d.host, "localhost")
+        t.is_nil(d.port)
+        t.is_error(crdb.parse_url("mysql://x"), "bad URL")
+    end)
+
+    t.it("quotes identifiers", function()
+        t.eq(crdb.quote_ident("people"), "\"people\"")
+        t.eq(crdb.quote_ident("app.my \"t\""), "\"app\".\"my \"\"t\"\"\"")
+    end)
+
+    t.it("reads SQLSTATE", function()
+        t.eq(crdb.sqlstate(error("cockroach: restart transaction (SQLSTATE 40001)")), "40001")
+        t.is_nil(crdb.sqlstate(error("cockroach: read: timeout")))
+        t.is_nil(crdb.sqlstate(42))
+    end)
+
+    t.it("reports a refused connection", function()
+        local lfd = net.listen(0, "127.0.0.1")
+        local port = net.local_port(lfd)
+        net.close(lfd)
+        t.is_error(crdb.open({host = "127.0.0.1", port = port, sslmode = "disable"}), "connect")
+        t.is_error(crdb.open({sslmode = "sometimes"}), "unknown sslmode")
+    end)
+end)
+
+local url = os.getenv("COCKROACH_URL") or ""
+local server = url ~= "" and t.describe or t.describe_skip
+
+server("server", function()
+    local db = nil
+    t.before_all(function()
+        db = crdb.open(url, {max_conns = 4})
+        assert(not is_error(db), is_error(db) and db.message)
+        local ok = db:exec("DROP TABLE IF EXISTS sea_crdb_test; CREATE TABLE sea_crdb_test (" ..
+            "id INT PRIMARY KEY DEFAULT unique_rowid(), name STRING NOT NULL, age INT, score DECIMAL, " ..
+                "tags STRING[], meta JSONB, photo BYTES, at TIMESTAMPTZ, ok BOOL)")
+        assert(not is_error(ok), is_error(ok) and ok.message)
+    end)
+    t.after_all(function()
+        db:exec("DROP TABLE IF EXISTS sea_crdb_test")
+        db:close()
+    end)
+
+    t.it("writes and reads every kind of value", function()
+        t.eq(db:exec("INSERT INTO sea_crdb_test (name, age, score, tags, meta, photo, at, ok) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "ana", 31, 9.5, ["a", "b c", "d\"e", nil], {x = 1, y = [1, 2]}, crdb.bytes("\x00\x01\xff"),
+            time.parse("2026-10-21T10:00:00Z"), true), 1)
+        local r = db:row("SELECT * FROM sea_crdb_test WHERE name = $1", "ana")
+        t.eq(type(r.id), "bigint")
+        t.eq(r.age, 31)
+        t.eq(r.score, 9.5)
+        t.eq(r.tags, ["a", "b c", "d\"e", nil])
+        t.eq(r.meta, {x = 1, y = [1, 2]})
+        t.eq(r.photo, "\x00\x01\xff")
+        t.ok(string.starts_with(r.at, "2026-10-21"))
+        t.eq(r.ok, true)
+        t.eq(db:value("SELECT id FROM sea_crdb_test WHERE id = $1", r.id), r.id)
+    end)
+
+    t.it("inserts in bulk and upserts", function()
+        t.eq(db:insert("sea_crdb_test", [{id = 1, name = "bo", age = 25}, {id = 2, name = "cid"}]), 2)
+        t.eq(db:upsert("sea_crdb_test", [{id = 2, name = "cid", age = 40}]), 1)
+        t.eq(db:value("SELECT age FROM sea_crdb_test WHERE id = 2"), 40)
+        local back = db:insert("sea_crdb_test", [{id = 3, name = "dan"}], {returning = "id, name"})
+        t.eq(back, [{id = 3, name = "dan"}])
+        t.eq(db:insert("sea_crdb_test", [{id = 3, name = "dan"}], {on_conflict = "DO NOTHING"}), 0)
+    end)
+
+    t.it("queries, rows and values", function()
+        t.eq(len(db:query("SELECT name FROM sea_crdb_test WHERE id <= $1 ORDER BY id", 3)), 3)
+        t.is_nil(db:row("SELECT name FROM sea_crdb_test WHERE id = -1"))
+        t.is_nil(db:value("SELECT name FROM sea_crdb_test WHERE id = -1"))
+        t.eq(db:value("SELECT $1::INT = ANY($2)", 2, [1, 2, 3]), true)
+        t.eq(db:value("SELECT ARRAY[ARRAY[1,2],ARRAY[3,4]]"), [ [1, 2], [3, 4] ])
+        t.eq(db:run("SELECT $1::STRING || $2::STRING AS s", ["a", "b"], "value"), "ab")
+        local names = []
+        t.eq(db:each("SELECT name FROM sea_crdb_test ORDER BY id", function(row)
+            names[] = row.name
+            return len(names) < 2
+        end), 2)
+        t.eq(names, ["bo", "cid"])
+    end)
+
+    t.it("reports server errors with their SQLSTATE", function()
+        local e = db:query("SELECT * FROM sea_no_such_table")
+        t.is_error(e, "does not exist")
+        t.eq(crdb.sqlstate(e), "42P01")
+        t.eq(db:value("SELECT 1"), 1)
+    end)
+
+    t.it("commits, rolls back and retries transactions", function()
+        t.eq(db:transaction(function(tx)
+            local _ = tx:exec("UPDATE sea_crdb_test SET age = 26 WHERE id = 1")?
+            return tx:value("SELECT age FROM sea_crdb_test WHERE id = 1")
+        end), 26)
+        t.is_error(db:transaction(function(tx)
+            local _ = tx:exec("UPDATE sea_crdb_test SET age = 99 WHERE id = 1")?
+            return error("abort")
+        end), "abort")
+        t.eq(db:value("SELECT age FROM sea_crdb_test WHERE id = 1"), 26)
+
+        -- read-modify-write from many goroutines: conflicts are retried
+        local _ = db:exec("UPSERT INTO sea_crdb_test (id, name, age) VALUES (100, 'counter', 0)")
+        local wg = sync.waitgroup()
+        for _ = 1, 8 do
+            wg:add(1)
+            go (function()
+                defer wg:done()
+                for _ = 1, 5 do
+                    db:transaction(function(tx)
+                        local n = tx:value("SELECT age FROM sea_crdb_test WHERE id = 100")?
+                        time.sleep(1000000)
+                        return tx:exec("UPDATE sea_crdb_test SET age = $1 WHERE id = 100", n + 1)
+                    end, {max_retries = 100})
+                end
+            end)()
+        end
+        wg:wait()
+        t.eq(db:value("SELECT age FROM sea_crdb_test WHERE id = 100"), 40)
+        t.eq(db:stats().in_use, 0)
+    end)
+
+    t.it("keeps a single connection's transaction state", function()
+        local c = crdb.connect(url)
+        t.not_nil(c.fd)
+        t.eq(c:exec("BEGIN"), 0)
+        t.eq(c.status, "T")
+        t.is_error(c:query("SELECT * FROM sea_no_such_table"), "42P01")
+        t.eq(c.status, "E")
+        local _ = c:exec("ROLLBACK")
+        t.eq(c.status, "I")
+        c:close()
+    end)
+end)

@@ -1,0 +1,152 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/clickhouse tests: bin/sea test libs/clickhouse
+-- The server tests run when CLICKHOUSE_URL points at a server where they may
+-- create tables, e.g. after
+--   docker run -d -p 8123:8123 -e CLICKHOUSE_PASSWORD=secret clickhouse/clickhouse-server
+--   CLICKHOUSE_URL=http://default:secret@localhost:8123/default bin/sea test libs/clickhouse
+
+local t = require("sea/test")
+local clickhouse = require("./clickhouse")
+
+t.describe("offline", function()
+    t.it("parses URLs", function()
+        local c = clickhouse.parse_url("https://ana:s%40gredo@ch.example:8443/logs?max_execution_time=30&verify=false")
+        t.eq(c.secure, true)
+        t.eq(c.user, "ana")
+        t.eq(c.password, "s@gredo")
+        t.eq(c.host, "ch.example")
+        t.eq(c.port, 8443)
+        t.eq(c.database, "logs")
+        t.eq(c.verify, false)
+        t.eq(c.settings, {max_execution_time = "30"})
+        local d = clickhouse.parse_url("clickhouse://localhost?secure=1")
+        t.eq(d.secure, true)
+        t.is_nil(d.user)
+        t.is_error(clickhouse.parse_url("ftp://x"), "bad URL")
+    end)
+
+    t.it("writes literals and identifiers", function()
+        t.eq(clickhouse.literal("it's \\ ok"), "'it\\'s \\\\ ok'")
+        t.eq(clickhouse.literal([1, "a", nil, [2.5]]), "[1,'a',NULL,[2.5]]")
+        t.eq(clickhouse.literal({b = 2, a = "x"}), "{'a':'x','b':2}")
+        t.eq(clickhouse.literal(time.parse("2026-10-21T10:00:00.5Z"):utc()), "'2026-10-21 10:00:00.5'")
+        t.eq(clickhouse.quote_ident("logs.my `t`"), "`logs`.`my \\`t\\``")
+    end)
+
+    t.it("reads error codes", function()
+        t.eq(clickhouse.error_code(error("clickhouse: Code: 60. DB::Exception: Unknown table")), 60)
+        t.is_nil(clickhouse.error_code(error("clickhouse: connection refused")))
+    end)
+
+    t.it("reports a refused connection", function()
+        local lfd = net.listen(0, "127.0.0.1")
+        local port = net.local_port(lfd)
+        net.close(lfd)
+        t.is_error(clickhouse.open({host = "127.0.0.1", port = port}), "clickhouse")
+        t.not_nil(clickhouse.open({host = "127.0.0.1", port = port, ping = false}).query)
+    end)
+end)
+
+local url = os.getenv("CLICKHOUSE_URL") or ""
+local server = url ~= "" and t.describe or t.describe_skip
+
+server("server", function()
+    local db = nil
+    t.before_all(function()
+        db = clickhouse.open(url)
+        assert(not is_error(db), is_error(db) and db.message)
+        db:exec("DROP TABLE IF EXISTS sea_ch_test")
+        local ok = db:exec("CREATE TABLE sea_ch_test (at DateTime, url String, ms UInt32, big UInt64, " ..
+            "tags Array(String), attrs Map(String, String), note Nullable(String), price Decimal(10, 2), ok Bool) " ..
+                "ENGINE = MergeTree ORDER BY at")
+        assert(not is_error(ok), is_error(ok) and ok.message)
+    end)
+    t.after_all(function()
+        db:exec("DROP TABLE IF EXISTS sea_ch_test")
+    end)
+
+    t.it("inserts rows and reads every kind of value", function()
+        local s = db:insert("sea_ch_test", [
+            {
+                at = "2026-10-21 10:00:00", url = "/", ms = 12, big = bigint.new("18446744073709551615"),
+                tags = ["a", "b"], attrs = {k = "v"}, price = 9.99, ok = true,
+            },
+            {at = time.parse("2026-10-21 10:00:05", nil, "UTC"), url = "/x\t'y\\", ms = 30, big = 5, note = "hi", price = 1},
+        ])
+        t.eq(s.written_rows, 2)
+        local rows = db:query("SELECT * FROM sea_ch_test ORDER BY at")
+        t.eq(len(rows), 2)
+        t.eq(tostring(rows[0].big), "18446744073709551615")
+        t.eq(rows[0].tags, ["a", "b"])
+        t.eq(rows[0].attrs, {k = "v"})
+        t.is_nil(rows[0].note)
+        t.eq(rows[0].price, 9.99)
+        t.eq(rows[0].ok, true)
+        t.eq(rows[1].url, "/x\t'y\\")
+        t.eq(rows[1].tags, [])
+        t.eq(rows[1].big, 5)
+        t.eq(rows[1].ok, false)
+    end)
+
+    t.it("binds parameters by type", function()
+        t.eq(db:value("SELECT count() FROM sea_ch_test WHERE ms > {min:UInt32} AND url = {u:String}", {min = 5, u = "/x\t'y\\"}), 1)
+        t.eq(db:value("SELECT has({t:Array(String)}, 'b')", {t = ["a", "b"]}), 1)
+        t.eq(db:value("SELECT {n:Nullable(String)} IS NULL", {n = nil}), 1)
+        t.eq(db:value("SELECT {m:Map(String, UInt8)}['b']", {m = {a = 1, b = 2}}), 2)
+        t.eq(db:row("SELECT {d:DateTime} AS d", {d = time.parse("2026-10-21 10:00:05", nil, "UTC")}, {settings = {session_timezone = "UTC"}}).d,
+            "2026-10-21 10:00:05")
+    end)
+
+    t.it("returns columns and statistics", function()
+        local r = db:result("SELECT number FROM numbers(10) LIMIT 3")
+        t.eq(r.columns, [{name = "number", type = "UInt64"}])
+        t.eq(len(r.rows), 3)
+        t.eq(r.statistics.rows_read, 3)
+        t.is_nil(db:row("SELECT 1 WHERE 0"))
+        t.eq(db:raw("SELECT number FROM numbers(3) FORMAT CSV"), "0\n1\n2\n")
+    end)
+
+    t.it("streams rows", function()
+        local sum = 0
+        t.eq(db:each("SELECT number AS n FROM numbers(100000)", function(row)
+            sum += row.n
+        end), 100000)
+        t.eq(sum, 4999950000)
+        t.eq(db:each("SELECT number AS n FROM numbers(1000000)", function(row)
+            return row.n < 9
+        end), 10)
+        t.is_error(db:each("SELECT throwIf(number = 70000, 'boom') FROM numbers(100000) SETTINGS max_block_size = 1000",
+            function(_) end), "boom")
+    end)
+
+    t.it("reports errors with their code", function()
+        local e = db:query("SELECT * FROM sea_no_such_table")
+        t.is_error(e, "UNKNOWN_TABLE")
+        t.eq(clickhouse.error_code(e), 60)
+        local c = clickhouse.parse_url(url)
+        c.password = "wrong password"
+        t.eq(clickhouse.error_code(clickhouse.open(c)), 516)
+    end)
+
+    t.it("serves goroutines in parallel", function()
+        local wg = sync.waitgroup()
+        local mu = sync.mutex()
+        local sum = 0
+        for i = 1, 16 do
+            wg:add(1)
+            go (function()
+                defer wg:done()
+                local v = db:value("SELECT sum(number) FROM numbers({n:UInt32})", {n = i * 1000})
+                mu:acquire()
+                sum += v
+                mu:release()
+            end)()
+        end
+        wg:wait()
+        local want = 0
+        for i = 1, 16 do want += (i * 1000) * (i * 1000 - 1) // 2 end
+        t.eq(sum, want)
+    end)
+end)

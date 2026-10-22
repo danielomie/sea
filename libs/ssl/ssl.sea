@@ -21,7 +21,7 @@ local M = {}
 -- blocks), so a slow peer never holds up the others.
 
 -- ssl.connect(host, port, [opts]) → conn|nil
--- opts: {verify=bool, cert=path, key=path, sni=string,
+-- opts: {verify=bool, verify_host=bool, ca=path, cert=path, key=path, sni=string,
 --        min_version="TLSv1.2"|"TLSv1.3", timeout=ms}
 -- Returns an opaque TLS connection handle (nil on failure; ssl.last_error()
 -- tells why — from code running in many goroutines, prefer ssl.dial, whose
@@ -64,6 +64,25 @@ function M.dial(host, port, opts)
         return conn
     end
     local ok = native.tls_handshake(conn, timeout)
+    if is_error(ok) then
+        native.tls_close(conn)
+        return ok
+    end
+    return conn
+end
+
+-- ssl.handshake_client(fd, host, [opts]) → conn | error
+-- TLS client handshake on a socket that is already connected (from
+-- net.connect), for protocols that switch to TLS after a plain exchange
+-- (PostgreSQL's SSLRequest, STARTTLS). Takes the dial opts; on failure the
+-- socket is closed.
+function M.handshake_client(fd, host, opts)
+    local conn = native.tls_client(fd, host, opts)
+    if is_error(conn) then
+        net.close(fd)
+        return conn
+    end
+    local ok = native.tls_handshake(conn, opts and opts.timeout or nil)
     if is_error(ok) then
         native.tls_close(conn)
         return ok

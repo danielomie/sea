@@ -30,6 +30,8 @@ pure-Sea libraries work out of the box.
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
+| `cockroach` | `libs/cockroach/cockroach` | pure Sea (PostgreSQL protocol; `libs/ssl` for TLS) | — |
+| `clickhouse` | `libs/clickhouse/clickhouse` | pure Sea (HTTP interface, uses `libs/http`) | `make -C libs/http` |
 | `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
 
 Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
@@ -876,8 +878,9 @@ TLS runs over sockets from the built-in `net` module (see `docs/reference.md`): 
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `ssl.connect` | `connect(host, port [, opts]) → conn\|nil` | Open a TLS client connection. `opts` (table or map): `{verify, cert, key, sni, min_version, timeout}`. On failure `ssl.last_error()` says why |
+| `ssl.connect` | `connect(host, port [, opts]) → conn\|nil` | Open a TLS client connection. `opts` (table or map): `{verify, verify_host, ca, cert, key, sni, min_version, timeout}`: `ca` is a PEM file of trusted CAs (instead of the system's), `verify_host = false` checks the chain but not the host name, `cert`/`key` a client certificate (a file that cannot be loaded is an error). On failure `ssl.last_error()` says why |
 | `ssl.dial` | `dial(host, port [, opts]) → conn\|error` | Same as `connect`, but returns an error value (`is_error`) — safe from many goroutines at once |
+| `ssl.handshake_client` | `handshake_client(fd, host [, opts]) → conn\|error` | TLS client handshake on a socket already connected with `net.connect`, for protocols that switch to TLS after a plain exchange (PostgreSQL's SSLRequest, STARTTLS). Takes the `connect` opts; closes the socket on failure |
 | `ssl.last_error` | `last_error() → string\|nil` | Message of the last failure of a `nil`-returning function (shared, not per goroutine) |
 | `ssl.read` | `read(conn [, n [, timeout]]) → string\|nil` | Without `n`: read until EOF. With `n`: read exactly `n` bytes (fewer if the stream ends) |
 | `ssl.recv` | `recv(conn [, max [, timeout]]) → string\|error` | One read of whatever is available (up to `max`, default 65536); `""` at EOF |
@@ -1265,7 +1268,7 @@ parser
 |----------|-------------|
 | `t.describe(name, fn)` | A group (groups nest; full names are `group > sub > test`) |
 | `t.it(name, fn)` | A test |
-| `t.skip(name, fn)`, `t.describe_skip(name, fn)` | Defined but not run (reported as skipped) |
+| `t.skip(name, fn)`, `t.describe_skip(name, fn)` | Defined but not run (reported as skipped); a skipped group runs none of its hooks. `local group = os.getenv("DB_URL") and t.describe or t.describe_skip` skips tests that need a server |
 | `t.only(name, fn)` | When any test uses `only`, only those run |
 | `t.todo(name)` | A placeholder, reported as todo |
 | `t.before_each(fn)`, `t.after_each(fn)` | Around every test of the group and its subgroups (outer `before_each` first, inner `after_each` first) |
@@ -1860,6 +1863,147 @@ thread (at most 8) and only that goroutine waits; on the main thread they run
 in place. One connection runs one statement at a time; use `db:connect()` for
 parallel work. Failures are error values: `sqlite.exec: UNIQUE constraint
 failed: users.email`, `sqlite.query: expected 2 parameters, got 1`.
+
+---
+
+## `cockroach`
+
+CockroachDB client in pure Sea: the PostgreSQL wire protocol (v3) over the
+built-in `net` module, so it also talks to PostgreSQL. Nothing to build;
+`libs/ssl` (`make -C libs/ssl`) is needed only for TLS. Every network wait
+parks only the goroutine that waits.
+
+```sea
+local crdb = require("../libs/cockroach/cockroach")   -- relative to the requiring file
+
+local db = crdb.open("postgresql://root@localhost:26257/defaultdb?sslmode=disable")?
+db:exec("CREATE TABLE IF NOT EXISTS accounts (id INT PRIMARY KEY, owner STRING, balance DECIMAL)")?
+db:upsert("accounts", [{id = 1, owner = "ana", balance = 100}, {id = 2, owner = "bo", balance = 50}])?
+for _, a in db:query("SELECT * FROM accounts WHERE balance > $1", 10)? do print(a.owner, a.balance) end
+db:transaction(function(tx)               -- retried on serialization conflicts (40001)
+    local _ = tx:exec("UPDATE accounts SET balance = balance - $1 WHERE id = $2", 30, 1)?
+    return tx:exec("UPDATE accounts SET balance = balance + $1 WHERE id = $2", 30, 2)
+end)?
+db:close()
+```
+
+| Function | Description |
+|----------|-------------|
+| `crdb.open([url] [, opts]) → db\|error` | A pool of connections (one is opened right away, so a bad address or password fails here). `url`: `postgresql://user:password@host:26257/db?sslmode=…&sslrootcert=…` (also `postgres://`, `cockroachdb://`); its query takes `sslmode`, `sslrootcert`, `sslcert`, `sslkey`, `application_name`, `connect_timeout` (s), `options`, and any other key as a session setting. `opts` override the URL (see below) |
+| `crdb.connect([url] [, opts]) → conn\|error` | One connection without a pool: the same `run/query/exec/row/value/each`, `close()`, and `conn.status` (`"I"` idle, `"T"` in a transaction, `"E"` in a failed one) |
+| `db:query(sql, params...) → array\|error` | The rows, tables keyed by column name (NULL columns are absent). Parameters are `$1`, `$2`, ... |
+| `db:exec(sql, params...) → int\|error` | Rows affected. Without parameters the SQL may hold several statements separated by `;` |
+| `db:row(sql, params...)`, `db:value(sql, params...)` | The first row / its first column, or `nil` |
+| `db:each(sql, fn, params...) → int\|error` | `fn(row)` as the rows arrive; `false` ignores the rest |
+| `db:run(sql, params, mode [, fn])` | The same with the parameters in an array; `mode` is `"rows"`, `"exec"`, `"row"`, `"value"` or `"each"` |
+| `db:insert(table, rows [, opts]) → int\|rows\|error` | A multi-row `INSERT` (columns from the first row's keys, sent in batches). `opts`: `upsert` (`UPSERT`: insert or replace by primary key), `on_conflict` (`"DO NOTHING"`, `"(id) DO UPDATE SET …"`), `returning` (`"*"` or columns: the rows come back) |
+| `db:upsert(table, rows [, opts])` | `db:insert` with `upsert = true` |
+| `db:transaction(fn [, opts]) → value\|error` | `fn(tx)` in a transaction: commits when it returns, rolls back when it returns an error value or panics (the panic goes on). On SQLSTATE 40001 (CockroachDB's "restart transaction", from a statement or the commit) `fn` runs again in a new transaction, with a growing pause, up to `opts.max_retries` (10) times, so `fn` must have no effects outside the database. Also takes `db:begin`'s options |
+| `db:begin([opts]) → tx\|error` | An explicit transaction holding one connection: `tx:query/exec/row/value/each/run`, `tx:commit()`, `tx:rollback()`. `opts`: `isolation` (`"SERIALIZABLE"`, `"READ COMMITTED"`), `priority` (`"LOW"`, `"NORMAL"`, `"HIGH"`), `read_only` |
+| `db:ping() → true\|error`, `db:stats() → {max_conns, idle, in_use}`, `db:close()` | |
+| `db.server_version`, `db.crdb_version` | What the server reported (`"13.0.0"`, `"CockroachDB CCL v24.2.0 …"`) |
+| `crdb.sqlstate(err) → string\|nil` | The SQLSTATE of a server error (`"23505"` unique violation, `"40001"`, `"42P01"` unknown table) |
+| `crdb.bytes(s)`, `crdb.json(v)` | Parameter wrappers: send `s` as `BYTES`; send an array as JSON instead of an SQL array |
+| `crdb.quote_ident(name)` | `"name"` with quotes doubled; a dotted name part by part |
+| `crdb.parse_url(url) → config\|error` | The URL as a table of options |
+
+**`opts`**: `host` (`localhost`), `port` (26257), `user` (`root`),
+`password`, `database` (`defaultdb`), `sslmode` (`disable`, `allow`,
+`prefer` (default: TLS when the server offers it), `require` (TLS, no
+certificate check), `verify-ca`, `verify-full` (also the host name)),
+`sslrootcert` (the cluster's CA), `sslcert` + `sslkey` (client certificate
+authentication), `application_name` (`sea`), `settings` (session variables
+set at connect: `{timezone = "UTC"}`), `max_conns` (8), `max_idle_time` (ms
+a connection may stay idle before it is replaced; 300000),
+`connect_timeout` (ms; 10000), `timeout` (ms for each network wait of a
+statement; none), `exact_numeric` (`DECIMAL` as strings instead of numbers).
+Authentication: trust, password, MD5 and SCRAM-SHA-256 (CockroachDB's
+default), or a client certificate.
+
+**Parameters** go to the server separately from the SQL (extended query
+protocol), as text: `nil` → NULL, `bool`, `int`, `number`, `bigint`,
+`string`, a Time (RFC 3339), an array → an SQL array (`= ANY($1)`), a table
+or map → JSON, `crdb.bytes(s)` → BYTES.
+
+**Results**: `INT` → `int` (a `bigint` beyond ±2^47, as `unique_rowid()`
+values usually are), `FLOAT` and `DECIMAL` → `number`, `BOOL` → `bool`,
+`JSONB` → decoded, `BYTES` → a string of bytes, arrays → arrays (nested
+too), everything else (`STRING`, `UUID`, `DATE`, `TIMESTAMP`, `INTERVAL`,
+...) → the server's text.
+
+**Errors** are values: `cockroach: relation "nope" does not exist (SQLSTATE
+42P01)`, `cockroach: connect localhost:26257: connection refused`. Network
+failures close that connection; the pool opens a new one on the next call.
+`db:exec("BEGIN")` on the pool makes no sense (each call may get another
+connection): use `db:transaction` or `db:begin`.
+
+Tests: `bin/sea test libs/cockroach`; with
+`COCKROACH_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable`
+they also run against a server (`cockroach start-single-node --insecure`).
+
+---
+
+## `clickhouse`
+
+ClickHouse client in pure Sea, over the HTTP interface (port 8123, 8443 with
+TLS) through `libs/http` (`make -C libs/http libs/ssl`). Each call is one
+request on kept-alive connections, so a db can be shared by goroutines.
+
+```sea
+local clickhouse = require("../libs/clickhouse/clickhouse")
+
+local db = clickhouse.open("http://default:secret@localhost:8123/default")?
+db:exec("CREATE TABLE IF NOT EXISTS hits (at DateTime, url String, ms UInt32) ENGINE = MergeTree ORDER BY at")?
+db:insert("hits", [{at = time.now(), url = "/", ms = 12}, {at = time.now(), url = "/doc", ms = 30}])?
+for _, r in db:query("SELECT url, avg(ms) AS ms FROM hits WHERE ms > {min:UInt32} GROUP BY url", {min = 5})? do
+    print(r.url, r.ms)
+end
+db:each("SELECT * FROM hits", function(row) print(row.url) end)?   -- streamed
+```
+
+| Function | Description |
+|----------|-------------|
+| `clickhouse.open([url] [, opts]) → db\|error` | `url`: `http(s)://user:password@host:port/database?setting=value` (or `clickhouse://…`, `secure=true` for HTTPS, `verify=false`). Runs `SELECT 1` to check the address and credentials unless `ping = false` |
+| `db:query(sql [, params [, opts]]) → array\|error` | The rows, tables keyed by column name |
+| `db:row(...)`, `db:value(...)` | The first row / its first column, or `nil` |
+| `db:result(sql [, params [, opts]]) → table\|error` | `{columns = [{name, type}], rows, statistics = {elapsed, rows_read, bytes_read}, rows_before_limit}` |
+| `db:each(sql, fn [, params [, opts]]) → int\|error` | Stream the result (`JSONEachRow`): `fn(row)` as rows arrive, memory stays flat; `false` stops reading. An exception raised by the server midway is returned as an error |
+| `db:exec(sql [, params [, opts]]) → summary\|error` | Statements without a result (`CREATE`, `ALTER`, `INSERT … SELECT`, `OPTIMIZE`). The summary holds the server's counters as ints: `written_rows`, `written_bytes`, `read_rows`, `elapsed_ns`, ..., and `query_id` |
+| `db:insert(table, rows [, opts]) → summary\|error` | Rows (tables keyed by column) sent as `JSONEachRow`; missing columns get their defaults, Times are sent as text. `opts`: `columns` (name them explicitly), `batch` (rows per request, 100000), `settings`, `query_id` |
+| `db:raw(sql [, params [, opts]]) → string\|error` | The body as the server wrote it: add a `FORMAT` (`CSVWithNames`, `TSV`, `Parquet`, `Pretty`, ...) |
+| `db:ping() → true\|error`, `db:version() → string`, `db:close()` | |
+| `clickhouse.error_code(err) → int\|nil` | The server's error number (60 unknown table, 516 authentication failed, ...) |
+| `clickhouse.literal(v)`, `clickhouse.quote_ident(name)` | A value as a ClickHouse literal (`'it\'s'`, `[1,2]`, `{'k':1}`, `NULL`); `` `name` `` quoted |
+| `clickhouse.parse_url(url) → config\|error` | The URL as a table of options |
+
+**`opts` of `open`**: `host` (`localhost`), `port` (8123; 8443 with
+`secure`), `secure` (HTTPS), `verify` (`false` skips the certificate check),
+`user` (`default`), `password`, `database`, `settings` (sent with every
+query: `{max_execution_time = 30}`), `timeout` (ms per network wait;
+300000), `compress` (gzip responses; `true`), `session_id` (a server session,
+for temporary tables and `SET`), `ping`. **Per call** `opts`: `settings`,
+`query_id`.
+
+**Parameters** are ClickHouse's own query parameters: `{name:Type}` in the
+SQL and a table `{name = value}`. The server parses each value by its type,
+so values never become SQL text: strings, numbers, `bool`, `bigint`, `nil`
+(for `Nullable`), Times (`DateTime`), arrays (`Array(T)`), tables and maps
+(`Map(K, V)`).
+
+**Results** come as JSON with 64-bit integers unquoted: `UInt64`/`Int64`
+beyond ±2^47 are exact `bigint`s; `Decimal` and floats → `number`; `Bool` →
+`bool`; `Array`/`Tuple` → arrays; `Map` → tables; `Nullable` NULL → absent;
+dates, `DateTime`, `UUID`, `Enum` → strings.
+
+**Errors** are values with the server's text: `clickhouse: Code: 60.
+DB::Exception: Unknown table expression identifier 'nope' …
+(UNKNOWN_TABLE)`. Queries run with `wait_end_of_query=1`, so a failure is
+reported as an error even after rows were produced.
+
+Tests: `bin/sea test libs/clickhouse`; with
+`CLICKHOUSE_URL=http://default:secret@localhost:8123/default` they also run
+against a server (`docker run -p 8123:8123 -e CLICKHOUSE_PASSWORD=secret
+clickhouse/clickhouse-server`).
 
 ---
 

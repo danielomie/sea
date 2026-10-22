@@ -1,0 +1,985 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/cockroach/cockroach.sea — CockroachDB client for Sea (pure Sea)
+--
+-- Speaks the PostgreSQL wire protocol (v3) over the built-in `net` module,
+-- so it also works with PostgreSQL itself. TLS goes through libs/ssl
+-- (`make -C libs/ssl`), needed only when the server uses it.
+--
+--   local crdb = require("../libs/cockroach/cockroach")
+--   local db = crdb.open("postgresql://root@localhost:26257/defaultdb?sslmode=disable")?
+--   local _ = db:exec("CREATE TABLE IF NOT EXISTS t (id INT PRIMARY KEY, name STRING)")?
+--   local _ = db:exec("UPSERT INTO t VALUES ($1, $2)", 1, "ana")?
+--   for _, row in db:query("SELECT * FROM t WHERE id > $1", 0)? do print(row.name) end
+--   local n = db:transaction(function(tx)
+--       local _ = tx:exec("UPDATE t SET name = $1 WHERE id = $2", "bia", 1)?
+--       return tx:value("SELECT count(*) FROM t")
+--   end)?
+--   db:close()
+--
+-- A db is a pool of connections, safe to share between goroutines: every
+-- wait parks only the goroutine that waits. Failures are error values whose
+-- message ends with "(SQLSTATE xxxxx)" for server errors (crdb.sqlstate(e)).
+-- db:transaction retries the whole function when CockroachDB asks the
+-- client to (SQLSTATE 40001, serialization conflicts).
+
+local ssl = require("../ssl/ssl")
+
+local M = {}
+
+M.DEFAULT_PORT = 26257
+
+-- ---- bytes -------------------------------------------------------------------------
+
+local function i32(n)
+    return string.char((n >> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255)
+end
+
+local function i16(n)
+    return string.char((n >> 8) & 255, n & 255)
+end
+
+local function rd32(s, p)
+    local n = (string.byte(s, p) << 24) | (string.byte(s, p + 1) << 16) | (string.byte(s, p + 2) << 8) | string.byte(s, p + 3)
+    if n >= 0x80000000 then n -= 0x100000000 end
+    return n
+end
+
+local function rd16(s, p)
+    local n = (string.byte(s, p) << 8) | string.byte(s, p + 1)
+    if n >= 0x8000 then n -= 0x10000 end
+    return n
+end
+
+-- one protocol message: type byte, length (itself included), body
+local function msg(tag, body)
+    return tag .. i32(len(body) + 4) .. body
+end
+
+-- the NUL-terminated string at p → string, position after the NUL
+local function cstr(s, p)
+    local z = string.find(s, "\0", p)
+    if z == nil then return string.sub(s, p), len(s) + 1 end
+    return string.sub(s, p, z - 1), z + 1
+end
+
+-- ---- SCRAM-SHA-256 (RFC 5802 / 7677) -----------------------------------------------
+
+local function xor_bytes(a, b)
+    local out = []
+    for i = 1, len(a) do out[] = string.char(string.byte(a, i) ~ string.byte(b, i)) end
+    return string.join(out)
+end
+
+-- PBKDF2-HMAC-SHA-256, one 32-byte block (all SCRAM needs)
+local function pbkdf2_sha256(password, salt, iterations)
+    local u = hash.hmac("sha256", password, salt .. i32(1), true)
+    local acc = []
+    for i = 1, 32 do acc[] = string.byte(u, i) end
+    for _ = 2, iterations do
+        u = hash.hmac("sha256", password, u, true)
+        for i = 1, 32 do acc[i - 1] = acc[i - 1] ~ string.byte(u, i) end
+    end
+    local out = []
+    for _, b in acc do out[] = string.char(b) end
+    return string.join(out)
+end
+
+-- crdb.scram_final(password, client_first_bare, server_first) →
+-- {message, server_signature} | error. Exposed for the tests (RFC 7677
+-- vectors); the connection uses it during authentication.
+function M.scram_final(password, client_first_bare, server_first)
+    local attrs = {}
+    for _, part in string.split(server_first, ",") do
+        attrs[string.sub(part, 1, 1)] = string.sub(part, 3)
+    end
+    local nonce = string.sub(client_first_bare, string.find(client_first_bare, "r=") + 2)
+    if attrs.r == nil or not string.starts_with(attrs.r, nonce) or attrs.s == nil or attrs.i == nil then
+        return error("cockroach: bad SCRAM server message")
+    end
+    local salt = encoding.base64_decode(attrs.s)
+    if is_error(salt) then return error("cockroach: bad SCRAM salt") end
+    local salted = pbkdf2_sha256(password, salt, tonumber(attrs.i))
+    local client_key = hash.hmac("sha256", salted, "Client Key", true)
+    local stored_key = hash.sha256(client_key, true)
+    local without_proof = "c=biws,r=" .. attrs.r
+    local auth = client_first_bare .. "," .. server_first .. "," .. without_proof
+    local proof = xor_bytes(client_key, hash.hmac("sha256", stored_key, auth, true))
+    local server_key = hash.hmac("sha256", salted, "Server Key", true)
+    local r = {}
+    r.message = without_proof .. ",p=" .. encoding.base64_encode(proof)
+    r.server_signature = encoding.base64_encode(hash.hmac("sha256", server_key, auth, true))
+    return r
+end
+
+-- ---- configuration -----------------------------------------------------------------
+
+local SSLMODES = {}
+for _, m in ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] do SSLMODES[m] = true end
+
+-- crdb.parse_url(url) → config | error
+-- postgresql://user:password@host:port/database?sslmode=...&sslrootcert=...
+-- (also postgres:// and cockroachdb://). Query keys: sslmode, sslrootcert,
+-- sslcert, sslkey, application_name, connect_timeout (seconds, as libpq),
+-- options; any other key is sent to the server as a session setting.
+function M.parse_url(url)
+    local m = re.match("^(postgres|postgresql|cockroachdb)://(?:([^:@/]*)(?::([^@/]*))?@)?([^:/?]*)(?::(\\d+))?(?:/([^?]*))?(?:\\?(.*))?$", url)
+    if m == nil then return error(`cockroach: bad URL '${url}'`) end
+    local g = m.groups
+    local cfg = {}
+    local function dec(s)
+        if s == nil or s == "" then return nil end
+        return encoding.url_decode(s)
+    end
+    cfg.user = dec(g[2])
+    cfg.password = dec(g[3])
+    cfg.host = dec(g[4])
+    if g[5] ~= nil and g[5] ~= "" then cfg.port = tonumber(g[5]) end
+    cfg.database = dec(g[6])
+    if g[7] ~= nil and g[7] ~= "" then
+        local settings = {}
+        for _, kv in string.split(g[7], "&") do
+            local p = string.split(kv, "=", 2)
+            local k = encoding.url_decode(p[0])
+            local v = len(p) > 1 and encoding.url_decode(p[1]) or ""
+            if k == "sslmode" or k == "sslrootcert" or k == "sslcert" or k == "sslkey" or k == "application_name" or k == "options" then
+                cfg[k] = v
+            elseif k == "connect_timeout" then
+                cfg.connect_timeout = (tonumber(v) or 10) * 1000
+            else
+                settings[k] = v
+            end
+        end
+        if len(settings) > 0 then cfg.settings = settings end
+    end
+    return cfg
+end
+
+local function config(url, opts)
+    local cfg = {}
+    if type(url) == "string" then
+        cfg = M.parse_url(url)?
+    elseif url ~= nil then
+        opts = url
+    end
+    for k, v in opts or {} do cfg[k] = v end
+    cfg.host = cfg.host or "localhost"
+    cfg.port = cfg.port or M.DEFAULT_PORT
+    cfg.user = cfg.user or "root"
+    cfg.database = cfg.database or "defaultdb"
+    cfg.sslmode = cfg.sslmode or "prefer"
+    cfg.application_name = cfg.application_name or "sea"
+    cfg.connect_timeout = cfg.connect_timeout or 10000
+    cfg.max_conns = cfg.max_conns or 8
+    cfg.max_idle_time = cfg.max_idle_time or 300000
+    if not SSLMODES[cfg.sslmode] then return error(`cockroach: unknown sslmode '${cfg.sslmode}'`) end
+    return cfg
+end
+
+-- ---- connections -------------------------------------------------------------------
+
+local Conn = {}
+
+local function conn_write(c, data)
+    local r = nil
+    if c.tls ~= nil then
+        r = ssl.send(c.tls, data, c.timeout)
+    else
+        r = net.write(c.fd, data, c.timeout)
+    end
+    if is_error(r) then
+        c.broken = true
+        return error(`cockroach: write: ${r.message}`)
+    end
+    return true
+end
+
+-- make sure n unread bytes are in the buffer
+local function conn_need(c, n)
+    while len(c.buf) - c.pos + 1 < n do
+        local chunk = nil
+        if c.tls ~= nil then
+            chunk = ssl.recv(c.tls, 65536, c.timeout)
+        else
+            chunk = net.read(c.fd, 65536, c.timeout)
+        end
+        if is_error(chunk) or chunk == "" then
+            c.broken = true
+            return error("cockroach: read: " .. (is_error(chunk) and chunk.message or "connection closed by the server"))
+        end
+        if c.pos > 1 then
+            c.buf = string.sub(c.buf, c.pos) .. chunk
+            c.pos = 1
+        else
+            c.buf ..= chunk
+        end
+    end
+    return true
+end
+
+-- the next message → type, body (type is an error value on failure)
+local function conn_read(c)
+    local ok = conn_need(c, 5)
+    if is_error(ok) then return ok, nil end
+    local tag = string.sub(c.buf, c.pos, c.pos)
+    local n = rd32(c.buf, c.pos + 1)
+    ok = conn_need(c, n + 1)
+    if is_error(ok) then return ok, nil end
+    local body = string.sub(c.buf, c.pos + 5, c.pos + n)
+    c.pos += n + 1
+    return tag, body
+end
+
+local function server_error(body)
+    local f = {}
+    local p = 1
+    while p <= len(body) and string.byte(body, p) ~= 0 do
+        local code = string.sub(body, p, p)
+        local v, np = cstr(body, p + 1)
+        f[code] = v
+        p = np
+    end
+    local text = `cockroach: ${f.M or "server error"}`
+    if f.D ~= nil then text ..= ` — ${f.D}` end
+    if f.H ~= nil then text ..= ` (hint: ${f.H})` end
+    return error(`${text} (SQLSTATE ${f.C or "XX000"})`)
+end
+
+-- crdb.sqlstate(err) → the five-character SQLSTATE of a server error, or nil
+function M.sqlstate(err)
+    if not is_error(err) then return nil end
+    local m = re.match("\\(SQLSTATE ([0-9A-Z]{5})\\)$", err.message)
+    return m and m.groups[1] or nil
+end
+
+local function close_conn(c)
+    if c.closed then return end
+    c.closed = true
+    if not c.broken then conn_write(c, msg("X", "")) end
+    if c.tls ~= nil then ssl.close(c.tls) else net.close(c.fd) end
+end
+
+local function authenticate(c, cfg)
+    local scram = nil
+    while true do
+        local tag, body = conn_read(c)
+        if is_error(tag) then return tag end
+        if tag == "R" then
+            local code = rd32(body, 1)
+            if code == 0 then
+                -- authenticated; the server sends its settings next
+            elseif code == 3 or code == 5 or code == 10 then
+                if cfg.password == nil then return error("cockroach: the server asks for a password") end
+                if code == 3 then
+                    conn_write(c, msg("p", cfg.password .. "\0"))?
+                elseif code == 5 then
+                    local inner = hash.md5(cfg.password .. cfg.user)
+                    conn_write(c, msg("p", "md5" .. hash.md5(inner .. string.sub(body, 5, 8)) .. "\0"))?
+                else
+                    if not string.contains(body, "SCRAM-SHA-256\0") then
+                        return error("cockroach: the server offers no supported SASL mechanism")
+                    end
+                    local nonce = encoding.base64_encode(os.urandom(18))
+                    scram = {}
+                    scram.bare = "n=,r=" .. nonce
+                    local first = "n,," .. scram.bare
+                    conn_write(c, msg("p", "SCRAM-SHA-256\0" .. i32(len(first)) .. first))?
+                end
+            elseif code == 11 then
+                if scram == nil then return error("cockroach: unexpected SASL message") end
+                local fin = M.scram_final(cfg.password, scram.bare, string.sub(body, 5))?
+                scram.signature = fin.server_signature
+                conn_write(c, msg("p", fin.message))?
+            elseif code == 12 then
+                if scram == nil or string.sub(body, 5) ~= "v=" .. scram.signature then
+                    return error("cockroach: the server's SCRAM signature does not match")
+                end
+            else
+                return error(`cockroach: unsupported authentication method ${code}`)
+            end
+        elseif tag == "S" then
+            local name, p = cstr(body, 1)
+            c.params[name] = cstr(body, p)
+        elseif tag == "K" then
+            c.pid = rd32(body, 1)
+            c.secret = rd32(body, 5)
+        elseif tag == "Z" then
+            c.status = body
+            return true
+        elseif tag == "E" then
+            return server_error(body)
+        end
+    end
+end
+
+local function connect(cfg)
+    local fd = net.connect(cfg.host, cfg.port, cfg.connect_timeout)
+    if is_error(fd) then return error(`cockroach: connect ${cfg.host}:${cfg.port}: ${fd.message}`) end
+    local c = {}
+    c.fd = fd
+    c.tls = nil
+    c.buf = ""
+    c.pos = 1
+    c.timeout = cfg.timeout
+    c.params = {}
+    c.status = "I"
+    c.broken = false
+    c.closed = false
+    c.used = time.now():unix_nano()
+    for k, f in Conn do c[k] = f end
+
+    if cfg.sslmode ~= "disable" and cfg.sslmode ~= "allow" then
+        local w = net.write(fd, i32(8) .. i32(80877103), cfg.connect_timeout)
+        local answer = is_error(w) and w or net.read(fd, 1, cfg.connect_timeout)
+        if is_error(answer) then
+            net.close(fd)
+            return error(`cockroach: connect ${cfg.host}:${cfg.port}: ${answer.message}`)
+        end
+        if answer == "S" then
+            local o = {}
+            o.verify = cfg.sslmode == "verify-ca" or cfg.sslmode == "verify-full"
+            o.verify_host = cfg.sslmode == "verify-full"
+            o.ca = cfg.sslrootcert
+            o.cert = cfg.sslcert
+            o.key = cfg.sslkey
+            o.timeout = cfg.connect_timeout
+            local tls = ssl.handshake_client(fd, cfg.host, o)
+            if is_error(tls) then return error(`cockroach: TLS: ${tls.message}`) end
+            c.tls = tls
+        elseif answer ~= "N" or cfg.sslmode ~= "prefer" then
+            net.close(fd)
+            return error(`cockroach: the server does not accept TLS (sslmode=${cfg.sslmode})`)
+        end
+    end
+
+    local body = i32(196608) .. "user\0" .. cfg.user .. "\0database\0" .. cfg.database ..
+        "\0application_name\0" .. cfg.application_name .. "\0"
+    if cfg.options ~= nil then body ..= "options\0" .. cfg.options .. "\0" end
+    for k, v in cfg.settings or {} do body ..= `${k}\0${v}\0` end
+    local saved = c.timeout
+    c.timeout = cfg.connect_timeout
+    local ok = conn_write(c, i32(len(body) + 5) .. body .. "\0")
+    if not is_error(ok) then ok = authenticate(c, cfg) end
+    c.timeout = saved
+    if is_error(ok) then
+        c.broken = true
+        close_conn(c)
+        return ok
+    end
+    return c
+end
+
+-- ---- values ------------------------------------------------------------------------
+
+-- crdb.bytes(s): a parameter sent as BYTES (strings are sent as text)
+function M.bytes(s)
+    local b = {}
+    b.__crdb_bytes = s
+    return b
+end
+
+-- crdb.json(v): a parameter sent JSON-encoded (tables and maps already are;
+-- arrays are sent as SQL arrays unless wrapped)
+function M.json(v)
+    local b = {}
+    b.__crdb_json = v
+    return b
+end
+
+local function is_time(v)
+    return type(v) == "table" and v.unix_nano ~= nil and v.format ~= nil
+end
+
+local function array_literal(a)
+    local parts = []
+    for _, v in a do
+        if v == nil then
+            parts[] = "NULL"
+        elseif type(v) == "array" then
+            parts[] = array_literal(v)
+        elseif type(v) == "string" then
+            parts[] = "\"" .. string.replace(string.replace(v, "\\", "\\\\"), "\"", "\\\"") .. "\""
+        elseif type(v) == "number" then
+            parts[] = string.format("%.17g", v)
+        else
+            parts[] = tostring(v)
+        end
+    end
+    return "{" .. string.join(parts, ",") .. "}"
+end
+
+-- a parameter in text format (nil: NULL)
+local function encode(v)
+    local t = type(v)
+    if v == nil or t == "string" then return v end
+    if t == "bool" or t == "int" or t == "bigint" then return tostring(v) end
+    if t == "number" then
+        if isnan(v) then return "NaN" end
+        if isinf(v) then return v > 0 and "Infinity" or "-Infinity" end
+        return string.format("%.17g", v)
+    end
+    if t == "array" then return array_literal(v) end
+    if t == "table" and v.__crdb_bytes ~= nil then return "\\x" .. encoding.hex_encode(v.__crdb_bytes) end
+    if t == "table" and v.__crdb_json ~= nil then return json.encode(v.__crdb_json) end
+    if is_time(v) then return v:format("2006-01-02T15:04:05.999999999Z07:00") end
+    return json.encode(v)
+end
+
+local function decode_int(s)
+    local n = tonumber(s)
+    if type(n) == "int" then return n end
+    return bigint.new(s)
+end
+
+local function decode_float(s)
+    if s == "NaN" then return 0 / 0 end
+    if s == "Infinity" then return 1 / 0 end
+    if s == "-Infinity" then return -1 / 0 end
+    return tonumber(s)
+end
+
+-- element type of the array types
+local ARRAY_OF = {}
+ARRAY_OF[1000] = 16
+ARRAY_OF[1005] = 21
+ARRAY_OF[1007] = 23
+ARRAY_OF[1016] = 20
+ARRAY_OF[1021] = 700
+ARRAY_OF[1022] = 701
+ARRAY_OF[1231] = 1700
+ARRAY_OF[1009] = 25
+ARRAY_OF[1015] = 1043
+ARRAY_OF[1001] = 17
+ARRAY_OF[199] = 114
+ARRAY_OF[3807] = 3802
+
+local decode_value = nil
+
+-- "{1,2,NULL}", "{\"a b\",c}", "{{1,2},{3,4}}" → arrays
+local decode_array = nil
+decode_array = function(s, elem, opts)
+    local pos = 1
+    local function parse()
+        -- at '{'
+        pos += 1
+        local out = []
+        if string.sub(s, pos, pos) == "}" then
+            pos += 1
+            return out
+        end
+        while true do
+            local ch = string.sub(s, pos, pos)
+            if ch == "{" then
+                out[] = parse()
+            elseif ch == "\"" then
+                pos += 1
+                local parts = []
+                while true do
+                    local c = string.sub(s, pos, pos)
+                    if c == "\\" then
+                        parts[] = string.sub(s, pos + 1, pos + 1)
+                        pos += 2
+                    elseif c == "\"" or c == "" then
+                        pos += 1
+                        break
+                    else
+                        parts[] = c
+                        pos += 1
+                    end
+                end
+                local text = string.join(parts)
+                if string.starts_with(text, "{") and elem ~= 25 and elem ~= 1043 and elem ~= 114 and elem ~= 3802 then
+                    -- CockroachDB writes a nested array as a quoted element
+                    out[] = decode_array(text, elem, opts)
+                else
+                    out[] = decode_value(elem, text, opts)
+                end
+            else
+                local start = pos
+                while pos <= len(s) do
+                    local c = string.sub(s, pos, pos)
+                    if c == "," or c == "}" then break end
+                    pos += 1
+                end
+                local raw = string.sub(s, start, pos - 1)
+                if raw == "NULL" then out[] = nil else out[] = decode_value(elem, raw, opts) end
+            end
+            local sep = string.sub(s, pos, pos)
+            pos += 1
+            if sep ~= "," then break end
+        end
+        return out
+    end
+    if string.sub(s, 1, 1) ~= "{" then return s end
+    return parse()
+end
+
+-- a column value from its type oid and text
+decode_value = function(oid, s, opts)
+    if oid == 23 or oid == 21 or oid == 20 or oid == 26 then return decode_int(s) end
+    if oid == 16 then return s == "t" or s == "true" end
+    if oid == 700 or oid == 701 then return decode_float(s) end
+    if oid == 1700 then
+        if opts.exact_numeric then return s end
+        return decode_float(s)
+    end
+    if oid == 114 or oid == 3802 then
+        local v = json.decode(s)
+        if is_error(v) then return s end
+        return v
+    end
+    if oid == 17 then
+        if string.starts_with(s, "\\x") then
+            local b = encoding.hex_decode(string.sub(s, 3))
+            if not is_error(b) then return b end
+        end
+        return s
+    end
+    local elem = ARRAY_OF[oid]
+    if elem ~= nil then return decode_array(s, elem, opts) end
+    return s
+end
+
+-- ---- running statements ------------------------------------------------------------
+
+-- conn:run(sql, params, mode [, fn]) → result | error. mode: "rows" (array
+-- of rows), "exec" (rows affected), "row" (first row or nil), "value"
+-- (first column of the first row or nil), "each" (fn(row) per row, the
+-- number of rows; fn returning false skips the rest).
+function Conn.run(c, sql, params, mode, fn, opts)
+    if c.closed or c.broken then return error("cockroach: the connection is closed") end
+    local out = nil
+    if len(params) == 0 and mode == "exec" then
+        out = conn_write(c, msg("Q", sql .. "\0"))
+    else
+        local parts = [msg("P", "\0" .. sql .. "\0" .. i16(0))]
+        local bind = ["\0\0", i16(0), i16(len(params))]
+        for i = 0, len(params) - 1 do
+            local v = encode(params[i])
+            if v == nil then
+                bind[] = i32(-1)
+            else
+                bind[] = i32(len(v))
+                bind[] = v
+            end
+        end
+        bind[] = i16(0)
+        parts[] = msg("B", string.join(bind))
+        parts[] = msg("D", "P\0")
+        parts[] = msg("E", "\0" .. i32(0))
+        parts[] = msg("S", "")
+        out = conn_write(c, string.join(parts))
+    end
+    if is_error(out) then return out end
+
+    local cols = []
+    local rows = []
+    local first = nil
+    local affected = 0
+    local count = 0
+    local stopped = false
+    local failure = nil
+    while true do
+        local tag, body = conn_read(c)
+        if is_error(tag) then return tag end
+        if tag == "D" then
+            if mode == "exec" or failure ~= nil or stopped then
+                -- not needed
+            elseif mode == "value" then
+                if first == nil then
+                    first = true
+                    local l = rd32(body, 3)
+                    if l >= 0 then out = decode_value(cols[0].oid, string.sub(body, 7, 6 + l), opts) else out = nil end
+                end
+            else
+                local row = {}
+                local p = 3
+                for i = 0, rd16(body, 1) - 1 do
+                    local l = rd32(body, p)
+                    p += 4
+                    if l >= 0 then
+                        local col = cols[i]
+                        row[col.name] = decode_value(col.oid, string.sub(body, p, p + l - 1), opts)
+                        p += l
+                    end
+                end
+                if mode == "rows" then
+                    rows[] = row
+                elseif mode == "row" then
+                    if first == nil then first = row end
+                else
+                    count += 1
+                    if fn(row) == false then stopped = true end
+                end
+            end
+        elseif tag == "T" then
+            cols = []
+            if mode == "rows" then rows = [] end
+            local p = 3
+            for _ = 1, rd16(body, 1) do
+                local col = {}
+                col.name, p = cstr(body, p)
+                col.oid = rd32(body, p + 6)
+                p += 18
+                cols[] = col
+            end
+        elseif tag == "C" then
+            local tag_text = cstr(body, 1)
+            local m = re.match("(\\d+)$", tag_text)
+            if m ~= nil then affected += tonumber(m.groups[1]) end
+        elseif tag == "E" then
+            failure = server_error(body)
+        elseif tag == "S" then
+            local name, p = cstr(body, 1)
+            c.params[name] = cstr(body, p)
+        elseif tag == "Z" then
+            c.status = body
+            break
+        end
+        -- '1' '2' 'n' 's' 'I' (parse/bind complete, no data, suspended,
+        -- empty query) and 'N' (notices) need nothing
+    end
+    c.used = time.now():unix_nano()
+    if failure ~= nil then return failure end
+    if mode == "exec" then return affected end
+    if mode == "rows" then return rows end
+    if mode == "row" then return first end
+    if mode == "each" then return count end
+    if first == nil then return nil end
+    return out
+end
+
+-- ---- pool --------------------------------------------------------------------------
+
+local Db = {}
+local Tx = {}
+
+local function acquire(db)
+    if db.closed then return error("cockroach: the database is closed") end
+    db.slots <- true
+    local c = nil
+    db.mu:acquire()
+    db.in_use += 1
+    local now = time.now():unix_nano()
+    while len(db.idle) > 0 and c == nil do
+        c = db.idle[len(db.idle) - 1]
+        del db.idle[len(db.idle) - 1]
+        if now - c.used > db.cfg.max_idle_time * 1000000 then
+            close_conn(c)
+            c = nil
+        end
+    end
+    db.mu:release()
+    if c == nil then
+        c = connect(db.cfg)
+        if is_error(c) then
+            db.mu:acquire()
+            db.in_use -= 1
+            db.mu:release()
+            local _ = <-db.slots
+            return c
+        end
+    end
+    return c
+end
+
+local function release(db, c)
+    local keep = not c.broken and c.status == "I" and not db.closed
+    if not keep then close_conn(c) end
+    db.mu:acquire()
+    if keep then db.idle[] = c end
+    db.in_use -= 1
+    db.mu:release()
+    local _ = <-db.slots
+end
+
+local function with_conn(db, sql, params, mode, fn)
+    local c = acquire(db)
+    if is_error(c) then return c end
+    local r = c:run(sql, params, mode, fn, db.cfg)
+    release(db, c)
+    return r
+end
+
+-- crdb.open([url] [, opts]) → db | error
+-- url: postgresql://user:password@host:26257/database?sslmode=verify-full&sslrootcert=ca.crt
+-- opts (override the URL): host, port, user, password, database, sslmode
+-- (disable, allow, prefer (default), require, verify-ca, verify-full),
+-- sslrootcert, sslcert, sslkey (client certificate auth), application_name,
+-- settings (session variables sent at connect: {timezone = "UTC"}),
+-- max_conns (8), max_idle_time (ms, 300000), connect_timeout (ms, 10000),
+-- timeout (ms for each network wait of a statement; none by default),
+-- exact_numeric (DECIMAL as strings instead of numbers).
+-- One connection is opened right away, so a wrong address or password
+-- fails here.
+function M.open(url, opts)
+    local cfg = config(url, opts)?
+    local c = connect(cfg)?
+    local db = {}
+    db.cfg = cfg
+    db.idle = [c]
+    db.mu = sync.mutex()
+    db.slots = chan(cfg.max_conns)
+    db.closed = false
+    db.in_use = 0
+    db.server_version = c.params.server_version
+    db.crdb_version = c.params.crdb_version
+    for k, f in Db do db[k] = f end
+    return db
+end
+
+-- crdb.connect([url] [, opts]) → conn | error: a single connection without a
+-- pool, with run/query/exec/row/value/each/close and a `status` field
+-- ("I" idle, "T" in a transaction, "E" in a failed transaction).
+function M.connect(url, opts)
+    local cfg = config(url, opts)?
+    local c = connect(cfg)?
+    c.cfg = cfg
+    return c
+end
+
+function Conn.query(c, sql, ...)
+    return c:run(sql, [...], "rows", nil, c.cfg)
+end
+
+function Conn.exec(c, sql, ...)
+    return c:run(sql, [...], "exec", nil, c.cfg)
+end
+
+function Conn.row(c, sql, ...)
+    return c:run(sql, [...], "row", nil, c.cfg)
+end
+
+function Conn.value(c, sql, ...)
+    return c:run(sql, [...], "value", nil, c.cfg)
+end
+
+function Conn.each(c, sql, fn, ...)
+    return c:run(sql, [...], "each", fn, c.cfg)
+end
+
+function Conn.close(c)
+    close_conn(c)
+end
+
+-- db:query(sql, params...) → array of rows (tables keyed by column name;
+-- NULL columns are absent). Parameters are $1, $2, ...
+function Db.query(db, sql, ...)
+    return with_conn(db, sql, [...], "rows")
+end
+
+-- db:exec(sql, params...) → rows affected. Without parameters the SQL may
+-- hold several statements separated by ';'.
+function Db.exec(db, sql, ...)
+    return with_conn(db, sql, [...], "exec")
+end
+
+-- db:row(sql, params...) → the first row, or nil
+function Db.row(db, sql, ...)
+    return with_conn(db, sql, [...], "row")
+end
+
+-- db:value(sql, params...) → the first column of the first row, or nil
+function Db.value(db, sql, ...)
+    return with_conn(db, sql, [...], "value")
+end
+
+-- db:each(sql, fn, params...) → rows seen; fn(row) is called as the rows
+-- arrive (returning false ignores the rest)
+function Db.each(db, sql, fn, ...)
+    return with_conn(db, sql, [...], "each", fn)
+end
+
+-- db:run(sql, params, mode [, fn]): the same with the parameters in an
+-- array (mode: "rows", "exec", "row", "value", "each")
+function Db.run(db, sql, params, mode, fn)
+    return with_conn(db, sql, params or [], mode or "rows", fn)
+end
+
+-- crdb.quote_ident("my table") → "\"my table\"" (a dotted name is quoted
+-- part by part)
+function M.quote_ident(name)
+    local parts = []
+    for _, p in string.split(name, ".") do
+        parts[] = "\"" .. string.replace(p, "\"", "\"\"") .. "\""
+    end
+    return string.join(parts, ".")
+end
+
+-- db:insert(table, rows [, opts]) → rows affected, or the returned rows with
+-- opts.returning ("*" or a column list). The columns are the first row's
+-- keys. opts.upsert = true writes UPSERT (insert or replace by primary
+-- key); opts.on_conflict = "DO NOTHING" (or any ON CONFLICT clause) adds it.
+-- Large inputs are sent in batches.
+function Db.insert(db, table_name, rows, opts)
+    opts = opts or {}
+    if len(rows) == 0 then return opts.returning and [] or 0 end
+    local columns = sort.sorted(list.keys(rows[0]))
+    local quoted = []
+    for _, c in columns do quoted[] = M.quote_ident(c) end
+    local head = `${opts.upsert and "UPSERT" or "INSERT"} INTO ${M.quote_ident(table_name)} (${string.join(quoted, ", ")}) VALUES `
+    local tail = ""
+    if opts.on_conflict ~= nil then tail ..= " ON CONFLICT " .. opts.on_conflict end
+    if opts.returning ~= nil then tail ..= " RETURNING " .. opts.returning end
+    local per_batch = math.max(1, 30000 // len(columns))
+    local total = 0
+    local returned = []
+    for _, batch in list.chunk(rows, per_batch) do
+        local params = []
+        local groups = []
+        for _, row in batch do
+            local marks = []
+            for _, c in columns do
+                params[] = row[c]
+                marks[] = "$" .. len(params)
+            end
+            groups[] = "(" .. string.join(marks, ", ") .. ")"
+        end
+        local sql = head .. string.join(groups, ", ") .. tail
+        if opts.returning ~= nil then
+            local got = with_conn(db, sql, params, "rows")
+            if is_error(got) then return got end
+            for _, r in got do returned[] = r end
+        else
+            local n = with_conn(db, sql, params, "exec")
+            if is_error(n) then return n end
+            total += n
+        end
+    end
+    if opts.returning ~= nil then return returned end
+    return total
+end
+
+-- db:upsert(table, rows [, opts]): db:insert with upsert = true
+function Db.upsert(db, table_name, rows, opts)
+    local o = {}
+    for k, v in opts or {} do o[k] = v end
+    o.upsert = true
+    return db:insert(table_name, rows, o)
+end
+
+-- db:ping() → true | error
+function Db.ping(db)
+    local v = db:value("SELECT 1")
+    if is_error(v) then return v end
+    return true
+end
+
+-- db:stats() → {max_conns, idle, in_use}
+function Db.stats(db)
+    local s = {}
+    s.max_conns = db.cfg.max_conns
+    db.mu:acquire()
+    s.idle = len(db.idle)
+    s.in_use = db.in_use
+    db.mu:release()
+    return s
+end
+
+-- db:close(): closes the idle connections; the ones in use close when
+-- they are given back
+function Db.close(db)
+    db.closed = true
+    db.mu:acquire()
+    for _, c in db.idle do close_conn(c) end
+    db.idle = []
+    db.mu:release()
+end
+
+-- ---- transactions ------------------------------------------------------------------
+
+-- db:begin([opts]) → tx | error. opts: isolation ("SERIALIZABLE",
+-- "READ COMMITTED"), read_only, priority ("LOW", "NORMAL", "HIGH",
+-- CockroachDB). The tx has query/exec/row/value/each/run, commit and
+-- rollback; it holds one connection until it ends.
+function Db.begin(db, opts)
+    opts = opts or {}
+    local c = acquire(db)
+    if is_error(c) then return c end
+    local modes = []
+    if opts.isolation ~= nil then modes[] = "ISOLATION LEVEL " .. opts.isolation end
+    if opts.priority ~= nil then modes[] = "PRIORITY " .. opts.priority end
+    if opts.read_only then modes[] = "READ ONLY" end
+    local sql = "BEGIN"
+    if len(modes) > 0 then sql ..= " TRANSACTION " .. string.join(modes, ", ") end
+    local ok = c:run(sql, [], "exec", nil, db.cfg)
+    if is_error(ok) then
+        release(db, c)
+        return ok
+    end
+    local tx = {}
+    tx.db = db
+    tx.conn = c
+    tx.done = false
+    for k, f in Tx do tx[k] = f end
+    return tx
+end
+
+local function tx_run(tx, sql, params, mode, fn)
+    if tx.done then return error("cockroach: the transaction has ended") end
+    return tx.conn:run(sql, params, mode, fn, tx.db.cfg)
+end
+
+function Tx.query(tx, sql, ...) return tx_run(tx, sql, [...], "rows") end
+function Tx.exec(tx, sql, ...) return tx_run(tx, sql, [...], "exec") end
+function Tx.row(tx, sql, ...) return tx_run(tx, sql, [...], "row") end
+function Tx.value(tx, sql, ...) return tx_run(tx, sql, [...], "value") end
+function Tx.each(tx, sql, fn, ...) return tx_run(tx, sql, [...], "each", fn) end
+function Tx.run(tx, sql, params, mode, fn) return tx_run(tx, sql, params or [], mode or "rows", fn) end
+
+local function tx_end(tx, sql)
+    if tx.done then return error("cockroach: the transaction has ended") end
+    local r = tx.conn:run(sql, [], "exec", nil, tx.db.cfg)
+    tx.done = true
+    release(tx.db, tx.conn)
+    if is_error(r) then return r end
+    return true
+end
+
+-- tx:commit() → true | error (a 40001 error here means: run it again)
+function Tx.commit(tx) return tx_end(tx, "COMMIT") end
+
+-- tx:rollback() → true | error (nothing happens if it already ended)
+function Tx.rollback(tx)
+    if tx.done then return true end
+    return tx_end(tx, "ROLLBACK")
+end
+
+-- db:transaction(fn [, opts]) → what fn returns | error
+-- Runs fn(tx) in a transaction: commits when it returns, rolls back when it
+-- returns an error value or panics (the panic goes on). When CockroachDB
+-- reports a retryable conflict (SQLSTATE 40001) — from a statement or from
+-- the commit — fn runs again in a new transaction, up to opts.max_retries
+-- times (10), with a growing pause; so fn must not have effects outside the
+-- database. opts also takes db:begin's options.
+function Db.transaction(db, fn, opts)
+    opts = opts or {}
+    local max_retries = opts.max_retries or 10
+    local attempt = 0
+    while true do
+        local tx = db:begin(opts)
+        if is_error(tx) then return tx end
+        local result = nil
+        local function body()
+            defer function()
+                if not tx.done then tx:rollback() end
+            end
+            result = fn(tx)
+            if is_error(result) then
+                tx:rollback()
+            else
+                local ok = tx:commit()
+                if is_error(ok) then result = ok end
+            end
+        end
+        body()
+        if not is_error(result) or M.sqlstate(result) ~= "40001" or attempt >= max_retries then
+            return result
+        end
+        attempt += 1
+        time.sleep(math.min(1000, 5 * (2 ^ attempt)) * (0.5 + math.random() / 2) * 1000000)
+    end
+end
+
+return M

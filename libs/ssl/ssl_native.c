@@ -257,8 +257,8 @@ static SSL *tls_new(SSL_CTX *ctx, int fd) {
 }
 
 /* tls_client(fd, host [, opts]) → conn: client TLS on a connected socket
- * (no I/O yet; call tls_handshake). opts: verify, sni, cert, key,
- * min_version. On failure the fd is left open (the caller owns it). */
+ * (no I/O yet; call tls_handshake). opts: verify, verify_host, ca, sni,
+ * cert, key, min_version. On failure the fd is left open (the caller owns it). */
 static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 2 || !sea_is_int(args[0])) return sea_make_error_str(vm, "tls_client: fd and host expected");
     int fd = (int)sea_as_int(args[0]);
@@ -266,6 +266,8 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
     if (!val_to_cstr(args[1], host, sizeof(host))) return sea_make_error_str(vm, "tls_client: bad host");
 
     bool verify      = true;
+    bool verify_host = true;
+    char ca_p[512]   = {0};
     char sni[256]    = {0};
     char cert_p[512] = {0};
     char key_p[512]  = {0};
@@ -274,6 +276,8 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
     if (argc >= 3 && (sea_is_table(args[2]) || sea_is_struct(args[2]) || sea_is_map(args[2]))) {
         SeaValue v;
         if (opts_get(args[2], "verify",      &v)) verify = sea_is_truthy(v);
+        if (opts_get(args[2], "verify_host", &v)) verify_host = sea_is_truthy(v);
+        if (opts_get(args[2], "ca",          &v)) val_to_cstr(v, ca_p, sizeof(ca_p));
         if (opts_get(args[2], "sni",         &v)) val_to_cstr(v, sni,    sizeof(sni));
         if (opts_get(args[2], "cert",        &v)) val_to_cstr(v, cert_p, sizeof(cert_p));
         if (opts_get(args[2], "key",         &v)) val_to_cstr(v, key_p,  sizeof(key_p));
@@ -283,7 +287,7 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
         }
     }
 
-    bool    needs_clone = !verify || cert_p[0] || key_p[0] || min_ver != TLS1_2_VERSION;
+    bool    needs_clone = !verify || ca_p[0] || cert_p[0] || key_p[0] || min_ver != TLS1_2_VERSION;
     SSL_CTX *ctx        = needs_clone ? NULL : get_client_ctx();
     if (needs_clone) {
         ctx = SSL_CTX_new(TLS_client_method());
@@ -293,10 +297,22 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
             SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
         else {
             SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-            SSL_CTX_set_default_verify_paths(ctx);
+            if (ca_p[0]) {
+                if (SSL_CTX_load_verify_locations(ctx, ca_p, NULL) != 1) {
+                    SSL_CTX_free(ctx);
+                    return tls_error(vm, "tls_client: ca");
+                }
+            } else
+                SSL_CTX_set_default_verify_paths(ctx);
         }
-        if (cert_p[0]) SSL_CTX_use_certificate_chain_file(ctx, cert_p);
-        if (key_p[0])  SSL_CTX_use_PrivateKey_file(ctx, key_p, SSL_FILETYPE_PEM);
+        if (cert_p[0] && SSL_CTX_use_certificate_chain_file(ctx, cert_p) != 1) {
+            SSL_CTX_free(ctx);
+            return tls_error(vm, "tls_client: cert");
+        }
+        if (key_p[0] && SSL_CTX_use_PrivateKey_file(ctx, key_p, SSL_FILETYPE_PEM) != 1) {
+            SSL_CTX_free(ctx);
+            return tls_error(vm, "tls_client: key");
+        }
     }
     if (!ctx) return tls_error(vm, "tls_client");
 
@@ -306,7 +322,7 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
 
     const char *sni_name = sni[0] ? sni : host;
     SSL_set_tlsext_host_name(ssl, sni_name);
-    if (verify) SSL_set1_host(ssl, sni_name);
+    if (verify && verify_host) SSL_set1_host(ssl, sni_name);
     SSL_set_connect_state(ssl);
     return PACK_PTR(ssl);
 }

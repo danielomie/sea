@@ -194,7 +194,7 @@ install: $(TARGET)
 	@for d in libs/*/; do \
 	    lib=$$(basename $$d); \
 	    case $$lib in test|stream|flags|log) continue;; esac; \
-	    files=$$(cd $$d && ls *.sea *.so 2>/dev/null | grep -v '^test\.sea$$'); \
+	    files=$$(cd $$d && ls *.sea *.so 2>/dev/null | grep -v -e '^test\.sea$$' -e '_test\.sea$$'); \
 	    [ -z "$$files" ] && continue; \
 	    if ls $$d/*.c >/dev/null 2>&1 && ! ls $$d/*.so >/dev/null 2>&1; then \
 	        echo "skipped $$lib (not built: make -C libs/$$lib)"; continue; \
