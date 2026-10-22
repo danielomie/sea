@@ -1139,7 +1139,8 @@ local function do_request(method, url, o, redirects_left)
     local reusable = false
     local last_err = "request failed"
     for attempt = 1, 2 do
-        local c = keep_alive and pool_get(key) or nil
+        -- the retry dials: the other pooled connections are likely stale too
+        local c = (keep_alive and attempt == 1) and pool_get(key) or nil
         local reused = c ~= nil
         if c == nil then
             c = dial(u, o, timeout)

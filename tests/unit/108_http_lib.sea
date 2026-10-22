@@ -153,3 +153,23 @@ local rr = http.get("http://127.0.0.1:" .. rsrv.port .. "/events")
 print("router stream:", rr.status, rr.headers["transfer-encoding"], json.encode(rr.body))
 rsrv.close()
 rsrv.wait()
+
+-- several idle pooled connections the server has already closed (its idle
+-- timeout is shorter than the pool's trust): the retry dials a fresh one
+-- instead of taking the next stale connection from the pool
+local isrv = http.listen(0, function(req)
+    time.sleep(100000000)
+    return http.text("ok")
+end, {idle_timeout = 150})
+local ibase = "http://127.0.0.1:" .. isrv.port .. "/"
+local idone = chan(3)
+for i = 1, 3 do
+    go function() idone <- http.get(ibase).status end()
+end
+local istatus = []
+for i = 1, 3 do istatus[] = <-idone end
+time.sleep(500000000)
+local after = http.get(ibase)
+print("stale pool:", json.encode(istatus), after.status, after.error)
+isrv.close()
+isrv.wait()
