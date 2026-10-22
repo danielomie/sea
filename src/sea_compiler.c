@@ -1190,6 +1190,25 @@ static bool esc_is_arena_candidate(SeaEscapeInfo *ei, SeaNode *node) {
 // ---- Forward declarations ----
 static int compile_expr(SeaCompiler *c, SeaNode *node, int dst);
 static void compile_stmt(SeaCompiler *c, SeaNode *node);
+
+/* `local v, ok = m[k]` and `local v, ok = m.k` (also in assignments): the
+ * two-value lookup, whose ok tells whether the key is there (even holding nil) */
+static bool is_two_value_lookup(SeaNode *e) {
+    return (e->type == NODE_INDEX && e->index.key != NULL) || e->type == NODE_FIELD;
+}
+
+/* the container and the key of a two-value lookup, in fresh registers (the
+ * key of m.k is the constant string "k") */
+static void compile_lookup_operands(SeaCompiler *c, SeaNode *e, int *obj_reg, int *key_reg, int line) {
+    if (e->type == NODE_FIELD) {
+        *obj_reg = compile_expr(c, e->field.obj, -1);
+        *key_reg = alloc_reg(c);
+        emit_abx(c, OP_LOAD_K, *key_reg, add_const_str(c, e->field.field), line);
+        return;
+    }
+    *obj_reg = compile_expr(c, e->index.obj, -1);
+    *key_reg = compile_expr(c, e->index.key, -1);
+}
 static void compile_block(SeaCompiler *c, SeaNode *block);
 
 /* ---- a op= b with a target that has effects (t[f()] += 1) ----
@@ -2646,16 +2665,14 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
                 break;
             }
 
-            // Special case: local v, ok = m[k]  (Go-style two-value lookup)
+            // Special case: local v, ok = m[k] or m.k  (Go-style two-value lookup)
             if (node->local.count == 2 && node->local.expr_count == 1 &&
-                node->local.exprs[0]->type == NODE_INDEX &&
-                node->local.exprs[0]->index.key != NULL) {
-                SeaNode *idx = node->local.exprs[0];
+                is_two_value_lookup(node->local.exprs[0])) {
                 int r0 = alloc_reg(c);  // value
                 int r1 = alloc_reg(c);  // ok
                 (void)r1;  // r1 == r0+1 by construction
-                int obj_reg = compile_expr(c, idx->index.obj, -1);
-                int key_reg = compile_expr(c, idx->index.key, -1);
+                int obj_reg, key_reg;
+                compile_lookup_operands(c, node->local.exprs[0], &obj_reg, &key_reg, line);
                 emit_abc(c, OP_GET_TABLE2, r0, obj_reg, key_reg, line);
                 /* v owns its value (borrowed from the container); ok is a bool */
                 emit_abc(c, OP_RETAIN, r0, 0, 0, line);
@@ -2859,17 +2876,15 @@ static void compile_stmt(SeaCompiler *c, SeaNode *node) {
                 }
             }
 
-            // Special case: v, ok = m[k]  (Go-style two-value lookup)
+            // Special case: v, ok = m[k] or m.k  (Go-style two-value lookup)
             if (node->assign.count == 2 && node->assign.expr_count == 1 &&
-                node->assign.exprs[0]->type == NODE_INDEX &&
-                node->assign.exprs[0]->index.key != NULL) {
-                SeaNode *idx = node->assign.exprs[0];
+                is_two_value_lookup(node->assign.exprs[0])) {
                 int sv = c->reg_top;
                 int t0 = alloc_reg(c);  // value temp
                 int t1 = alloc_reg(c);  // ok temp
                 (void)t1;  // t1 == t0+1
-                int obj_reg = compile_expr(c, idx->index.obj, -1);
-                int key_reg = compile_expr(c, idx->index.key, -1);
+                int obj_reg, key_reg;
+                compile_lookup_operands(c, node->assign.exprs[0], &obj_reg, &key_reg, line);
                 emit_abc(c, OP_GET_TABLE2, t0, obj_reg, key_reg, line);
                 reg_clear_int(c, t0);
                 reg_set_scalar(c, t1);

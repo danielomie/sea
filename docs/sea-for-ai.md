@@ -111,8 +111,10 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     `for i = 0, n - 1` runs n times (none when n is 0). The step is the
     optional third value.
 22. **Maps are `[=]`.** A map takes keys of any type and supports the
-    two-value lookup `local v, ok = m[k]`. Tables (`{}`) also take most
-    keys; prefer maps for dictionaries with non-string keys.
+    two-value lookup `local v, ok = m[k]` (or `m.name`; `ok` is true when
+    the key is there, even holding `nil`, as a JSON `null` decodes). Tables
+    (`{}`) also take most keys; prefer maps for dictionaries with
+    non-string keys.
 23. **Order:** iterating a table or map follows hash order, not insertion
     order (a struct follows the order of its literal). Sort keys when the
     order matters: `sort.sort(keys)`.

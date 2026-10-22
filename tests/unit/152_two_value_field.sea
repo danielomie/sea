@@ -1,0 +1,41 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- local v, ok = t.name: the two-value lookup with a field name, as t["name"]
+
+local doc = json.decode('{"a": null, "b": 2}')
+local a, has_a = doc.a
+local b, has_b = doc.b
+local z, has_z = doc.z
+print(a, has_a, b, has_b, z, has_z)
+local a2, has_a2 = doc["a"]
+print(has_a2 == has_a)
+
+-- structs, maps, nested fields, call results
+local s = {x = 1}
+local sx, shx = s.x
+local sz, shz = s.z
+print(sx, shx, sz, shz)
+local m = [=]
+m["k"] = 5
+local mv, mh = m.k
+print(mv, mh)
+local o = {}
+o.inner = {}
+o.inner.deep = 3
+local dv, dh = o.inner.deep
+print(dv, dh)
+local function f() return {q = 7} end
+local fv, fh = f().q
+print(fv, fh)
+
+-- plain assignment
+local v, ok = 0, false
+v, ok = doc.b
+print(v, ok)
+v, ok = doc.nope
+print(v, ok)
+
+-- a single value is still a single value
+local only = doc.b
+print(only)

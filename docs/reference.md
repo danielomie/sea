@@ -1553,7 +1553,8 @@ end
 local m = [=]
 m[k] = v              -- set key k to value v (any type for k)
 v = m[k]              -- get; returns nil if missing
-v, ok = m[k]          -- two-value lookup: ok=true if key exists
+v, ok = m[k]          -- two-value lookup: ok=true if key exists (even holding nil)
+v, ok = t.name        -- the same with a field name (tables, maps, structs)
 del m[k]              -- delete key k
 len(m)                -- number of entries
 
