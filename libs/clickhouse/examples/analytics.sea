@@ -1,0 +1,95 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- analytics.sea — a million page views: generate, aggregate, stream, export
+--
+-- The data is made by the server itself (INSERT ... SELECT from numbers()),
+-- then summarized with ClickHouse's aggregate functions. db:each reads a
+-- large result row by row without holding it in memory, and goroutines run
+-- several reports at the same time.
+--
+--   CLICKHOUSE_URL=http://default:secret@localhost:8123/default bin/sea libs/clickhouse/examples/analytics.sea
+
+local clickhouse = require("../clickhouse")
+
+local url = os.getenv("CLICKHOUSE_URL") or "http://default:@localhost:8123/default"
+local db = clickhouse.open(url)
+if is_error(db) then
+    print(db.message)
+    os.exit(1)
+end
+
+local _ = db:exec("DROP TABLE IF EXISTS page_views")
+local _ = db:exec([[
+    CREATE TABLE page_views (
+        at DateTime,
+        path LowCardinality(String),
+        country LowCardinality(String),
+        ms UInt32,
+        bytes UInt64
+    ) ENGINE = MergeTree ORDER BY (path, at)
+]])
+
+local t0 = time.now()
+local s = db:exec([[
+    INSERT INTO page_views
+    SELECT
+        toDateTime('2026-10-01 00:00:00') + intHash32(number * 13) % (7 * 86400) AS at,
+        ['/', '/', '/', '/docs', '/docs', '/docs', '/blog', '/blog', '/pricing', '/login'][intHash32(number * 3) % 10 + 1] AS path,
+        ['BR', 'BR', 'BR', 'US', 'US', 'PT', 'DE'][intHash32(number) % 7 + 1] AS country,
+        10 + intHash32(number * 7) % (path = '/docs' ? 900 : 300) AS ms,
+        1000 + intHash64(number) % 100000 AS bytes
+    FROM numbers({n:UInt64})
+]], {n = 1000000})
+print(`generated ${s.written_rows} rows in ${string.format("%.2f", time.since(t0) / 1e9)} s`)
+
+-- reports, run in parallel: each is one HTTP request
+local reports = {
+    by_path = "SELECT path, count() AS views, round(quantile(0.95)(ms)) AS p95_ms FROM page_views GROUP BY path ORDER BY views DESC",
+    by_country = "SELECT country, count() AS views, formatReadableSize(sum(bytes)) AS traffic FROM page_views GROUP BY country ORDER BY country",
+    slow = "SELECT count() AS slow FROM page_views WHERE ms > {limit:UInt32}",
+}
+local results = {}
+local mu = sync.mutex()
+local wg = sync.waitgroup()
+for name, sql in reports do
+    wg:add(1)
+    go (function()
+        defer wg:done()
+        local rows = db:query(sql, {limit = 450})
+        mu:acquire()
+        results[name] = rows
+        mu:release()
+    end)()
+end
+wg:wait()
+
+print("-- by path")
+for _, r in results.by_path do print(string.pad_right(r.path, 10), r.views, `p95 ${r.p95_ms} ms`) end
+print("-- by country")
+for _, r in results.by_country do print(r.country, r.views, r.traffic) end
+print("-- slower than 450 ms:", results.slow[0].slow)
+
+-- streaming: the first day, minute by minute, read as it arrives
+local busiest = nil
+local minutes = db:each("SELECT toStartOfMinute(at) AS minute, count() AS views FROM page_views " ..
+    "WHERE at < toDateTime('2026-10-02 00:00:00') GROUP BY minute ORDER BY minute", function(r)
+    if busiest == nil or r.views > busiest.views then busiest = r end
+end)
+print(`${minutes} minutes streamed; busiest ${busiest.minute} with ${busiest.views} views`)
+
+-- every row of a large result, without keeping them
+local total_bytes = 0
+local n = db:each("SELECT bytes FROM page_views WHERE path = {p:String}", function(r)
+    total_bytes += r.bytes
+end, {p = "/docs"})
+print(`streamed ${n} rows of /docs: ${total_bytes} bytes`)
+
+-- export: the server formats it (CSV, TSV, JSONEachRow, Parquet, ...)
+local csv = db:raw("SELECT path, count() AS views FROM page_views GROUP BY path ORDER BY path FORMAT CSVWithNames")
+local file = path.join(os.getenv("TMPDIR") or "/tmp", "page_views.csv")
+fs.write(file, csv)
+print("exported to", file)
+io.write(csv)
+
+local _ = db:exec("DROP TABLE page_views")

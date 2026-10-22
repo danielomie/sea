@@ -1,0 +1,71 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- basics.sea — tables, inserts, typed parameters, results and errors
+--
+-- Start a server first:
+--   docker run -d --name clickhouse -p 8123:8123 -e CLICKHOUSE_PASSWORD=secret clickhouse/clickhouse-server
+--   CLICKHOUSE_URL=http://default:secret@localhost:8123/default bin/sea libs/clickhouse/examples/basics.sea
+
+local clickhouse = require("../clickhouse")
+
+local url = os.getenv("CLICKHOUSE_URL") or "http://default:@localhost:8123/default"
+local db = clickhouse.open(url)
+if is_error(db) then
+    print(db.message)
+    os.exit(1)
+end
+print("ClickHouse", db:version())
+
+local _ = db:exec("DROP TABLE IF EXISTS events")
+local _ = db:exec([[
+    CREATE TABLE events (
+        at DateTime,
+        user_id UInt64,
+        kind LowCardinality(String),
+        props Map(String, String),
+        tags Array(String),
+        amount Nullable(Decimal(12, 2))
+    ) ENGINE = MergeTree ORDER BY (kind, at)
+]])
+
+-- rows go as JSONEachRow; Times are sent as text, missing columns get defaults
+local now = time.parse("2026-10-21 09:00:00", nil, "UTC")
+local s = db:insert("events", [
+    {at = now, user_id = 1, kind = "signup", props = {plan = "free"}, tags = ["web"]},
+    {at = now:add(60e9), user_id = 1, kind = "purchase", props = {item = "book"}, amount = 59.9},
+    {at = now:add(120e9), user_id = 2, kind = "signup", tags = ["mobile", "ios"]},
+    {at = now:add(180e9), user_id = 2, kind = "purchase", props = {item = "pen"}, amount = 4.5},
+    {at = now:add(240e9), user_id = 1, kind = "purchase", props = {item = "lamp"}, amount = 120},
+])
+print("written rows:", s.written_rows)
+
+-- parameters: {name:Type} in the SQL, values in a table; the server parses
+-- them by type, so nothing is pasted into the SQL
+print("-- purchases over 10:")
+for _, e in db:query("SELECT at, user_id, props['item'] AS item, amount FROM events " ..
+    "WHERE kind = {kind:String} AND amount > {min:Decimal(12, 2)} ORDER BY at", {kind = "purchase", min = 10}) do
+    print(e.at, e.user_id, e.item, e.amount)
+end
+
+print("users with a tag in the list:",
+    db:value("SELECT uniqExact(user_id) FROM events WHERE hasAny(tags, {wanted:Array(String)})", {wanted = ["ios", "android"]}))
+
+-- one row / one value
+local top = db:row("SELECT user_id, sum(amount) AS spent FROM events GROUP BY user_id ORDER BY spent DESC LIMIT 1")
+print("best customer:", top.user_id, top.spent)
+
+-- the whole result: column types and the server's statistics
+local r = db:result("SELECT kind, count() AS n, avg(amount) AS avg FROM events GROUP BY kind ORDER BY kind")
+for _, c in r.columns do print("column", c.name, c.type) end
+for _, row in r.rows do print(row.kind, row.n, row.avg) end
+print(`read ${r.statistics.rows_read} rows in ${r.statistics.elapsed} s`)
+
+-- other formats, as the server writes them
+io.write(db:raw("SELECT kind, count() FROM events GROUP BY kind ORDER BY kind FORMAT CSVWithNames"))
+
+-- errors carry the server's code
+local e = db:query("SELECT nope FROM events")
+print(clickhouse.error_code(e), string.sub(e.message, 1, 90))
+
+local _ = db:exec("DROP TABLE events")

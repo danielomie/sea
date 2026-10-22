@@ -1,0 +1,84 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- bank.sea — concurrent transfers with automatic transaction retries
+--
+-- Goroutines move money between a few accounts at the same time. The
+-- transfers collide, and CockroachDB (SERIALIZABLE) answers some of them with
+-- SQLSTATE 40001, "restart transaction". db:transaction runs the function
+-- again in a new transaction until it commits, so no transfer is lost and
+-- the money adds up at the end.
+--
+--   cockroach start-single-node --insecure --background
+--   bin/sea libs/cockroach/examples/bank.sea
+
+local crdb = require("../cockroach")
+
+local url = os.getenv("COCKROACH_URL") or "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+local db = crdb.open(url, {max_conns = 8})
+if is_error(db) then
+    print(db.message)
+    os.exit(1)
+end
+
+local ACCOUNTS = 4
+local WORKERS = 16
+local TRANSFERS = 10
+
+local _ = db:exec("DROP TABLE IF EXISTS accounts; CREATE TABLE accounts (id INT PRIMARY KEY, balance INT NOT NULL CHECK (balance >= 0))")
+local start = []
+for i = 1, ACCOUNTS do start[] = {id = i, balance = 1000} end
+local _ = db:insert("accounts", start)
+
+local mu = sync.mutex()
+local attempts = 0
+
+-- one transfer: read the balance, check, write both accounts
+local function transfer(from, to, amount)
+    return db:transaction(function(tx)
+        mu:acquire()
+        attempts += 1   -- counts the reruns too
+        mu:release()
+        local balance = tx:value("SELECT balance FROM accounts WHERE id = $1", from)?
+        if balance < amount then return 0 end   -- not enough money: nothing to do
+        local _ = tx:exec("UPDATE accounts SET balance = balance - $1 WHERE id = $2", amount, from)?
+        local _ = tx:exec("UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, to)?
+        return amount
+    end, {max_retries = 50})
+end
+
+local moved = 0
+local failed = 0
+local wg = sync.waitgroup()
+local t0 = time.now()
+for w = 1, WORKERS do
+    wg:add(1)
+    go (function()
+        defer wg:done()
+        for _ = 1, TRANSFERS do
+            local from = math.random(1, ACCOUNTS)
+            local to = from % ACCOUNTS + 1
+            local r = transfer(from, to, math.random(1, 200))
+            mu:acquire()
+            if is_error(r) then
+                failed += 1
+                print("failed:", r.message)
+            else
+                moved += r
+            end
+            mu:release()
+        end
+    end)()
+end
+wg:wait()
+
+print(`${WORKERS * TRANSFERS} transfers in ${string.format("%.2f", time.since(t0) / 1e9)} s, ${moved} moved, ${failed} failed`)
+print(`${attempts} attempts: ${attempts - WORKERS * TRANSFERS} reruns after conflicts`)
+for _, a in db:query("SELECT id, balance FROM accounts ORDER BY id") do
+    print(`account ${a.id}: ${a.balance}`)
+end
+print("total:", db:value("SELECT sum(balance) FROM accounts"), `(expected ${ACCOUNTS * 1000})`)
+print("pool:", json.encode(db:stats(), {sort_keys = true}))
+
+local _ = db:exec("DROP TABLE accounts")
+db:close()

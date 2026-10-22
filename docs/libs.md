@@ -1937,6 +1937,11 @@ failures close that connection; the pool opens a new one on the next call.
 `db:exec("BEGIN")` on the pool makes no sense (each call may get another
 connection): use `db:transaction` or `db:begin`.
 
+Examples: `libs/cockroach/examples/basics.sea` (tables, parameters, types,
+bulk insert with `returning`, `ON CONFLICT`, errors) and `bank.sea`
+(concurrent transfers that collide and are retried; the total stays right).
+They read `COCKROACH_URL`.
+
 Tests: `bin/sea test libs/cockroach`; with
 `COCKROACH_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable`
 they also run against a server (`cockroach start-single-node --insecure`).
@@ -1999,6 +2004,11 @@ dates, `DateTime`, `UUID`, `Enum` → strings.
 DB::Exception: Unknown table expression identifier 'nope' …
 (UNKNOWN_TABLE)`. Queries run with `wait_end_of_query=1`, so a failure is
 reported as an error even after rows were produced.
+
+Examples: `libs/clickhouse/examples/basics.sea` (inserts, typed parameters,
+`Map`/`Array`/`Nullable`, results with column types, CSV, errors) and
+`analytics.sea` (a million rows made by the server, parallel reports,
+quantiles, streaming with `each`, CSV export). They read `CLICKHOUSE_URL`.
 
 Tests: `bin/sea test libs/clickhouse`; with
 `CLICKHOUSE_URL=http://default:secret@localhost:8123/default` they also run
