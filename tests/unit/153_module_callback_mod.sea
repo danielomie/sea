@@ -1,0 +1,11 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- a module whose body calls natives that call back into Sea
+local M = {}
+M.names = list.map(["a", "b"], function(v) return string.upper(v) end)
+M.evens = list.filter([1, 2, 3, 4], function(v) return v % 2 == 0 end)
+local sorted = [3, 1, 2]
+sort.sort(sorted, function(x, y) return x > y end)
+M.sorted = sorted
+return M

@@ -1,0 +1,18 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- A module's body may call a native that calls back into Sea (list.map,
+-- sort.sort with a comparator): require still returns the module's value,
+-- not the callback's last result.
+
+local m = require("./153_module_callback_mod")
+print(type(m))
+print(m.names[0], m.names[1])
+print(len(m.evens), m.evens[0], m.evens[1])
+print(m.sorted[0], m.sorted[1], m.sorted[2])
+
+-- a callback inside a callback, at the top level of this script
+local nested = list.map([1, 2], function(v)
+    return len(list.filter([1, 2, 3], function(x) return x <= v end))
+end)
+print(nested[0], nested[1])

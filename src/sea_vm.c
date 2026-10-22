@@ -3777,8 +3777,14 @@ SeaValue sea_vm_call(SeaVM *vm, SeaValue fn_val, SeaValue *args, int argc) {
     }
 
     int saved_frame = vm->frame_count - 1;  // frame to return to
+    /* A module body that calls a native which calls back into Sea
+     * (list.map(t, fn) at a module's top level): the callback's RETURN
+     * must not take the module's exec-result slot. */
+    bool saved_has = vm->has_exec_result;
+    vm->has_exec_result = false;
     vm->native_depth++;
     vm_run(vm, saved_frame);
     vm->native_depth--;
+    vm->has_exec_result = saved_has;
     return fbase[0];   /* the RETURN left the first result (+1) here */
 }

@@ -651,3 +651,16 @@ Defeitos da versão anterior:
 - **Perdia informação no `encode`.** Em `<p>Olá <b>mundo</b>!</p>` o texto
   saía todo antes dos filhos, a indentação do original era reescrita fora do
   lugar e um atributo numérico fazia o `encode` inteiro devolver `nil`.
+
+## `require` devolvia o retorno de um callback **(2026-10)**
+
+Um módulo que, no corpo, chamava uma nativa que volta para a Sea
+(`M.x = list.map(t, function(v) ... end)`, `sort.sort(t, cmp)`) fazia o
+`require` devolver o último valor retornado pelo callback, e não o `M` do
+módulo. `sea_vm_exec_mod` marca `has_exec_result` para o `RETURN` do módulo
+gravar o resultado, mas `sea_vm_call` roda o callback no mesmo `vm_run`: o
+`RETURN` do callback, ao voltar para o C, achava a marca ligada, gravava o
+próprio valor e a desligava, e o `RETURN` do módulo já não gravava nada.
+Agora `sea_vm_call` desliga a marca enquanto o callback roda e a restaura
+depois (mesma ideia do bug de módulos de 2026-05). Teste:
+`tests/unit/153_module_callback`.
