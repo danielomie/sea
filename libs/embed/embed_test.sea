@@ -44,7 +44,7 @@ t.describe("embed", function()
     t.it("finds the models already on this machine without downloading", function()
         t.eq(embed.find("no-such-model.gguf"), [])
         t.eq(embed.find("hf:nobody/nothing/none.gguf"), [])
-        t.eq(embed.find("embed_test.sea"), ["embed_test.sea"])   -- a path that exists
+        t.eq(embed.find("embed_test.sea"), ["embed_test.sea"]) -- a path that exists
     end)
 
     t.it("refuses unknown models", function()
