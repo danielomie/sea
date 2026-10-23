@@ -35,7 +35,6 @@ SeaVM* sea_vm_new(void) {
     memset(vm, 0, sizeof(*vm));
     vm->shared           = sea_shared_new();
     vm->owns_shared      = true;
-    vm->module_chunks    = NULL;
     vm->frame_count      = 0;
     vm->panicking        = false;
     vm->has_exec_result  = false;
@@ -48,7 +47,6 @@ SeaVM* sea_vm_new_child(SeaShared *shared) {
     memset(vm, 0, sizeof(*vm));
     vm->shared          = shared;
     vm->owns_shared     = false;
-    vm->module_chunks   = NULL;
     vm->frame_count     = 0;
     vm->panicking       = false;
     vm->has_exec_result = false;
@@ -61,13 +59,7 @@ void sea_vm_free(SeaVM *vm) {
     if (sea_gc_vm == vm) sea_gc_vm = NULL;
     if (vm->gc_roots) sea_free(vm->gc_roots, sizeof(SeaObject*) * vm->gc_cap);
 
-    SeaChunk *c = vm->module_chunks;
-    while (c) {
-        SeaChunk *next = c->next_owned;
-        sea_chunk_free(c);
-        c = next;
-    }
-    if (vm->owns_shared) {
+    if (vm->owns_shared) {   /* with the required modules' chunks */
         sea_shared_free(vm->shared);
     }
     free(vm->panic_trace);
@@ -78,13 +70,6 @@ void sea_vm_reset_child(SeaVM *vm) {
     if (!vm) return;
     if (sea_gc_vm == vm) sea_gc_vm = NULL;
     if (vm->gc_roots) sea_free(vm->gc_roots, sizeof(SeaObject*) * vm->gc_cap);
-    /* Free module chunks from the previous run (child VMs never own shared) */
-    SeaChunk *c = vm->module_chunks;
-    while (c) {
-        SeaChunk *next = c->next_owned;
-        sea_chunk_free(c);
-        c = next;
-    }
     free(vm->panic_trace);
     memset(vm, 0, sizeof(*vm));
     /* frame_count == 0 signals "needs init" to worker_thread */

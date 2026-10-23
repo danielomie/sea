@@ -129,9 +129,6 @@ struct SeaVM {
     // Source name for error reporting
     const char *source_name;
 
-    // Linked list of chunks owned by this VM (module chunks that must outlive
-    // the closures they produced; freed in sea_vm_free)
-    SeaChunk *module_chunks;
 
     // Captures the top-level return value when sea_vm_exec_mod is running
     SeaValue exec_result;

@@ -106,7 +106,11 @@ typedef struct SeaShared {
     SeaTable        *globals;       /* global variable table               */
     SeaMap          *loaded;        /* module cache (require)              */
     SeaTableSync     globals_sync;  /* globals: lock-free reads, locked writes */
-    pthread_mutex_t  loaded_lock;   /* protects loaded map                 */
+    pthread_mutex_t  loaded_lock;   /* protects loaded map and module_chunks */
+    SeaChunk        *module_chunks; /* the required modules' chunks: their
+                                       closures live in the shared cache and in
+                                       any goroutine, so they outlive the VM that
+                                       loaded them (freed with SeaShared) */
     bool             jit_enabled;   /* program-wide JIT flag (--jit); goroutine
                                        child VMs share this, so they JIT too */
 } SeaShared;

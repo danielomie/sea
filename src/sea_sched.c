@@ -376,6 +376,7 @@ SeaShared *sea_shared_new(void) {
     sh->globals = sea_table_new(TABLE_MAP);
     sh->loaded  = sea_map_new();
     sh->jit_enabled = false;
+    sh->module_chunks = NULL;
     sea_table_sync_init(&sh->globals_sync);
     pthread_mutex_init(&sh->loaded_lock, NULL);
     return sh;
@@ -385,6 +386,13 @@ void sea_shared_free(SeaShared *sh) {
     if (!sh) return;
     if (sh->globals) sea_obj_release(&sh->globals->obj);
     if (sh->loaded)  sea_obj_release(&sh->loaded->obj);
+    /* after the cache: the modules' values (closures) point into these */
+    SeaChunk *c = sh->module_chunks;
+    while (c) {
+        SeaChunk *next = c->next_owned;
+        sea_chunk_free(c);
+        c = next;
+    }
     sea_table_sync_destroy(&sh->globals_sync);
     pthread_mutex_destroy(&sh->loaded_lock);
     SEA_FREE(sh, SeaShared);

@@ -6,6 +6,7 @@
 /* sea_prof.c — the sampling profiler behind `sea prof` (see sea_prof.h) */
 #include "sea_prof.h"
 #include "sea_vm.h"
+#include "sea_sched.h"
 #include "sea_chunk.h"
 #include "sea_gc.h"
 #include <errno.h>
@@ -274,7 +275,7 @@ void sea_prof_finish(void) {
 
     ChunkSet known = { 0 };
     cs_add(&known, root_chunk);
-    if (root_vm) for (SeaChunk *c = root_vm->module_chunks; c; c = c->next_owned) cs_add(&known, c);
+    if (root_vm) for (SeaChunk *c = root_vm->shared->module_chunks; c; c = c->next_owned) cs_add(&known, c);
 
     RowMap funcs = { 0 }, lines = { 0 };
     FoldMap folds = { 0 };

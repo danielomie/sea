@@ -1,0 +1,19 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- helper of 155_require_goroutine: a module with some code to run later
+local M = {}
+
+function M.greet(name)
+    local parts = []
+    for i = 1, 3 do parts[] = string.upper(string.sub(name, 1, 1)) .. string.sub(name, 2) end
+    return "olá, " .. parts[0]
+end
+
+function M.add(a, b)
+    local s = 0
+    for i = 1, 10 do s += a + b end
+    return s // 10
+end
+
+return M

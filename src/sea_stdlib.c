@@ -300,11 +300,15 @@ static SeaValue require_run_source(SeaVM *vm, SeaString *key, const char *src,
     SeaValue result = SEA_NIL_VAL;
     sea_vm_exec_mod(vm, chunk, &result);
 
-    /* Transfer chunk ownership to the VM: closures returned from the module
-     * hold cl->chunk pointers into this chunk's proto tree.  We must NOT free
-     * the chunk here; the VM will free it on sea_vm_free(). */
-    chunk->next_owned    = vm->module_chunks;
-    vm->module_chunks    = chunk;
+    /* The chunk belongs to the shared state, not to this VM: closures from
+     * the module point into its proto tree, and they live in the shared
+     * module cache and in any goroutine. (Owned by a goroutine's VM, a module
+     * first required in a goroutine had its code freed when that goroutine
+     * ended, while others still ran it.) */
+    pthread_mutex_lock(&vm->shared->loaded_lock);
+    chunk->next_owned         = vm->shared->module_chunks;
+    vm->shared->module_chunks = chunk;
+    pthread_mutex_unlock(&vm->shared->loaded_lock);
 
     vm->source_name = saved_source;
 

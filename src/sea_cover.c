@@ -6,6 +6,7 @@
 /* sea_cover.c — line coverage records (see sea_cover.h) */
 #include "sea_cover.h"
 #include "sea_vm.h"
+#include "sea_sched.h"
 #include "sea_chunk.h"
 #include "sea_compiler.h"
 #include <fcntl.h>
@@ -70,7 +71,7 @@ void sea_cover_finish(void) {
     if (!out_path || finished) return;
     finished = 1;
     add_chunk(root_chunk, NULL);
-    if (root_vm) for (SeaChunk *c = root_vm->module_chunks; c; c = c->next_owned) add_chunk(c, NULL);
+    if (root_vm) for (SeaChunk *c = root_vm->shared->module_chunks; c; c = c->next_owned) add_chunk(c, NULL);
 
     size_t cap = 4096, n = 0;
     char *buf = malloc(cap);

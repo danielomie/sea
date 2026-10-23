@@ -1,0 +1,27 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- A module first required inside a goroutine outlives it: its code belongs
+-- to the shared state, not to that goroutine's VM. (It used to be freed when
+-- the goroutine ended, while other goroutines still ran its functions.)
+
+local done = chan(1)
+local mod = nil
+go (function()
+    mod = require("./155_require_goroutine_mod")
+    done <- true
+end)()
+local _ = <-done
+time.sleep(20 * time.millisecond)   -- the goroutine finishes and its VM is freed
+
+-- allocate, so freed code would be overwritten
+local junk = []
+for i = 1, 20000 do junk[] = string.rep("x", 64) .. i end
+junk = nil
+
+print(mod.greet("ana"))
+local out = chan(1)
+go (function() out <- mod.add(2, 3) end)()
+print(<-out)
+-- the cache still gives the same module
+print(require("./155_require_goroutine_mod") == mod)
