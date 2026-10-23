@@ -1719,7 +1719,8 @@ embedding run on a worker thread and only that goroutine waits; a model computes
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `embed.load` | `load(ref [, opts]) → model\|error` | Load a model. `opts`: `threads` (default: the cores less one; all of them lose to the machine's other processes), `context` (tokens per text; longer texts are cut: default the model's, up to 2048), `pooling` (`"mean"`, `"cls"`, `"last"`; default the model's), `batch` (texts per pass, default 8), `query_prompt` / `document_prompt` (default: the known model's), `normalize` (default `true`) |
+| `embed.load` | `load(ref [, opts]) → model\|error` | Load a model. `opts`: `threads` (default: the cores less one; all of them lose to the machine's other processes), `context` (tokens per text; longer texts are cut: default the model's, up to 2048), `pooling` (`"mean"`, `"cls"`, `"last"`; default the model's), `batch` (texts per pass, default 8), `query_prompt` / `document_prompt` (default: the known model's), `normalize` (default `true`), `progress` (`function(bytes)`, called while the model downloads) |
+| `embed.find` | `find(ref) → array` | The files of a model already on this machine (ollama's copy, the download cache, the path), downloading nothing; `[]` when it would be downloaded. A known model may list an ollama copy llama.cpp cannot load (then `load` downloads Hugging Face's) |
 | `embed.models` | `models() → array` | The known models: `{name, description, hf, ollama}` |
 | `embed.similarity` | `similarity(a, b) → number` | Cosine similarity of two vectors |
 | `embed.version` | `version() → string` | The llama.cpp release built in (`"b11119"`) |

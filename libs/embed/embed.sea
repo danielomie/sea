@@ -118,13 +118,18 @@ local function cache_dir()
     return path.join(home(), ".cache", "sea", "embed")
 end
 
+local function hf_cached(ref)
+    return path.join(cache_dir(), string.replace(ref, "/", "__"))
+end
+
 -- "owner/repo/file.gguf" → the file in the cache, downloaded the first time
-local function hf_file(ref)
+-- (progress(bytes) is called as the download goes)
+local function hf_file(ref, progress)
     local parts = string.split(ref, "/")
     if len(parts) < 3 or not string.ends_with(ref, ".gguf") then
         return error(`embed: a Hugging Face model is owner/repo/file.gguf, not ${ref}`)
     end
-    local file = path.join(cache_dir(), string.replace(ref, "/", "__"))
+    local file = hf_cached(ref)
     if fs.isfile(file) then return file end
     fs.mkdir(cache_dir(), {parents = true})
     local repo = parts[0] .. "/" .. parts[1]
@@ -133,10 +138,13 @@ local function hf_file(ref)
     local part = file .. ".part"
     local h = io.open(part, "wb")
     if h == nil then return error("embed: cannot write " .. part) end
+    local got = 0
     local r = http.get(url, {
         timeout = 60000,
         on_data = function(piece)
             io.write_string(h, piece)
+            got += len(piece)
+            if progress ~= nil then progress(got) end
             return true
         end,
     })
@@ -153,7 +161,7 @@ end
 -- a path or an error (a known model: the copy ollama pulled, which saves
 -- the download, then Hugging Face's; ollama converts some models for its
 -- own engine, and llama.cpp cannot load those)
-local function candidates(ref)
+local function candidates(ref, progress)
     if string.starts_with(ref, "ollama:") then
         local name = string.sub(ref, 8)
         return [
@@ -164,18 +172,42 @@ local function candidates(ref)
             end,
         ]
     end
-    if string.starts_with(ref, "hf:") then return [function() return hf_file(string.sub(ref, 4)) end] end
+    if string.starts_with(ref, "hf:") then return [function() return hf_file(string.sub(ref, 4), progress) end] end
     local spec = KNOWN[ref]
     if spec ~= nil then
         local out = []
         if spec.ollama ~= nil then
             out[] = function() return ollama_blob(spec.ollama) or error("embed: not in ollama") end
         end
-        out[] = function() return hf_file(spec.hf) end
+        out[] = function() return hf_file(spec.hf, progress) end
         return out
     end
     if fs.isfile(ref) then return [function() return ref end] end
     return []
+end
+
+-- embed.find(ref) → [path]: the files of a model already on this machine
+-- (ollama's copy, the download cache, the path), downloading nothing. A
+-- known model may list ollama's copy that llama.cpp cannot load; load
+-- then downloads Hugging Face's.
+function M.find(ref)
+    local out = []
+    local function add(p)
+        if p ~= nil and fs.isfile(p) and not list.contains(out, p) then out[] = p end
+    end
+    if type(ref) ~= "string" then return out end
+    if string.starts_with(ref, "ollama:") then
+        add(ollama_blob(string.sub(ref, 8)))
+    elseif string.starts_with(ref, "hf:") then
+        add(hf_cached(string.sub(ref, 4)))
+    elseif KNOWN[ref] ~= nil then
+        local spec = KNOWN[ref]
+        if spec.ollama ~= nil then add(ollama_blob(spec.ollama)) end
+        add(hf_cached(spec.hf))
+    else
+        add(ref)
+    end
+    return out
 end
 
 -- the prompts of a reference: its own, else those of the known family in its name
@@ -196,7 +228,7 @@ end
 -- texts are cut: default the model's, up to 2048), pooling ("mean", "cls",
 -- "last": default the model's), batch (texts per pass, default 8),
 -- query_prompt / document_prompt (default: the known model's), normalize
--- (default true)
+-- (default true), progress (function(bytes): called while a model downloads)
 function M.load(ref, opts)
     opts = opts or {}
     if type(ref) ~= "string" or ref == "" then return error("embed.load: a model name or path expected") end
@@ -205,7 +237,7 @@ function M.load(ref, opts)
         pooling = POOLING[opts.pooling]
         if pooling == nil then return error(`embed.load: unknown pooling ${opts.pooling}`) end
     end
-    local tries = candidates(ref)
+    local tries = candidates(ref, opts.progress)
     if len(tries) == 0 then
         return error(`embed: unknown model ${ref} (a known name, ollama:<name>, hf:<owner>/<repo>/<file>.gguf or a .gguf path)`)
     end
