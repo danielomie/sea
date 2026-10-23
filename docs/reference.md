@@ -849,6 +849,11 @@ print(os.args[2])                 -- "world"
 | `sync.waitgroup` | `waitgroup() → WaitGroup` | Create a wait-group; methods: `add(wg, n)`, `done(wg)`, `wait(wg)` |
 | `sync.once` | `once() → Once` | Create a once-object; method: `do_once(once, fn)` — runs `fn` exactly once across all goroutines |
 
+A goroutine waiting in `acquire` or `wait` parks (retrying every millisecond) instead of blocking its
+scheduler thread, so a holder that sleeps or does I/O while holding the lock always gets a thread to
+resume on. Any goroutine may `release` a mutex (it has no owner). Outside a goroutine, `acquire` sleeps
+briefly between attempts and `wait` blocks.
+
 > **Note:** Sea methods take the receiver as the first explicit argument.
 > `mu.acquire(mu)` / `mu.release(mu)`, `wg.add(wg, 1)` / `wg.done(wg)` / `wg.wait(wg)`.
 

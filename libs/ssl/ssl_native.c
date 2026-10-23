@@ -188,6 +188,15 @@ static void client_ctx_init(void) {
     SSL_CTX_set_verify(g_client_ctx, SSL_VERIFY_PEER, NULL);
     SSL_CTX_set_default_verify_paths(g_client_ctx);
     SSL_CTX_set_min_proto_version(g_client_ctx, TLS1_2_VERSION);
+    /* Every connection of every thread shares these CA certificates, and
+     * OpenSSL fills each one's extension cache (key identifiers...) the first
+     * time a handshake uses it, while another handshake may be reading it
+     * (ThreadSanitizer saw it). Fill them all now, before any sharing. */
+    STACK_OF(X509_OBJECT) *objs = X509_STORE_get0_objects(SSL_CTX_get_cert_store(g_client_ctx));
+    for (int i = 0; objs && i < sk_X509_OBJECT_num(objs); i++) {
+        X509 *x = X509_OBJECT_get0_X509(sk_X509_OBJECT_value(objs, i));
+        if (x) X509_check_purpose(x, -1, 0);
+    }
 }
 
 static SSL_CTX *get_client_ctx(void) {

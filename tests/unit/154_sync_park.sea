@@ -1,0 +1,53 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- sync.mutex and waitgroup park the goroutine that waits instead of blocking
+-- its scheduler thread: with more waiters than threads, a holder that parks
+-- (sleeps, does I/O) while holding the lock still gets a thread to resume on
+-- and release it. Released from another thread than the one that locked it.
+
+local mu = sync.mutex()
+local wg = sync.waitgroup()
+local n = 0
+local N = 32
+wg:add(N)
+for i = 1, N do
+    go function()
+        mu:acquire()
+        local before = n
+        time.sleep(2 * time.millisecond)   -- parks while holding the lock
+        n = before + 1                     -- no lost update: the lock is exclusive
+        mu:release()
+        wg:done()
+    end()
+end
+wg:wait()
+print("n =", n)
+
+-- try_lock fails while held, succeeds after release
+mu:acquire()
+print("try_lock while held:", mu:try_lock())
+mu:release()
+print("try_lock after release:", mu:try_lock())
+mu:release()
+
+-- waitgroup.wait inside goroutines (each parks until the counter is zero)
+local gate = sync.waitgroup()
+gate:add(1)
+local seen = sync.waitgroup()
+seen:add(8)
+local woke = 0
+local wmu = sync.mutex()
+for i = 1, 8 do
+    go function()
+        gate:wait()
+        wmu:acquire()
+        woke += 1
+        wmu:release()
+        seen:done()
+    end()
+end
+time.sleep(5 * time.millisecond)
+gate:done()
+seen:wait()
+print("woke =", woke)

@@ -1,0 +1,4 @@
+n =	32
+try_lock while held:	false
+try_lock after release:	true
+woke =	8

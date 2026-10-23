@@ -133,10 +133,13 @@ bool sea_gc_unbuffer_dying(SeaObject *o) {
 /* ---- Object structure ---------------------------------------------------- */
 
 /* Takes part in the collection: a container no other goroutine can see.
- * Shared, arena and pinned objects count as external references. */
+ * Shared, arena and pinned objects count as external references. (A child
+ * may be shared, its count changed by other threads as we look: read the
+ * flag bits atomically. They never change once set.) */
 static inline bool gc_part(SeaObject *o) {
     return sea_gc_tracked(o) &&
-           !(o->refcount & SEA_RC_FLAG_BITS) && !(o->gc & SEA_GC_DEAD);
+           !(__atomic_load_n(&o->refcount, __ATOMIC_RELAXED) & SEA_RC_FLAG_BITS) &&
+           !(o->gc & SEA_GC_DEAD);
 }
 static inline int  gc_color(SeaObject *o)           { return o->gc & SEA_GC_COLOR_MASK; }
 static inline void gc_set_color(SeaObject *o, int c) { o->gc = (uint8_t)((o->gc & ~SEA_GC_COLOR_MASK) | c); }
@@ -418,7 +421,7 @@ uint32_t sea_gc_collect(SeaVM *vm) {
             freed++;
             continue;
         }
-        if (s->refcount & SEA_RC_SHARED_BIT) {   /* another goroutine may see it */
+        if (__atomic_load_n(&s->refcount, __ATOMIC_RELAXED) & SEA_RC_SHARED_BIT) {   /* another goroutine may see it */
             bool held = s->gc & SEA_GC_BUFREF;
             s->gc &= (uint8_t)~(SEA_GC_BUFFERED | SEA_GC_BUFREF);
             if (held) sea_obj_release(s);
