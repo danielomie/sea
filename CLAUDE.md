@@ -102,7 +102,9 @@ return sea_obj_val(&out->obj); /* new object: already +1 */
 3. Bare names: `sea_modules/` (packages from `sea get`) next to the requiring file or above
 4. Each directory in `SEA_PATH` (colon-separated env var)
 5. Bare names: `<dir of the sea binary>/../lib/sea/` (the libraries `make install` puts
-   there: `require("json")` → `lib/sea/json/json.so`). tools/lib/check.sea, tools/build.sea and
+   there: `require("json")` → `lib/sea/json/json.so`); not installed, a `bin/sea` in the source
+   tree uses `<repo>/libs/` the same way (`require("http")` → `libs/http/http.sea`).
+   tools/lib/check.sea, tools/build.sea and
    tools/lsp.sea repeat this search: keep them in sync with `src/sea_stdlib.c`
 
 Before the search: built-in modules, the embedded `sea/test`/`sea/check`/`sea/stream`/`sea/flags`/`sea/log`/`sea/dotenv`, then (in a

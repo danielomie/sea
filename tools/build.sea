@@ -74,12 +74,17 @@ builtin["sea/log"] = true
 builtin["sea/dotenv"] = true
 
 -- The libraries installed with the sea binary (make install): lib/sea next to
--- its bin/ directory, as require looks; nil when there is none
+-- its bin/ directory, or libs/ of the source tree it runs from, as require
+-- looks; nil when there is none
 local function sea_libdir()
     local exe = fs.realpath("/proc/self/exe")
     if is_error(exe) then return nil end
-    local d = path.join(path.dirname(path.dirname(exe)), "lib", "sea")
+    local top = path.dirname(path.dirname(exe))
+    local d = path.join(top, "lib", "sea")
     if fs.isdir(d) then return d end
+    if fs.isfile(path.join(top, "src", "sea_main.c")) and fs.isdir(path.join(top, "libs")) then
+        return path.join(top, "libs")
+    end
     return nil
 end
 

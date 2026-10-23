@@ -35,9 +35,12 @@ pure-Sea libraries work out of the box.
 | `clickhouse` | `libs/clickhouse/clickhouse` | pure Sea (HTTP interface, uses `libs/http`) | `make -C libs/http` |
 | `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
 
-Require paths are relative to the calling file. Examples within a lib's `examples/` directory use `"../libname"`.
-After `make install` (see the README), an installed `sea` also finds the
-libraries by name from anywhere: `require("json")`, `require("http")`.
+Require a library by its name: `require("http")`, `require("yaml")`. An installed `sea`
+(`make install`, see the README) finds it in `lib/sea/`; a `sea` run from the source tree
+(`bin/sea`, not installed) finds it in `libs/`, so the same code works in both and in any
+project, without a path to the sea_vm checkout. Paths in `require` are relative to the
+requiring file, for a project's own modules (`require("./util")`); a lib's own examples
+reach it as `"../libname"`.
 
 Writing a native library: see `src/sea.h` for the module convention and
 [memory.md](memory.md#writing-native-functions) for the ownership rules. In
@@ -52,8 +55,8 @@ instead of a private copy.
 
 JSON (RFC 8259) in C, compiled into the `sea` binary: `json` is a global
 (like `string` or `fs`), and `require("json")` returns it. The same code
-also builds as `libs/json/json.so` (`make -C libs/json`) for
-`require("../libs/json/json")`.
+also builds as `libs/json/json.so` (`make -C libs/json`), for a program
+that loads it from that path.
 
 ```sea
 print(json.encode({ok = true, items = [1, 2]}))   -- {"items":[1,2],"ok":true} (key order may vary)
@@ -133,7 +136,7 @@ styles, tags and anchors kept. Conformance: every case of the official
 errors). Build: `make -C libs/yaml`.
 
 ```sea
-local yaml = require("../libs/yaml/yaml")   -- relative to the requiring file
+local yaml = require("yaml")
 
 local cfg = yaml.decode(os.readfile("config.yaml"))?
 print(cfg.server.port)
@@ -264,7 +267,7 @@ TOML 1.0 in C: decode and encode. Conformance: every case of the official
 writes `.6` seconds as `.600`). Build: `make -C libs/toml`.
 
 ```sea
-local toml = require("../libs/toml/toml")   -- relative to the requiring file
+local toml = require("toml")
 
 local cfg = toml.decode(fs.read("config.toml")?)?
 print(cfg.database.port, cfg.servers.alpha.ip)
@@ -316,7 +319,7 @@ back, and Python's `tomllib` reads it the same way.
 CSV (RFC 4180) in C: decode a string, encode rows, or stream a file of any
 size row by row. Compiled into the `sea` binary: `csv` is a global, and
 `require("csv")` returns it (`make -C libs/csv` builds the same code as a
-`.so` for `require("../libs/csv/csv")`).
+`.so`).
 
 ```sea
 
@@ -377,7 +380,7 @@ gzip, zlib and raw DEFLATE, and ZIP and tar archives, on the system's zlib. Buil
 libs/compress` (needs zlib's headers: `zlib1g-dev` on Debian/Ubuntu).
 
 ```sea
-local compress = require("../libs/compress/compress")   -- relative to the requiring file
+local compress = require("compress")
 
 local gz = compress.gzip(body)               -- e.g. for Content-Encoding: gzip
 local back = compress.gunzip(gz)?
@@ -444,7 +447,7 @@ XML 1.0 in C: a strict parser, an encoder, queries (a small XPath subset), a
 SAX mode and helpers to build and edit trees. Build: `make -C libs/xml`.
 
 ```sea
-local xml = require("../libs/xml/xml")   -- relative to the requiring file
+local xml = require("xml")
 ```
 
 | Function | Signature | Description |
@@ -683,7 +686,7 @@ console.shimmer_stop()
 HTTP/1.1 client and server. Requires `http_native.so` (strict request/response parsers, URL coding), plus `libs/ssl` for HTTPS and `libs/json` for the JSON helpers. Build: `make -C libs/http libs/ssl libs/json` (one `make -C` each); `http_native.so` links zlib (`zlib1g-dev` / `zlib-devel`) for gzip.
 
 ```sea
-local http = require("../libs/http/http")   -- relative to the requiring file
+local http = require("http")
 ```
 
 Sockets come from the built-in `net` module: every network wait parks only the goroutine doing it (netpoller), so a slow or idle peer never stalls the others. All timeouts are in milliseconds.
@@ -1035,8 +1038,8 @@ for both the server and the client (all cases but compression: 296 OK,
 (with `libs/http` and `libs/ssl`).
 
 ```sea
-local http = require("../libs/http/http")
-local ws = require("../libs/websocket/websocket")
+local http = require("http")
+local ws = require("websocket")
 
 http.serve(8080, function(req)
     if req.path == "/chat" then
@@ -1152,7 +1155,7 @@ print(header.alg)   -- "HS256"
 Command-line flags in the style of Go's `flag` package, with aliases,
 repeatable flags, allowed values and independent sets. Pure Sea, built into
 the `sea` binary as `require("sea/flags")` (the file is
-`libs/flags/flags.sea`; `require("../libs/flags/flags")` still works). The
+`libs/flags/flags.sea`; `require("flags")` still works). The
 `sea` tools (`sea fmt`, `sea test`, ...) parse their arguments with it.
 
 ```sea
@@ -1487,7 +1490,7 @@ parts included (194 of 194: interpolation, sections, inverted sections,
 comments, partials, set delimiters, lambdas, dynamic names, inheritance).
 
 ```sea
-local template = require("../libs/template/template")   -- relative to the requiring file
+local template = require("template")
 
 print(template.render("Hello, {{name}}!", {name = "Sea"}))     -- Hello, Sea!
 
@@ -1552,7 +1555,7 @@ through `libs/compress` (build it with `make -C libs/compress`); the other
 formats need nothing.
 
 ```sea
-local image = require("../libs/image/image")   -- relative to the requiring file
+local image = require("image")
 
 local img = image.load("scan.png")?             -- PNG, BMP or PNM, by content
 print(img.width, img.height, img:get(10, 20))   -- 0 (black) .. 255 (white)
@@ -1599,7 +1602,7 @@ hinting or kerning; CFF outlines (`.otf` with PostScript curves) are not
 read. The OCR library renders its training glyphs with it.
 
 ```sea
-local tt = require("../libs/truetype/truetype")   -- relative to the requiring file
+local tt = require("truetype")
 
 local font = tt.load("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")?
 local img = font:render("Ação, 12!", 32, {pad = 4})  -- one line of text
@@ -1636,7 +1639,7 @@ the orchestration stays in Sea. On a small transformer written in Sea, swapping
 these kernels in for the same functions written in Sea gave identical results,
 58× faster.
 
-**Require:** `require("../../libs/tensor/tensor")` (relative to your file)
+**Require:** `require("tensor")` (relative to your file)
 **Build:** `make -C libs/tensor` (compiled with `-O3 -march=native`)
 
 Every function works in place on float_arrays addressed as `(array, offset)`
@@ -1666,7 +1669,7 @@ argument of the wrong type, is a runtime error (a panic).
 | `load(path, a, offset) → next offset` | fill the whole array from the file at a byte offset; an error value if the file is short |
 
 ```sea
-local tensor = require("../../libs/tensor/tensor")
+local tensor = require("tensor")
 local x = float_array()
 x[] = 1.0
 x[] = 2.0
@@ -1694,7 +1697,7 @@ Tests: `make -C libs/embed test` (they need a model: `EMBED_TEST_MODEL`, or olla
 skipped without one).
 
 ```sea
-local embed = require("../libs/embed/embed")      -- relative to the requiring file
+local embed = require("embed")
 
 local m = embed.load("embeddinggemma")?            -- downloaded the first time (~330 MB)
 local docs = m:documents(["Condições de parcelamento: 30/60/90 dias", "Contas bancárias e Pix"])?
@@ -1743,7 +1746,7 @@ official `libduckdb` release (1.5.6, SHA-256 checked) into
 Tests: `make -C libs/duckdb test`.
 
 ```sea
-local duckdb = require("../libs/duckdb/duckdb")   -- relative to the requiring file
+local duckdb = require("duckdb")
 
 local db = duckdb.open("sales.duckdb")?           -- nil or ":memory:": in memory
 db:exec("CREATE TABLE IF NOT EXISTS sales (day DATE, item VARCHAR, qty INTEGER, price DECIMAL(10,2))")?
@@ -1872,7 +1875,7 @@ builds `sqlite_native.so`; `make -C libs/sqlite test` runs its tests. Built
 with FTS5, R*Tree, JSON and math functions; extension loading is off.
 
 ```sea
-local sqlite = require("../libs/sqlite/sqlite")   -- relative to the requiring file
+local sqlite = require("sqlite")
 
 local db = sqlite.open("app.db", {wal = true})?
 db:exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INT)")?
@@ -1926,7 +1929,7 @@ built-in `net` module, so it also talks to PostgreSQL. Nothing to build;
 parks only the goroutine that waits.
 
 ```sea
-local crdb = require("../libs/cockroach/cockroach")   -- relative to the requiring file
+local crdb = require("cockroach")
 
 local db = crdb.open("postgresql://root@localhost:26257/defaultdb?sslmode=disable")?
 db:exec("CREATE TABLE IF NOT EXISTS accounts (id INT PRIMARY KEY, owner STRING, balance DECIMAL)")?
@@ -2007,7 +2010,7 @@ TLS) through `libs/http` (`make -C libs/http libs/ssl`). Each call is one
 request on kept-alive connections, so a db can be shared by goroutines.
 
 ```sea
-local clickhouse = require("../libs/clickhouse/clickhouse")
+local clickhouse = require("clickhouse")
 
 local db = clickhouse.open("http://default:secret@localhost:8123/default")?
 db:exec("CREATE TABLE IF NOT EXISTS hits (at DateTime, url String, ms UInt32) ENGINE = MergeTree ORDER BY at")?

@@ -120,7 +120,8 @@ says what to write instead (`undefined variable 'pairs' (iterate with
     order matters: `sort.sort(keys)`.
 24. **`require` paths are relative to the requiring file**:
     `require("./util")` loads `util.sea` next to the current file;
-    `require("../../libs/json/json")` reaches a library. Built-in modules
+    a library goes by its name, `require("http")` (installed with `sea`, or
+    `libs/` of the source tree a `bin/sea` runs from). Built-in modules
     (`string`, `math`, `fs`, `re`, `json` is *not* one) need no `require`.
 25. **String interpolation uses backquotes**: `` `total: ${n} items` ``
     (any expression inside `${}`; not `"${n}"`, not `f"..."`).

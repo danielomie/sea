@@ -1898,4 +1898,8 @@ is:
    `sea` binary (`/usr/local/lib/sea` for `/usr/local/bin/sea`):
    `lib/sea/name.sea`, `name/init.sea`, `name.so`, `name/name.sea` or
    `name/name.so`. So an installed `sea` loads `require("json")`,
-   `require("http")` or `require("sqlite")` from anywhere
+   `require("http")` or `require("sqlite")` from anywhere. A `sea` run from
+   its source tree (`bin/sea` next to `src/`, not installed) looks in `libs/`
+   of that tree instead, in the same layout: `require("http")` is
+   `libs/http/http.sea`. Projects should require the libraries by name, not
+   by a path to the sea_vm checkout

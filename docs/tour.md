@@ -235,7 +235,7 @@ are available for shared state (see the [reference](reference.md#module-sync)).
 --   local mu = require("./math_utils")
 --   print(mu.square(9))
 print(json.encode({ok = true}))              -- json and csv are built in
-local yaml = require("../libs/yaml/yaml")    -- a native module (.so): make -C libs/yaml
+local yaml = require("yaml")    -- a native module (.so): make -C libs/yaml
 ```
 
 `require` resolves a path relative to the requiring file, then the current

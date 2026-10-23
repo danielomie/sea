@@ -1,0 +1,11 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- A library by its bare name: lib/sea next to an installed sea, or libs/ of
+-- the source tree a sea runs from (here: bin/sea next to src/). template is
+-- pure Sea, so no build is needed.
+
+local template = require("template")
+print(type(template))
+-- the same module however it is named
+print(require("template") == template)

@@ -209,6 +209,11 @@ install: $(TARGET)
 	        install -d $(SEALIB)/$$lib/vendor; \
 	        install -m 755 $$f $(SEALIB)/$$lib/vendor/; \
 	    done; \
+	    for f in $$d/vendor/lib/*.so*; do \
+	        [ -e "$$f" ] || continue; \
+	        install -d $(SEALIB)/$$lib/vendor/lib; \
+	        cp -P $$f $(SEALIB)/$$lib/vendor/lib/; \
+	    done; \
 	    echo "installed $$lib"; \
 	done
 	@echo "sea installed in $(BINDIR); libraries in $(SEALIB)"

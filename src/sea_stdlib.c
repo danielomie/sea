@@ -258,6 +258,14 @@ static bool require_libdir(char *out, size_t outsz) {
     if (!slash) return false;
     *slash = '\0';                         /* .../bin */
     if ((size_t)snprintf(out, outsz, "%s/../lib/sea", exe) >= outsz) return false;
+    if (access(out, X_OK) == 0) return true;
+    /* Not installed: a sea run from its source tree (bin/sea next to src/)
+     * finds the libraries where they are built, libs/<name>/, in the same
+     * layout as lib/sea, so require("http") works without make install */
+    char marker[PATH_MAX];
+    if ((size_t)snprintf(marker, sizeof marker, "%s/../src/sea_main.c", exe) >= sizeof marker) return false;
+    if (access(marker, R_OK) != 0) return false;
+    if ((size_t)snprintf(out, outsz, "%s/../libs", exe) >= outsz) return false;
     return access(out, X_OK) == 0;
 }
 
@@ -491,7 +499,8 @@ static SeaValue fn_require(SeaVM *vm, int argc, SeaValue *args) {
     }
     /* The libraries installed with the binary (make install): lib/sea next
      * to its bin/ directory, found from the executable so that any PREFIX
-     * works. Bare names only: "json" is lib/sea/json/json.so */
+     * works (or libs/ of the source tree it runs from). Bare names only:
+     * "json" is lib/sea/json/json.so */
     if (!found && !absolute && name[0] != '.') {
         char libdir[PATH_MAX];
         if (require_libdir(libdir, sizeof libdir)) {
