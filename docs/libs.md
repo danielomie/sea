@@ -31,6 +31,7 @@ pure-Sea libraries work out of the box.
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
 | `embed` | `libs/embed/embed` | Sea + native | `make -C libs/embed` (downloads and builds llama.cpp; needs cmake) |
+| `pdf` | `libs/pdf/pdf` | pure Sea (uses `compress`) | `make -C libs/compress` |
 | `cockroach` | `libs/cockroach/cockroach` | pure Sea (PostgreSQL protocol; `libs/ssl` for TLS) | — |
 | `clickhouse` | `libs/clickhouse/clickhouse` | pure Sea (HTTP interface, uses `libs/http`) | `make -C libs/http` |
 | `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
@@ -1693,6 +1694,44 @@ tensor.matvec(x, 0, w, 2, 3, out, 0)      -- out = 9, 12, 15
 
 Calls from several goroutines on different arrays run in parallel. Test:
 `tests/unit/113_tensor.sea`.
+
+---
+
+## `pdf`
+
+Reading PDF files in pure Sea: each page's text and its images (a scanned page is an image: a JPEG
+one goes to `image.decode`, and an OCR reads it). Streams go through `libs/compress` (build it with
+`make -C libs/compress`). Tests: `bin/sea test libs/pdf`.
+
+```sea
+local pdf = require("pdf")
+
+local doc = pdf.load("nota.pdf")?             -- or pdf.open(bytes)
+print(doc.page_count, doc.info.Title)
+print(doc:text())                             -- every page, "\f" between pages
+for _, img in doc:page_images(0) do
+    if img.format == "jpeg" then local page = require("image").decode(img.data)? end
+end
+```
+
+Objects are found by scanning the file (`n g obj`), so a damaged cross-reference table or incremental
+updates do not matter; object streams (PDF 1.5) are opened. Filters: FlateDecode (with PNG
+predictors), ASCIIHexDecode, ASCII85Decode, LZWDecode; DCTDecode stays a JPEG file. Text comes from the
+text operators (`Tj`, `TJ`, `'`, `"`) with their positions (text matrix, CTM, form XObjects): lines
+by the baseline, top to bottom, and a space where the gap is wider than 0.15 of the font size (the
+fonts' widths measure the runs; a wide character spacing, as groff uses for spaces, is measured glyph
+by glyph). Characters go through the font's ToUnicode CMap, else its encoding (WinAnsi with
+`/Differences` glyph names). An encrypted PDF is refused.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `pdf.open` | `open(bytes) → doc\|error` | Parse a PDF |
+| `pdf.load` | `load(path) → doc\|error` | The same, from a file |
+| `doc.page_count`, `doc.info` | | The number of pages; the Info dictionary's strings (`Title`, `Author`, `Producer`...) |
+| `doc:text` | `text() → string` | Every page's text, separated by `"\f"` |
+| `doc:page_text` | `page_text(i) → string\|error` | One page's text (`i` from 0) |
+| `doc:page_images` | `page_images(i) → array\|error` | The images the page draws: `{format = "jpeg", data, width, height}` (the JPEG file) or `{format = "gray", width, height, data}` (one byte a pixel, from 8-bit gray, RGB or CMYK) |
+| `doc:object`, `doc:resolve`, `doc:get`, `doc:stream_data` | | The parsed objects, for what the rest does not cover |
 
 ---
 

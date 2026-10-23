@@ -1,0 +1,1277 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- pdf — reading PDF files in pure Sea: the text of each page and its images
+-- (a scanned page is an image: libs/image decodes a JPEG one, and an OCR
+-- reads it).
+--
+--   local doc = pdf.open(bytes)?        -- or pdf.load(path)
+--   print(doc.page_count, doc.info.Title)
+--   print(doc:text())                   -- every page, separated by "\f"
+--   print(doc:page_text(0))
+--   for _, img in doc:page_images(0) do  -- {format = "jpeg", data} or
+--       ...                              -- {format = "gray", width, height, data}
+--   end
+--
+-- Objects are found by scanning the file (a broken cross-reference table
+-- or incremental updates do not matter), object streams (PDF 1.5) are
+-- opened, and streams decoded (FlateDecode with PNG predictors,
+-- ASCIIHexDecode, ASCII85Decode, LZWDecode; DCTDecode stays a JPEG).
+-- Text comes from the text operators with their positions: lines by the
+-- vertical position, spaces by the gaps (with the fonts' widths), and the
+-- characters through the font's ToUnicode map, or its encoding (WinAnsi,
+-- MacRoman, Standard, with Differences). An encrypted PDF is refused.
+
+local compress = require("../compress/compress")
+
+local M = {}
+
+local NULL = {} -- the PDF null inside arrays and dictionaries
+M.NULL = NULL
+
+-- ---- lexer ------------------------------------------------------------------
+
+local WS = {}
+for _, c in [0, 9, 10, 12, 13, 32] do WS[c] = true end
+local DELIM = {}
+for _, c in string.split("()<>[]{}/%", "") do DELIM[string.byte(c)] = true end
+
+local function is_ws(b) return b ~= nil and WS[b] == true end
+local function is_regular(b) return b ~= nil and WS[b] ~= true and DELIM[b] ~= true end
+
+-- a lexer over s from byte pos (1-based)
+local function lexer(s, pos)
+    local l = {}
+    l.s = s
+    l.pos = pos or 1
+    l.n = len(s)
+    return l
+end
+
+local function skip_ws(l)
+    while l.pos <= l.n do
+        local b = string.byte(l.s, l.pos)
+        if is_ws(b) then
+            l.pos += 1
+        elseif b == 37 then -- % comment to the end of the line
+            while l.pos <= l.n do
+                local c = string.byte(l.s, l.pos)
+                if c == 10 or c == 13 then break end
+                l.pos += 1
+            end
+        else
+            break
+        end
+    end
+end
+
+local ESC = {}
+ESC[string.byte("n")] = "\n"
+ESC[string.byte("r")] = "\r"
+ESC[string.byte("t")] = "\t"
+ESC[string.byte("b")] = "\b"
+ESC[string.byte("f")] = "\f"
+
+local function literal_string(l)
+    l.pos += 1 -- past (
+    local out = []
+    local depth = 1
+    local start = l.pos
+    while l.pos <= l.n do
+        local b = string.byte(l.s, l.pos)
+        if b == 92 then -- backslash
+            if l.pos > start then out[] = string.sub(l.s, start, l.pos - 1) end
+            local c = string.byte(l.s, l.pos + 1)
+            if c == nil then break end
+            if ESC[c] ~= nil then
+                out[] = ESC[c]
+                l.pos += 2
+            elseif c >= 48 and c <= 55 then -- octal, up to 3 digits
+                local v = 0
+                local k = 0
+                while k < 3 do
+                    local d = string.byte(l.s, l.pos + 1 + k)
+                    if d == nil or d < 48 or d > 55 then break end
+                    v = v * 8 + (d - 48)
+                    k += 1
+                end
+                out[] = string.char(v & 255)
+                l.pos += 1 + k
+            elseif c == 13 then -- a line continuation
+                l.pos += 2
+                if string.byte(l.s, l.pos) == 10 then l.pos += 1 end
+            elseif c == 10 then
+                l.pos += 2
+            else
+                out[] = string.char(c)
+                l.pos += 2
+            end
+            start = l.pos
+        else
+            if b == 40 then
+                depth += 1
+            elseif b == 41 then
+                depth -= 1
+                if depth == 0 then
+                    if l.pos > start then out[] = string.sub(l.s, start, l.pos - 1) end
+                    l.pos += 1
+                    break
+                end
+            end
+            l.pos += 1
+        end
+    end
+    local r = {}
+    r.str = string.join(out, "")
+    return r
+end
+
+local function hex_value(b)
+    if b >= 48 and b <= 57 then return b - 48 end
+    if b >= 65 and b <= 70 then return b - 55 end
+    if b >= 97 and b <= 102 then return b - 87 end
+    return nil
+end
+
+local function hex_string(l)
+    l.pos += 1 -- past <
+    local out = []
+    local hi = nil
+    while l.pos <= l.n do
+        local b = string.byte(l.s, l.pos)
+        l.pos += 1
+        if b == 62 then break end
+        local v = hex_value(b)
+        if v ~= nil then
+            if hi == nil then
+                hi = v
+            else
+                out[] = string.char(hi * 16 + v)
+                hi = nil
+            end
+        end
+    end
+    if hi ~= nil then out[] = string.char(hi * 16) end
+    local r = {}
+    r.str = string.join(out, "")
+    r.hex = true
+    return r
+end
+
+local function name_token(l)
+    l.pos += 1 -- past /
+    local start = l.pos
+    while l.pos <= l.n and is_regular(string.byte(l.s, l.pos)) do l.pos += 1 end
+    local raw = string.sub(l.s, start, l.pos - 1)
+    if string.contains(raw, "#") then
+        raw = re.gsub("#([0-9A-Fa-f]{2})", raw, function(m) return string.char(tonumber(m.groups[1], 16)) end)
+    end
+    return "/" .. raw
+end
+
+-- the next token: a number, "/name", {str}, or a keyword/punctuation string
+-- ("[", "]", "<<", ">>", "R", "obj", "true", an operator...); nil at the end
+local function token(l)
+    skip_ws(l)
+    if l.pos > l.n then return nil end
+    local b = string.byte(l.s, l.pos)
+    if b == 40 then return literal_string(l) end
+    if b == 47 then return name_token(l) end
+    if b == 60 then
+        if string.byte(l.s, l.pos + 1) == 60 then
+            l.pos += 2
+            return "<<"
+        end
+        return hex_string(l)
+    end
+    if b == 62 and string.byte(l.s, l.pos + 1) == 62 then
+        l.pos += 2
+        return ">>"
+    end
+    if b == 91 or b == 93 or b == 123 or b == 125 then
+        l.pos += 1
+        return string.char(b)
+    end
+    local start = l.pos
+    while l.pos <= l.n and is_regular(string.byte(l.s, l.pos)) do l.pos += 1 end
+    if l.pos == start then
+        l.pos += 1 -- a stray delimiter
+        return string.char(b)
+    end
+    local w = string.sub(l.s, start, l.pos - 1)
+    local c = string.byte(w, 1)
+    if (c >= 48 and c <= 57) or c == 45 or c == 43 or c == 46 then
+        local v = tonumber(w)
+        if v ~= nil then return v end
+    end
+    return w
+end
+
+local function is_name(v) return type(v) == "string" and string.sub(v, 1, 1) == "/" end
+local function is_num(v) return type(v) == "int" or type(v) == "number" end
+
+-- the value starting with token t (objects: dictionaries, arrays, refs)
+local parse_value
+
+local function parse_after(l, t)
+    if t == "<<" then
+        local d = {}
+        while true do
+            local k = token(l)
+            if k == nil or k == ">>" then break end
+            if is_name(k) then
+                local v = parse_value(l)
+                d[string.sub(k, 2)] = v == nil and NULL or v
+            end
+        end
+        return d
+    end
+    if t == "[" then
+        local a = []
+        while true do
+            local v = token(l)
+            if v == nil or v == "]" then break end
+            v = parse_after(l, v)
+            -- n g R inside an array
+            if is_num(v) then
+                local p2 = l.pos
+                local g = token(l)
+                local r = token(l)
+                if is_num(g) and r == "R" then
+                    local ref = {}
+                    ref.ref = math.floor(v)
+                    ref.gen = math.floor(g)
+                    v = ref
+                else
+                    l.pos = p2
+                end
+            end
+            a[] = v == nil and NULL or v
+        end
+        return a
+    end
+    if t == "true" then return true end
+    if t == "false" then return false end
+    if t == "null" then return NULL end
+    return t
+end
+
+parse_value = function(l)
+    local t = token(l)
+    if t == nil then return nil end
+    local v = parse_after(l, t)
+    if is_num(v) then
+        -- n g R
+        local p2 = l.pos
+        local g = token(l)
+        local r = token(l)
+        if is_num(g) and r == "R" then
+            local ref = {}
+            ref.ref = math.floor(v)
+            ref.gen = math.floor(g)
+            return ref
+        end
+        l.pos = p2
+    end
+    return v
+end
+
+M._lexer = lexer
+M._parse_value = parse_value
+
+-- ---- filters ----------------------------------------------------------------
+
+local function png_unpredict(data, columns, colors, bpc)
+    local bpp = math.max(1, (colors * bpc) // 8)
+    local rowlen = (columns * colors * bpc + 7) // 8
+    local out = []
+    local prev = int_array(rowlen)
+    for _ = 0, rowlen - 1 do prev[] = 0 end
+    local cur = int_array(rowlen)
+    for _ = 0, rowlen - 1 do cur[] = 0 end
+    local p = 1
+    while p + rowlen <= len(data) do
+        local ft = string.byte(data, p)
+        for i = 0, rowlen - 1 do
+            local x = string.byte(data, p + 1 + i)
+            local a = i >= bpp and cur[i - bpp] or 0
+            local b = prev[i]
+            local c = i >= bpp and prev[i - bpp] or 0
+            local v = x
+            if ft == 1 then
+                v = x + a
+            elseif ft == 2 then
+                v = x + b
+            elseif ft == 3 then
+                v = x + (a + b) // 2
+            elseif ft == 4 then
+                local pa = math.abs(b - c)
+                local pb = math.abs(a - c)
+                local pc = math.abs(a + b - 2 * c)
+                local pr = c
+                if pa <= pb and pa <= pc then
+                    pr = a
+                elseif pb <= pc then
+                    pr = b
+                end
+                v = x + pr
+            end
+            cur[i] = v & 255
+        end
+        local row = []
+        for i = 0, rowlen - 1 do row[] = string.char(cur[i]) end
+        out[] = string.join(row, "")
+        prev, cur = cur, prev
+        p += rowlen + 1
+    end
+    return string.join(out, "")
+end
+
+local function ascii_hex(data)
+    local l = lexer("<" .. data, 1)
+    return hex_string(l).str
+end
+
+local function ascii85(data)
+    local out = []
+    local group = []
+    local i = 1
+    local n = len(data)
+    if string.sub(data, 1, 2) == "<~" then i = 3 end
+    while i <= n do
+        local b = string.byte(data, i)
+        i += 1
+        if b == 126 then break end -- ~>
+        if b == 122 and len(group) == 0 then
+            out[] = "\0\0\0\0"
+        elseif b >= 33 and b <= 117 then
+            group[] = b - 33
+            if len(group) == 5 then
+                local v = (((group[0] * 85 + group[1]) * 85 + group[2]) * 85 + group[3]) * 85 + group[4]
+                out[] = string.char((v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+                group = []
+            end
+        end
+    end
+    if len(group) > 1 then
+        local k = len(group)
+        while len(group) < 5 do group[] = 84 end
+        local v = (((group[0] * 85 + group[1]) * 85 + group[2]) * 85 + group[3]) * 85 + group[4]
+        local bytes = string.char((v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+        out[] = string.sub(bytes, 1, k - 1)
+    end
+    return string.join(out, "")
+end
+
+local function lzw(data, early)
+    local out = []
+    local dict = []
+    local function reset()
+        dict = []
+        for c = 0, 255 do dict[] = string.char(c) end
+        dict[] = "" -- 256 clear
+        dict[] = "" -- 257 end
+    end
+    reset()
+    local width = 9
+    local buf = 0
+    local cnt = 0
+    local prev = nil
+    local i = 1
+    local n = len(data)
+    while true do
+        while cnt < width and i <= n do
+            buf = ((buf << 8) | string.byte(data, i)) & 0xFFFFFF
+            cnt += 8
+            i += 1
+        end
+        if cnt < width then break end
+        cnt -= width
+        local code = (buf >> cnt) & ((1 << width) - 1)
+        if code == 256 then
+            reset()
+            width = 9
+            prev = nil
+        elseif code == 257 then
+            break
+        else
+            local entry = nil
+            if code < len(dict) then
+                entry = dict[code]
+            elseif prev ~= nil then
+                entry = prev .. string.sub(prev, 1, 1)
+            else
+                break
+            end
+            out[] = entry
+            if prev ~= nil then dict[] = prev .. string.sub(entry, 1, 1) end
+            prev = entry
+            local limit = len(dict) + (early and 1 or 0)
+            if limit >= (1 << width) and width < 12 then width += 1 end
+        end
+    end
+    return string.join(out, "")
+end
+
+-- ---- the document ------------------------------------------------------------
+
+local Doc = {}
+
+-- the object a value refers to (values that are not refs come back as they are)
+function Doc.resolve(doc, v, depth)
+    depth = depth or 0
+    while type(v) == "table" and v.ref ~= nil and depth < 32 do
+        v = doc:object(v.ref)
+        depth += 1
+    end
+    return v
+end
+
+-- the value of key k of dictionary d, resolved
+function Doc.get(doc, d, k)
+    if type(d) ~= "table" then return nil end
+    local v = d[k]
+    if v == NULL then return nil end
+    return doc:resolve(v)
+end
+
+local function as_array(v)
+    if v == nil or v == NULL then return [] end
+    if type(v) == "array" then return v end
+    return [v]
+end
+
+-- a stream's bytes, decoded (DCTDecode and JPXDecode stop the chain: the
+-- bytes are the image's file)
+function Doc.stream_data(doc, obj)
+    if type(obj) ~= "table" or obj.raw == nil then return nil end
+    if obj.decoded ~= nil then return obj.decoded end
+    local data = obj.raw
+    local filters = as_array(doc:get(obj.dict, "Filter"))
+    local parms = as_array(doc:get(obj.dict, "DecodeParms"))
+    for i, f in filters do
+        f = doc:resolve(f)
+        local p = doc:resolve(parms[i])
+        if p == NULL then p = nil end
+        if f == "/FlateDecode" or f == "/Fl" then
+            local d = compress.inflate(data, {format = "zlib"})
+            if is_error(d) then d = compress.inflate(data, {format = "raw"}) end
+            if is_error(d) then return error("pdf: a compressed stream is damaged") end
+            data = d
+            if type(p) == "table" and (doc:get(p, "Predictor") or 1) >= 10 then
+                data = png_unpredict(data, doc:get(p, "Columns") or 1, doc:get(p, "Colors") or 1,
+                    doc:get(p, "BitsPerComponent") or 8)
+            end
+        elseif f == "/ASCIIHexDecode" or f == "/AHx" then
+            data = ascii_hex(data)
+        elseif f == "/ASCII85Decode" or f == "/A85" then
+            data = ascii85(data)
+        elseif f == "/LZWDecode" or f == "/LZW" then
+            local early = true
+            if type(p) == "table" and doc:get(p, "EarlyChange") == 0 then early = false end
+            data = lzw(data, early)
+        elseif f == "/DCTDecode" or f == "/DCT" or f == "/JPXDecode" or f == "/CCITTFaxDecode" or f == "/JBIG2Decode" then
+            break -- an image's own format
+        else
+            return error("pdf: unsupported filter " .. tostring(f))
+        end
+    end
+    obj.decoded = data
+    return data
+end
+
+-- the object number n (parsed on first use) | nil
+function Doc.object(doc, n)
+    local o = doc.objects[n]
+    if o ~= nil then return o end
+    local where = doc.offsets[n]
+    if where == nil then
+        local inside = doc.in_objstm[n]
+        if inside == nil then return nil end
+        doc:load_objstm(inside)
+        return doc.objects[n]
+    end
+    doc.objects[n] = NULL -- (a reference loop finds null)
+    local l = lexer(doc.s, where)
+    -- n g obj
+    token(l)
+    token(l)
+    token(l)
+    local v = parse_value(l)
+    local save = l.pos
+    local kw = token(l)
+    if kw == "stream" and type(v) == "table" then
+        -- the data: from after the EOL to the length (or to endstream)
+        local p = l.pos
+        if string.byte(doc.s, p) == 13 then p += 1 end
+        if string.byte(doc.s, p) == 10 then p += 1 end
+        local length = v.Length
+        if type(length) == "table" and length.ref ~= nil then
+            -- an indirect length: only if it does not lead back here
+            local lo = doc.offsets[length.ref]
+            length = lo ~= nil and doc:object(length.ref) or nil
+        end
+        local stop = nil
+        if is_num(length) then
+            local e = p + math.floor(length)
+            local after = string.sub(doc.s, e, e + 12)
+            if re.match("^\\s*endstream", after) ~= nil then stop = e end
+        end
+        if stop == nil then
+            local e = string.find(doc.s, "endstream", p)
+            if e == nil then e = len(doc.s) + 1 end
+            stop = e
+            -- the EOL before endstream is not data
+            if string.byte(doc.s, stop - 1) == 10 then stop -= 1 end
+            if string.byte(doc.s, stop - 1) == 13 then stop -= 1 end
+        end
+        local st = {}
+        st.dict = v
+        st.raw = string.sub(doc.s, p, stop - 1)
+        v = st
+    else
+        l.pos = save
+    end
+    doc.objects[n] = v == nil and NULL or v
+    return doc.objects[n]
+end
+
+-- the objects packed in object stream number n
+function Doc.load_objstm(doc, n)
+    if doc.loaded_objstm[n] then return end
+    doc.loaded_objstm[n] = true
+    local st = doc:object(n)
+    local data = doc:stream_data(st)
+    if data == nil or is_error(data) then return end
+    local count = doc:get(st.dict, "N") or 0
+    local first = doc:get(st.dict, "First") or 0
+    local l = lexer(data, 1)
+    local pairs_ = []
+    for _ = 1, count do
+        local num = token(l)
+        local off = token(l)
+        if not is_num(num) or not is_num(off) then break end
+        pairs_[] = [math.floor(num), math.floor(off)]
+    end
+    for _, pr in pairs_ do
+        -- an object written plainly elsewhere in the file wins
+        if doc.objects[pr[0]] == nil and doc.offsets[pr[0]] == nil then
+            local ol = lexer(data, first + pr[1] + 1)
+            local v = parse_value(ol)
+            doc.objects[pr[0]] = v == nil and NULL or v
+        end
+    end
+end
+
+-- ---- fonts ----------------------------------------------------------------------
+
+-- glyph names → text (the common ones; uniXXXX and single letters by rule)
+local GLYPHS = {
+    space = " ", exclam = "!", quotedbl = "\"", numbersign = "#", dollar = "$", percent = "%", ampersand = "&",
+    quotesingle = "'", quoteright = "’", quoteleft = "‘", parenleft = "(", parenright = ")", asterisk = "*",
+    plus = "+", comma = ",", hyphen = "-", minus = "-", period = ".", slash = "/", colon = ":", semicolon = ";",
+    less = "<", equal = "=", greater = ">", question = "?", at = "@", bracketleft = "[", backslash = "\\",
+    bracketright = "]", asciicircum = "^", underscore = "_", grave = "`", braceleft = "{", bar = "|",
+    braceright = "}", asciitilde = "~", zero = "0", one = "1", two = "2", three = "3", four = "4", five = "5",
+    six = "6", seven = "7", eight = "8", nine = "9", bullet = "•", endash = "–", emdash = "—",
+    quotedblleft = "“", quotedblright = "”", ellipsis = "…", degree = "°", ordfeminine = "ª",
+    ordmasculine = "º", section = "§", copyright = "©", registered = "®", Euro = "€", fi = "fi", fl = "fl",
+    aacute = "á", agrave = "à", acircumflex = "â", atilde = "ã", adieresis = "ä", eacute = "é", egrave = "è",
+    ecircumflex = "ê", edieresis = "ë", iacute = "í", igrave = "ì", icircumflex = "î", idieresis = "ï",
+    oacute = "ó", ograve = "ò", ocircumflex = "ô", otilde = "õ", odieresis = "ö", uacute = "ú", ugrave = "ù",
+    ucircumflex = "û", udieresis = "ü", ccedilla = "ç", ntilde = "ñ", Aacute = "Á", Agrave = "À",
+    Acircumflex = "Â", Atilde = "Ã", Adieresis = "Ä", Eacute = "É", Egrave = "È", Ecircumflex = "Ê",
+    Iacute = "Í", Oacute = "Ó", Ocircumflex = "Ô", Otilde = "Õ", Odieresis = "Ö", Uacute = "Ú",
+    Udieresis = "Ü", Ccedilla = "Ç", Ntilde = "Ñ", nbspace = " ", sterling = "£", yen = "¥",
+}
+
+local function glyph_text(name)
+    local g = GLYPHS[name]
+    if g ~= nil then return g end
+    if len(name) == 1 then return name end
+    local u = re.match("^uni([0-9A-Fa-f]{4})", name)
+    if u ~= nil then return utf8.char(tonumber(u.groups[1], 16)) end
+    return ""
+end
+
+-- WinAnsi (the default for a simple font without ToUnicode): Latin-1 plus
+-- the 0x80..0x9F punctuation
+local WIN_80 = [
+    "€", "", "‚", "ƒ", "„", "…", "†", "‡", "ˆ", "‰", "Š", "‹", "Œ", "", "Ž", "", "", "‘", "’", "“",
+    "”", "•", "–", "—", "˜", "™", "š", "›", "œ", "", "ž", "Ÿ",
+]
+
+local function winansi(code)
+    if code >= 0x80 and code <= 0x9F then return WIN_80[code - 0x80] end
+    if code < 32 then return "" end
+    return utf8.char(code)
+end
+
+-- UTF-16BE → UTF-8
+local function utf16be(s)
+    local out = []
+    local i = 1
+    while i + 1 <= len(s) do
+        local u = string.byte(s, i) * 256 + string.byte(s, i + 1)
+        i += 2
+        if u >= 0xD800 and u <= 0xDBFF and i + 1 <= len(s) then
+            local lo = string.byte(s, i) * 256 + string.byte(s, i + 1)
+            i += 2
+            u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00)
+        end
+        out[] = utf8.char(u)
+    end
+    return string.join(out, "")
+end
+
+local function bytes_int(s)
+    local v = 0
+    for i = 1, len(s) do v = v * 256 + string.byte(s, i) end
+    return v
+end
+
+-- a ToUnicode CMap → {map = {code → text}, bytes = 1 or 2}
+local function parse_cmap(data)
+    local cm = {}
+    cm.map = {}
+    cm.bytes = 1
+    local l = lexer(data, 1)
+    local mode = nil
+    local stack = []
+    while true do
+        local t = token(l)
+        if t == nil then break end
+        if t == "begincodespacerange" then
+            mode = "space"
+            stack = []
+        elseif t == "endcodespacerange" then
+            for _, v in stack do
+                if type(v) == "table" and v.str ~= nil and len(v.str) > cm.bytes then cm.bytes = len(v.str) end
+            end
+            mode = nil
+        elseif t == "beginbfchar" then
+            mode = "char"
+            stack = []
+        elseif t == "endbfchar" then
+            local i = 0
+            while i + 1 < len(stack) do
+                local src = stack[i]
+                local dst = stack[i + 1]
+                if type(src) == "table" and type(dst) == "table" and src.str ~= nil and dst.str ~= nil then
+                    cm.map[bytes_int(src.str)] = utf16be(dst.str)
+                end
+                i += 2
+            end
+            mode = nil
+        elseif t == "beginbfrange" then
+            mode = "range"
+            stack = []
+        elseif t == "endbfrange" then
+            local i = 0
+            while i + 2 < len(stack) do
+                local lo = stack[i]
+                local hi = stack[i + 1]
+                local dst = stack[i + 2]
+                if type(lo) == "table" and type(hi) == "table" and lo.str ~= nil and hi.str ~= nil then
+                    local a = bytes_int(lo.str)
+                    local b = bytes_int(hi.str)
+                    if b - a <= 65535 then
+                        if type(dst) == "array" then
+                            for k, d in dst do
+                                if type(d) == "table" and d.str ~= nil then cm.map[a + k] = utf16be(d.str) end
+                            end
+                        elseif type(dst) == "table" and dst.str ~= nil then
+                            local base = dst.str
+                            local last = bytes_int(string.sub(base, -2))
+                            local prefix = string.sub(base, 1, -3)
+                            for c = a, b do
+                                local u = last + (c - a)
+                                cm.map[c] = utf16be(prefix .. string.char((u >> 8) & 255, u & 255))
+                            end
+                        end
+                    end
+                end
+                i += 3
+            end
+            mode = nil
+        elseif mode ~= nil then
+            if t == "[" then
+                stack[] = parse_after(l, t)
+            else
+                stack[] = t
+            end
+        end
+    end
+    return cm
+end
+
+-- what text needs to know of a font: decode(bytes) → {text, codes} and widths
+function Doc.font(doc, ref_or_dict)
+    local key = type(ref_or_dict) == "table" and ref_or_dict.ref or nil
+    if key ~= nil and doc.fonts[key] ~= nil then return doc.fonts[key] end
+    local d = doc:resolve(ref_or_dict)
+    local f = {}
+    f.bytes = 1
+    f.map = nil
+    f.encoding = nil
+    f.widths = {}
+    f.default_width = 500
+    if type(d) == "table" then
+        local subtype = doc:get(d, "Subtype")
+        if subtype == "/Type0" then
+            f.bytes = 2
+            f.default_width = 1000
+            local desc = doc:resolve(as_array(doc:get(d, "DescendantFonts"))[0])
+            if type(desc) == "table" then
+                local dw = doc:get(desc, "DW")
+                if is_num(dw) then f.default_width = dw end
+                -- W: [c [w1 w2 ...]] or [c1 c2 w]
+                local w = as_array(doc:get(desc, "W"))
+                local i = 0
+                while i < len(w) do
+                    local c = doc:resolve(w[i])
+                    local nxt = doc:resolve(w[i + 1])
+                    if type(nxt) == "array" then
+                        for k, v in nxt do
+                            v = doc:resolve(v)
+                            if is_num(v) then f.widths[math.floor(c) + k] = v end
+                        end
+                        i += 2
+                    else
+                        local width = doc:resolve(w[i + 2])
+                        if is_num(c) and is_num(nxt) and is_num(width) then
+                            for k = math.floor(c), math.floor(nxt) do f.widths[k] = width end
+                        end
+                        i += 3
+                    end
+                end
+            end
+        else
+            local first = doc:get(d, "FirstChar") or 0
+            for k, v in as_array(doc:get(d, "Widths")) do
+                v = doc:resolve(v)
+                if is_num(v) then f.widths[first + k] = v end
+            end
+            local enc = doc:get(d, "Encoding")
+            local table_ = {}
+            if type(enc) == "table" then
+                local base = doc:get(enc, "BaseEncoding")
+                f.encoding = base
+                local diffs = as_array(doc:get(enc, "Differences"))
+                local code = 0
+                for _, v in diffs do
+                    v = doc:resolve(v)
+                    if is_num(v) then
+                        code = math.floor(v)
+                    elseif is_name(v) then
+                        table_[code] = glyph_text(string.sub(v, 2))
+                        code += 1
+                    end
+                end
+            else
+                f.encoding = enc
+            end
+            f.differences = table_
+        end
+        local tu = doc:get(d, "ToUnicode")
+        if type(tu) == "table" and tu.raw ~= nil then
+            local data = doc:stream_data(tu)
+            if data ~= nil and not is_error(data) then
+                local cm = parse_cmap(data)
+                f.map = cm.map
+                if subtype ~= "/Type0" then f.bytes = 1 else f.bytes = cm.bytes > 1 and cm.bytes or 2 end
+            end
+        end
+    end
+    if key ~= nil then doc.fonts[key] = f end
+    return f
+end
+
+-- a string shown in a font → {text, width (in text space units / 1000)}
+local function show(f, s)
+    local out = []
+    local width = 0
+    local step = f.bytes
+    local i = 1
+    while i <= len(s) do
+        local code = 0
+        for k = 0, step - 1 do code = code * 256 + (string.byte(s, i + k) or 0) end
+        i += step
+        local t = nil
+        if f.map ~= nil then t = f.map[code] end
+        if t == nil and f.differences ~= nil then t = f.differences[code] end
+        if t == nil then
+            if step == 1 then t = winansi(code) else t = "" end
+        end
+        out[] = t
+        width += f.widths[code] or f.default_width
+    end
+    local r = {}
+    r.text = string.join(out, "")
+    r.width = width
+    return r
+end
+
+-- ---- text of a page -------------------------------------------------------------
+
+local function mat_mul(a, b)
+    return [
+        a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5],
+    ]
+end
+
+-- a page's inherited entry (Resources, MediaBox...)
+function Doc.inherited(doc, page, key)
+    local p = page
+    local depth = 0
+    while type(p) == "table" and depth < 64 do
+        local v = doc:get(p, key)
+        if v ~= nil then return v end
+        p = doc:get(p, "Parent")
+        depth += 1
+    end
+    return nil
+end
+
+-- the decoded content of a page (its streams joined)
+function Doc.page_content(doc, page)
+    local parts = []
+    for _, c in as_array(doc:get(page, "Contents")) do
+        local st = doc:resolve(c)
+        local data = doc:stream_data(st)
+        if data ~= nil and not is_error(data) then parts[] = data end
+    end
+    return string.join(parts, "\n")
+end
+
+-- the pieces of text a content stream shows: {text, x, y, size, width}
+local function text_runs(doc, content, resources, runs, depth)
+    if depth > 8 then return end
+    local fonts = doc:get(resources, "Font") or {}
+    local xobjects = doc:get(resources, "XObject") or {}
+    local l = lexer(content, 1)
+    local ops = []
+    local ctm = [1, 0, 0, 1, 0, 0]
+    local gstack = []
+    local tm = [1, 0, 0, 1, 0, 0]
+    local tlm = [1, 0, 0, 1, 0, 0]
+    local font = nil
+    local size = 12
+    local leading = 0
+    local tc = 0
+    local tw = 0
+    local th = 1
+    local rise = 0
+    local plain = {}
+    plain.bytes = 1
+    plain.widths = {}
+    plain.default_width = 500
+    -- one string shown: a run (its width without the spacing after its last
+    -- character), the text position moved past it
+    local function emit_one(s)
+        local f = font or plain
+        local r = show(f, s)
+        local m = mat_mul([size * th, 0, 0, size, 0, rise], mat_mul(tm, ctm))
+        local run = {}
+        run.text = r.text
+        run.x = m[4]
+        run.y = m[5]
+        run.size = math.abs(m[3]) > 0.01 and math.abs(m[3]) or math.abs(size)
+        -- the advance: glyph widths, character spacing (each glyph) and
+        -- word spacing (each single-byte space)
+        local glyphs = len(s) // f.bytes
+        local spaces = 0
+        if f.bytes == 1 then
+            for i = 1, len(s) do
+                if string.byte(s, i) == 32 then spaces += 1 end
+            end
+        end
+        local adv = (r.width / 1000 * size + tc * glyphs + tw * spaces) * th
+        local m0 = mat_mul(tm, ctm)
+        local scale = math.sqrt(m0[0] * m0[0] + m0[1] * m0[1])
+        run.width = (adv - tc * th) * scale
+        runs[] = run
+        tm = mat_mul([1, 0, 0, 1, adv, 0], tm)
+    end
+    -- (a wide character spacing is how some generators, groff for one,
+    -- space words: each character a run, and the gaps decide the spaces)
+    local function emit(s)
+        local f = font or plain
+        if math.abs(tc) > math.abs(size) * 0.1 and len(s) > f.bytes then
+            local i = 1
+            while i <= len(s) do
+                emit_one(string.sub(s, i, i + f.bytes - 1))
+                i += f.bytes
+            end
+        else
+            emit_one(s)
+        end
+    end
+    local function newline(tx, ty)
+        tlm = mat_mul([1, 0, 0, 1, tx, ty], tlm)
+        tm = tlm
+    end
+    while true do
+        local t = token(l)
+        if t == nil then break end
+        if t == "[" or t == "<<" then
+            ops[] = parse_after(l, t)
+        elseif type(t) ~= "string" or is_name(t) then
+            ops[] = t
+        else
+            -- an operator
+            if t == "BT" then
+                tm = [1, 0, 0, 1, 0, 0]
+                tlm = [1, 0, 0, 1, 0, 0]
+            elseif t == "Tf" then
+                local fname = ops[len(ops) - 2]
+                if is_name(fname) then
+                    local fref = fonts[string.sub(fname, 2)]
+                    font = fref ~= nil and doc:font(fref) or nil
+                end
+                local s = ops[len(ops) - 1]
+                if is_num(s) then size = s end
+            elseif t == "Tm" and len(ops) >= 6 then
+                local n = len(ops)
+                tm = [ops[n - 6], ops[n - 5], ops[n - 4], ops[n - 3], ops[n - 2], ops[n - 1]]
+                tlm = tm
+            elseif t == "Td" and len(ops) >= 2 then
+                newline(ops[len(ops) - 2], ops[len(ops) - 1])
+            elseif t == "TD" and len(ops) >= 2 then
+                leading = -ops[len(ops) - 1]
+                newline(ops[len(ops) - 2], ops[len(ops) - 1])
+            elseif t == "T*" then
+                newline(0, -leading)
+            elseif t == "TL" then
+                leading = ops[len(ops) - 1] or 0
+            elseif t == "Tc" then
+                tc = ops[len(ops) - 1] or 0
+            elseif t == "Tw" then
+                tw = ops[len(ops) - 1] or 0
+            elseif t == "Tz" then
+                th = (ops[len(ops) - 1] or 100) / 100
+            elseif t == "Ts" then
+                rise = ops[len(ops) - 1] or 0
+            elseif t == "Tj" then
+                local s = ops[len(ops) - 1]
+                if type(s) == "table" and s.str ~= nil then emit(s.str) end
+            elseif t == "'" then
+                newline(0, -leading)
+                local s = ops[len(ops) - 1]
+                if type(s) == "table" and s.str ~= nil then emit(s.str) end
+            elseif t == "\"" then
+                tw = ops[len(ops) - 3] or tw
+                tc = ops[len(ops) - 2] or tc
+                newline(0, -leading)
+                local s = ops[len(ops) - 1]
+                if type(s) == "table" and s.str ~= nil then emit(s.str) end
+            elseif t == "TJ" then
+                local a = ops[len(ops) - 1]
+                if type(a) == "array" then
+                    for _, e in a do
+                        if type(e) == "table" and e.str ~= nil then
+                            emit(e.str)
+                        elseif is_num(e) then
+                            -- a kerning move: thousandths of the size, leftward
+                            local dx = -e / 1000 * size * th
+                            if dx > size * 0.15 then
+                                -- a gap wide as a space: one in the text
+                                local run = {}
+                                run.text = " "
+                                local m = mat_mul(tm, ctm)
+                                run.x = m[4]
+                                run.y = m[5]
+                                run.size = size
+                                run.width = 0
+                                run.space = true
+                                runs[] = run
+                            end
+                            tm = mat_mul([1, 0, 0, 1, dx, 0], tm)
+                        end
+                    end
+                end
+            elseif t == "cm" and len(ops) >= 6 then
+                local n = len(ops)
+                ctm = mat_mul([ops[n - 6], ops[n - 5], ops[n - 4], ops[n - 3], ops[n - 2], ops[n - 1]], ctm)
+            elseif t == "q" then
+                gstack[] = ctm
+            elseif t == "Q" then
+                if len(gstack) > 0 then
+                    ctm = gstack[len(gstack) - 1]
+                    gstack = list.slice(gstack, 0, len(gstack) - 1)
+                end
+            elseif t == "Do" then
+                -- a form XObject: its own content, in this one's place
+                local xname = ops[len(ops) - 1]
+                if is_name(xname) then
+                    local x = doc:resolve(xobjects[string.sub(xname, 2)])
+                    if type(x) == "table" and x.raw ~= nil and doc:get(x.dict, "Subtype") == "/Form" then
+                        local data = doc:stream_data(x)
+                        if data ~= nil and not is_error(data) then
+                            local res = doc:get(x.dict, "Resources") or resources
+                            text_runs(doc, data, res, runs, depth + 1)
+                        end
+                    end
+                end
+            elseif t == "BI" then
+                -- an inline image: skip to EI
+                local e = string.find(content, "EI", l.pos)
+                while e ~= nil and not (is_ws(string.byte(content, e - 1)) and
+                    (e + 2 > len(content) or is_ws(string.byte(content, e + 2)))) do
+                    e = string.find(content, "EI", e + 2)
+                end
+                l.pos = e ~= nil and e + 2 or len(content) + 1
+            end
+            ops = []
+        end
+    end
+end
+
+-- runs → lines of text: grouped by their vertical position (top to bottom),
+-- left to right, a space where the gap is wide
+local function layout(runs)
+    if len(runs) == 0 then return "" end
+    local items = list.filter(runs, function(r) return r.text ~= "" end)
+    -- lines: a run joins a line whose baseline is within half its size
+    local lines = []
+    for _, r in items do
+        local placed = false
+        for _, line in lines do
+            if math.abs(line.y - r.y) <= math.max(line.size, r.size) * 0.5 then
+                line.runs[] = r
+                placed = true
+                break
+            end
+        end
+        if not placed then
+            local line = {}
+            line.y = r.y
+            line.size = r.size
+            line.runs = [r]
+            lines[] = line
+        end
+    end
+    sort.sort(lines, function(a, b) return a.y > b.y end)
+    local out = []
+    for _, line in lines do
+        local rs = line.runs
+        sort.sort(rs, function(a, b) return a.x < b.x end)
+        local parts = []
+        local last_end = nil
+        for _, r in rs do
+            if r.space then
+                if len(parts) > 0 and parts[len(parts) - 1] ~= " " then parts[] = " " end
+            else
+                if last_end ~= nil and r.x - last_end > r.size * 0.15 and len(parts) > 0 and parts[len(parts) - 1] ~= " " and
+                    not string.starts_with(r.text, " ") then
+                    parts[] = " "
+                end
+                parts[] = r.text
+                last_end = r.x + r.width
+            end
+        end
+        local text = string.trim(string.join(parts, ""))
+        text = re.gsub(" {2,}", text, " ")
+        if text ~= "" then out[] = text end
+    end
+    return string.join(out, "\n")
+end
+
+-- doc:page_text(i) → string (i from 0)
+function Doc.page_text(doc, i)
+    local page = doc.pages[i]
+    if page == nil then return error(`pdf: no page ${i}`) end
+    local runs = []
+    local resources = doc:inherited(page, "Resources") or {}
+    text_runs(doc, doc:page_content(page), resources, runs, 0)
+    return layout(runs)
+end
+
+-- doc:text() → every page's text, separated by form feeds
+function Doc.text(doc)
+    local out = []
+    for i = 0, doc.page_count - 1 do
+        local t = doc:page_text(i)
+        out[] = is_error(t) and "" or t
+    end
+    return string.join(out, "\f")
+end
+
+-- doc:page_images(i) → the images a page draws (its XObjects):
+-- {format = "jpeg", data, width, height} (a JPEG file, for libs/image) or
+-- {format = "gray", width, height, data (one byte a pixel)} for 8-bit gray,
+-- RGB and CMYK images (color turned into luminance); others skipped
+function Doc.page_images(doc, i)
+    local page = doc.pages[i]
+    if page == nil then return error(`pdf: no page ${i}`) end
+    local out = []
+    local resources = doc:inherited(page, "Resources") or {}
+    local xobjects = doc:get(resources, "XObject") or {}
+    for _, ref in xobjects do
+        local x = doc:resolve(ref)
+        if type(x) == "table" and x.raw ~= nil and doc:get(x.dict, "Subtype") == "/Image" then
+            local filters = as_array(doc:get(x.dict, "Filter"))
+            local last = doc:resolve(filters[len(filters) - 1])
+            local w = doc:get(x.dict, "Width") or 0
+            local h = doc:get(x.dict, "Height") or 0
+            local data = doc:stream_data(x)
+            if data ~= nil and not is_error(data) then
+                local img = {}
+                img.width = w
+                img.height = h
+                if last == "/DCTDecode" or last == "/DCT" then
+                    img.format = "jpeg"
+                    img.data = data
+                    out[] = img
+                elseif (doc:get(x.dict, "BitsPerComponent") or 8) == 8 then
+                    local cs = doc:get(x.dict, "ColorSpace")
+                    if type(cs) == "array" then cs = doc:resolve(cs[0]) end
+                    local nc = cs == "/DeviceRGB" and 3 or (cs == "/DeviceCMYK" and 4 or (cs == "/DeviceGray" and 1 or 0))
+                    if nc > 0 and len(data) >= w * h * nc then
+                        local px = []
+                        for k = 0, w * h - 1 do
+                            local v = 0
+                            local p = k * nc + 1
+                            if nc == 1 then
+                                v = string.byte(data, p)
+                            elseif nc == 3 then
+                                v = (299 * string.byte(data, p) + 587 * string.byte(data, p + 1) + 114 * string.byte(data, p + 2)) // 1000
+                            else
+                                local kk = string.byte(data, p + 3)
+                                local r = 255 - math.min(255, string.byte(data, p) + kk)
+                                local g = 255 - math.min(255, string.byte(data, p + 1) + kk)
+                                local b = 255 - math.min(255, string.byte(data, p + 2) + kk)
+                                v = (299 * r + 587 * g + 114 * b) // 1000
+                            end
+                            px[] = string.char(v)
+                        end
+                        img.format = "gray"
+                        img.data = string.join(px, "")
+                        out[] = img
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- ---- opening --------------------------------------------------------------------
+
+-- pdf.open(bytes) → doc | error
+function M.open(s)
+    if type(s) ~= "string" or string.find(s, "%PDF-") == nil then return error("pdf: not a PDF file") end
+    local doc = {}
+    doc.s = s
+    doc.objects = {}
+    doc.offsets = {}
+    doc.in_objstm = {}
+    doc.loaded_objstm = {}
+    doc.fonts = {}
+    for k, f in Doc do doc[k] = f end
+    -- every "n g obj": the later one wins (incremental updates)
+    for _, m in re.all("(?m)(\\d+)[ \\t\\r\\n]+(\\d+)[ \\t\\r\\n]+obj\\b", s) do
+        doc.offsets[tonumber(m.groups[1])] = m.start
+    end
+    -- the trailer: the last trailer dictionary, or a cross-reference stream's
+    local trailer = nil
+    local tpos = nil
+    local search = 1
+    while true do
+        local p = string.find(s, "trailer", search)
+        if p == nil then break end
+        tpos = p
+        search = p + 7
+    end
+    if tpos ~= nil then
+        local l = lexer(s, tpos + 7)
+        trailer = parse_value(l)
+    end
+    -- object streams, and the cross-reference streams' trailer entries
+    for n, _ in doc.offsets do
+        local o = doc:object(n)
+        if type(o) == "table" and o.raw ~= nil then
+            local ty = doc:get(o.dict, "Type")
+            if ty == "/ObjStm" then
+                -- its objects, found when asked for
+                local data = doc:stream_data(o)
+                if data ~= nil and not is_error(data) then
+                    local l = lexer(data, 1)
+                    for _ = 1, doc:get(o.dict, "N") or 0 do
+                        local num = token(l)
+                        local _ = token(l)
+                        if is_num(num) and doc.in_objstm[math.floor(num)] == nil then doc.in_objstm[math.floor(num)] = n end
+                    end
+                end
+            elseif ty == "/XRef" and (type(trailer) ~= "table" or trailer.Root == nil) then
+                trailer = o.dict
+            end
+        end
+    end
+    if type(trailer) ~= "table" or trailer.Root == nil then
+        -- no trailer: the catalog is the object of /Type /Catalog
+        for n, _ in doc.offsets do
+            local o = doc:object(n)
+            if type(o) == "table" and o.Type == "/Catalog" then
+                trailer = {}
+                local ref = {}
+                ref.ref = n
+                ref.gen = 0
+                trailer.Root = ref
+            end
+        end
+    end
+    if type(trailer) ~= "table" or trailer.Root == nil then return error("pdf: no document catalog") end
+    if trailer.Encrypt ~= nil and trailer.Encrypt ~= NULL then
+        return error("pdf: the file is encrypted (protected by a password)")
+    end
+    doc.trailer = trailer
+    doc.info = {}
+    local info = doc:get(trailer, "Info")
+    if type(info) == "table" then
+        for k, v in info do
+            v = doc:resolve(v)
+            if type(v) == "table" and v.str ~= nil then
+                local t = v.str
+                if string.sub(t, 1, 2) == "\xfe\xff" then t = utf16be(string.sub(t, 3)) end
+                doc.info[k] = t
+            end
+        end
+    end
+    -- the pages, in order
+    local catalog = doc:get(trailer, "Root")
+    local pages = []
+    local seen = {}
+    local function walk(node, depth)
+        node = doc:resolve(node)
+        if type(node) ~= "table" or depth > 64 then return end
+        local kids = doc:get(node, "Kids")
+        if kids ~= nil then
+            for _, k in as_array(kids) do
+                if type(k) == "table" and k.ref ~= nil then
+                    if not seen[k.ref] then -- (a loop in the page tree)
+                        seen[k.ref] = true
+                        walk(k, depth + 1)
+                    end
+                else
+                    walk(k, depth + 1)
+                end
+            end
+        elseif doc:get(node, "Type") == "/Page" or doc:get(node, "Contents") ~= nil then
+            pages[] = node
+        end
+    end
+    walk(doc:get(catalog, "Pages"), 0)
+    doc.pages = pages
+    doc.page_count = len(pages)
+    return doc
+end
+
+-- pdf.load(path) → doc | error
+function M.load(file_path)
+    local s = fs.read(file_path)?
+    return M.open(s)
+end
+
+return M

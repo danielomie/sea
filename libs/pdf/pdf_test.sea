@@ -1,0 +1,143 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/pdf: text and images of real PDFs (Chrome's, in testdata/) and of
+-- small ones written here, one feature each
+
+local t = require("sea/test")
+local pdf = require("./pdf")
+local compress = require("../compress/compress")
+
+-- a PDF from its objects (strings "<<...>>" or {dict, stream}) and a catalog
+-- at object 1; the cross-reference table is left out on purpose (the
+-- objects are found by scanning)
+local function build(objects, trailer_extra)
+    local parts = ["%PDF-1.7\n"]
+    for i, o in objects do
+        local body = o
+        if type(o) == "array" then
+            body = o[0] .. "\nstream\n" .. o[1] .. "\nendstream"
+        end
+        parts[] = `${i + 1} 0 obj\n${body}\nendobj\n`
+    end
+    parts[] = `trailer\n<< /Root 1 0 R ${trailer_extra or ""} >>\n%%EOF\n`
+    return string.join(parts, "")
+end
+
+-- one page whose content is c, with fonts (a resources string)
+local function one_page(content, resources, more)
+    local objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources ${resources} >>`,
+        [`<< /Length ${len(content)} >>`, content],
+    ]
+    for _, o in more or [] do objs[] = o end
+    return objs
+end
+
+local HELV = "<< /Font << /F1 5 0 R >> >>"
+local HELV_OBJ = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+local function text_of(objs, extra)
+    local doc = t.no_error(pdf.open(build(objs, extra)))
+    return t.no_error(doc:text())
+end
+
+t.describe("pdf", function()
+    t.it("reads the text of a PDF Chrome printed (Type0 fonts, ToUnicode, object streams)", function()
+        local doc = t.no_error(pdf.load("testdata/cartao.pdf"))
+        t.eq(doc.page_count, 1)
+        t.eq(doc:page_text(0), "Mercearia Bom Gosto Ltda\nCNPJ 11.222.333/0001-81\nAvenida Brasil, 455 - Santos/SP\n" ..
+            "Telefone (13) 3222-1100\nvendas@bomgosto.com.br")
+        t.eq(doc.info.Title, "card.html")
+        t.eq(doc:page_images(0), [])
+    end)
+
+    t.it("gives the images of a scanned page (a JPEG for libs/image)", function()
+        local doc = t.no_error(pdf.load("testdata/scan.pdf"))
+        t.eq(doc:page_text(0), "")
+        local imgs = doc:page_images(0)
+        t.eq(len(imgs), 1)
+        t.eq(imgs[0].format, "jpeg")
+        t.eq([imgs[0].width, imgs[0].height], [760, 320])
+        t.eq(string.sub(imgs[0].data, 1, 3), "\xff\xd8\xff")
+    end)
+
+    t.it("lays the text out in lines and spaces by position", function()
+        local c = "BT /F1 12 Tf 72 700 Td (Hello) Tj 40 0 Td (world) Tj 0 -20 Td (second line) Tj ET\n" ..
+            "BT /F1 12 Tf 72 640 Td [(Ker) 30 (ned) -400 (gap)] TJ ET"
+        t.eq(text_of(one_page(c, HELV, [HELV_OBJ])), "Hello world\nsecond line\nKerned gap")
+    end)
+
+    t.it("decodes string escapes, hex strings and WinAnsi", function()
+        local c = "BT /F1 12 Tf 72 700 Td (a\\(b\\) c\\\\d \\101\\102) Tj 0 -20 Td <4C696E6861> Tj " ..
+            "0 -20 Td (A\\347\\343o \\200 5) Tj ET"
+        t.eq(text_of(one_page(c, HELV, [HELV_OBJ])), "a(b) c\\d AB\nLinha\nAção € 5")
+    end)
+
+    t.it("follows an encoding's Differences", function()
+        local font = "<< /Type /Font /Subtype /Type1 /BaseFont /X /Encoding << /Differences [65 /aacute /space /Euro] >> >>"
+        local c = "BT /F1 12 Tf 72 700 Td (ABC) Tj ET"
+        t.eq(text_of(one_page(c, HELV, [font])), "á €")
+    end)
+
+    t.it("maps two-byte codes through a ToUnicode CMap", function()
+        local cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n" ..
+            "1 begincodespacerange <0000> <FFFF> endcodespacerange\n" ..
+                "2 beginbfchar <0001> <0050> <0002> <00E3> endbfchar\n" ..
+                    "1 beginbfrange <0010> <0012> <0061> endbfrange\n" ..
+                        "endcmap CMapName currentdict /CMap defineresource pop end end"
+        local font = "<< /Type /Font /Subtype /Type0 /BaseFont /Y /Encoding /Identity-H /ToUnicode 6 0 R " ..
+            "/DescendantFonts [<< /Type /Font /Subtype /CIDFontType2 /DW 600 >>] >>"
+        local c = "BT /F1 12 Tf 72 700 Td <0001001000110012000200100012> Tj ET"
+        t.eq(text_of(one_page(c, HELV, [font, [`<< /Length ${len(cmap)} >>`, cmap]])), "Pabcãac")
+    end)
+
+    t.it("decodes Flate and ASCIIHex streams and opens object streams", function()
+        local c = "BT /F1 12 Tf 72 700 Td (compressed) Tj ET"
+        local z = compress.deflate(c)
+        -- the font is object 7, packed in the object stream (object 5)
+        local packed = "7 0 " .. HELV_OBJ
+        local objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>",
+            [`<< /Length ${len(z)} /Filter /FlateDecode >>`, z],
+        ]
+        objs[] = [`<< /Type /ObjStm /N 1 /First 4 /Length ${len(packed)} >>`, packed]
+        local doc = t.no_error(pdf.open(build(objs)))
+        t.eq(doc:text(), "compressed")
+        t.eq(doc:object(7).BaseFont, "/Helvetica")
+        local hex = encoding.hex_encode("BT /F1 12 Tf 72 700 Td (hex) Tj ET") .. ">"
+        local objs2 = one_page("", HELV, [HELV_OBJ])
+        objs2[3] = [`<< /Length ${len(hex)} /Filter /ASCIIHexDecode >>`, hex]
+        t.eq(text_of(objs2), "hex")
+    end)
+
+    t.it("reads pages in order through the page tree", function()
+        local objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources " .. HELV .. " >>",
+            ["<< /Length 33 >>", "BT /F1 9 Tf 10 10 Td (one) Tj ET"],
+            HELV_OBJ,
+            "<< /Type /Pages /Parent 2 0 R /Kids [7 0 R] /Count 1 /Resources " .. HELV .. " >>",
+            "<< /Type /Page /Parent 6 0 R /Contents 8 0 R >>",
+            ["<< /Length 33 >>", "BT /F1 9 Tf 10 10 Td (two) Tj ET"],
+        ]
+        local doc = t.no_error(pdf.open(build(objs)))
+        t.eq(doc.page_count, 2)
+        t.eq(doc:text(), "one\ftwo") -- (the second page inherits its resources)
+    end)
+
+    t.it("refuses what it cannot read", function()
+        t.is_error(pdf.open("not a pdf"))
+        t.is_error(pdf.open("%PDF-1.4\nnothing here\n"))
+        local enc = build(one_page("", HELV, [HELV_OBJ]), "/Encrypt << /Filter /Standard /V 1 >>")
+        local e = pdf.open(enc)
+        t.is_error(e)
+        t.matches(e.message, "encrypted")
+        t.is_error(t.no_error(pdf.open(build(one_page("", HELV, [HELV_OBJ])))):page_text(5))
+    end)
+end)
