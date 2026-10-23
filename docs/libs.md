@@ -1577,10 +1577,12 @@ JPEG (`jpeg.sea`): baseline, extended sequential and progressive, 8-bit,
 Huffman coded, any chroma subsampling, restart intervals; only the
 luminance is decoded (the color components are read and dropped), and the
 EXIF orientation of a phone's photo is applied (the turns: 3, 6, 8).
-Arithmetic coding, lossless and 12-bit JPEG are refused. A JPEG decodes
-at about 3 s per MB of file in the interpreter; `scale` (2, 4 or 8, or
-`max_side` choosing it) decodes straight at that size and skips most of
-the inverse DCT, though the coded data is still read in full.
+Arithmetic coding, lossless and 12-bit JPEG are refused. The inverse DCT
+is libjpeg's accurate integer one. A big photo decodes at about 2.5 s per
+MB of file in the interpreter (1.6 s with `--jit`), a small one (a
+business card, 26 KB) in 0.05 s; `scale` (2, 4 or 8, or `max_side`
+choosing it) decodes straight at that size and skips most of the inverse
+DCT, though the coded data is still read in full.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
