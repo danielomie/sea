@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- image — grayscale images: PNG, BMP and PGM/PPM/PBM read and written,
--- ASCII art in and out, pixels, cloning.
+-- JPEG read (jpeg.sea), ASCII art in and out, pixels, cloning.
 --
 -- An Image is a table:
 --   { width = int, height = int, data = int_array(w * h), binary = bool }
@@ -10,6 +10,7 @@
 -- Color images are read as their luminance (an alpha channel over white).
 
 local compress = require("../compress/compress")
+local jpeg = require("./jpeg")
 
 local M = {}
 
@@ -736,10 +737,26 @@ function M.save_png(img, file_path)
     return fs.write(file_path, M.encode_png(img))
 end
 
--- image.decode(bytes) → Image|error (auto-detects PNG, BMP, PNM)
-function M.decode(bytes)
+-- image.decode_jpeg(bytes [, opts]) → Image|error: a JPEG's luminance.
+-- opts: scale (1, 2, 4, 8: decoded that many times smaller, and faster),
+-- max_side (the smallest scale that fits), orient (false: ignore EXIF)
+function M.decode_jpeg(bytes, opts)
+    local j = jpeg.decode(bytes, opts)?
+    local img = M.new(0, 0)
+    img.width = j.width
+    img.height = j.height
+    img.data = j.data
+    return img
+end
+
+-- image.decode(bytes [, opts]) → Image|error (auto-detects PNG, BMP, PNM,
+-- JPEG; opts go to decode_jpeg)
+function M.decode(bytes, opts)
     if len(bytes) < 2 then
         return error("image.decode: empty or truncated image buffer")
+    end
+    if string.sub(bytes, 1, 3) == "\xff\xd8\xff" then
+        return M.decode_jpeg(bytes, opts)
     end
     if len(bytes) >= 8 and string.sub(bytes, 1, 8) == "\x89PNG\r\n\x1a\n" then
         return M.decode_png(bytes)
@@ -750,15 +767,14 @@ function M.decode(bytes)
         if c2 >= "1" and c2 <= "6" then
             return M.decode_pnm(bytes)
         end
-
     end
-    return error("image.decode: unsupported image format (expected PNG, BMP, or PNM/PGM/PPM/PBM)")
+    return error("image.decode: unsupported image format (expected PNG, BMP, JPEG or PNM/PGM/PPM/PBM)")
 end
 
--- image.load(file_path) → Image|error
-function M.load(file_path)
+-- image.load(file_path [, opts]) → Image|error
+function M.load(file_path, opts)
     local bytes = fs.read(file_path)?
-    return M.decode(bytes)
+    return M.decode(bytes, opts)
 end
 
 return M

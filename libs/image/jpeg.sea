@@ -1,0 +1,762 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- jpeg — JPEG decoding into libs/image's grayscale images, in pure Sea.
+--
+--   jpeg.decode(bytes [, opts]) → {width, height, data} | error
+--     opts.scale: 1 (default), 2, 4 or 8: the image comes out that many
+--       times smaller, decoded straight at that size (a 4000×3000 photo at
+--       scale 4 is 1000×750, about ten times faster than in full)
+--     opts.max_side: pick the smallest scale whose longest side fits
+--     opts.orient: false ignores the EXIF orientation (default: applied, as
+--       a phone's photo is often stored sideways with a tag saying so)
+--
+-- Baseline and extended sequential JPEG (SOF0/SOF1, Huffman, 8-bit) and
+-- progressive JPEG (SOF2); any chroma subsampling; restart intervals. Only
+-- the luminance is decoded (the images are grayscale): the color
+-- components' coefficients are read and dropped. Arithmetic coding,
+-- lossless and 12-bit JPEG are refused.
+
+local M = {}
+
+local ZIGZAG = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7,
+    14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60,
+    61, 54, 47, 55, 62, 63,
+]
+
+-- the reduced inverse DCT of each output size n (8, 4, 2): T[x * n + u] =
+-- C(u) · cos((2x + 1)uπ / 2n) / 2, so a row pass and a column pass give the
+-- JPEG IDCT's 1/4 (and n < 8 evaluates the low frequencies on a coarser
+-- grid: the block shrunk by 8/n, as libjpeg's scaled decoding)
+local IDCT = {}
+for _, n in [8, 4, 2] do
+    local t = []
+    for x = 0, n - 1 do
+        for u = 0, n - 1 do
+            local c = u == 0 and (1 / math.sqrt(2)) or 1
+            t[] = c * math.cos((2 * x + 1) * u * math.pi / (2 * n)) / 2
+        end
+    end
+    IDCT[n] = t
+end
+
+local function u16(s, i)
+    return string.byte(s, i) * 256 + string.byte(s, i + 1)
+end
+
+-- ---- Huffman tables -------------------------------------------------------
+
+-- a table from its 16 counts and symbols: a 9-bit lookup (fast[code] =
+-- length * 256 + symbol, 0 when longer) and, for longer codes, maxcode /
+-- valptr / mincode per length (the canonical decoding of the JPEG spec)
+local function huffman(counts, symbols)
+    local h = {}
+    h.symbols = symbols
+    h.fast = int_array(512)
+    for _ = 0, 511 do h.fast[] = 0 end
+    h.maxcode = []
+    h.valptr = []
+    h.mincode = []
+    local code = 0
+    local k = 0
+    for l = 1, 16 do
+        local n = counts[l - 1]
+        h.valptr[] = k
+        h.mincode[] = code
+        if n > 0 then
+            for _ = 1, n do
+                if l <= 9 then
+                    local shift = 9 - l
+                    local base = code << shift
+                    for f = 0, (1 << shift) - 1 do h.fast[base + f] = l * 256 + symbols[k] end
+                end
+                code += 1
+                k += 1
+            end
+            h.maxcode[] = code - 1
+        else
+            h.maxcode[] = -1
+        end
+        code = code << 1
+    end
+    return h
+end
+
+-- ---- the entropy-coded data -------------------------------------------------
+
+-- a bit reader over the scan data from byte pos (1-based): byte stuffing
+-- (FF 00) removed; a marker stops the bits (zeros are fed past it)
+local function reader(s, pos)
+    local r = {}
+    r.s = s
+    r.pos = pos
+    r.buf = 0
+    r.cnt = 0
+    r.marker = nil
+    return r
+end
+
+local function fill(r)
+    while r.cnt <= 24 do
+        local b = 0
+        if r.marker == nil and r.pos <= len(r.s) then
+            b = string.byte(r.s, r.pos)
+            if b == 0xFF then
+                local nxt = string.byte(r.s, r.pos + 1) or 0
+                if nxt == 0 then
+                    r.pos += 2
+                elseif nxt == 0xFF then
+                    r.pos += 1 -- fill bytes before a marker
+                    b = 0
+                    continue
+                else
+                    r.marker = nxt
+                    b = 0
+                end
+            else
+                r.pos += 1
+            end
+        end
+        r.buf = ((r.buf << 8) | b) & 0xFFFFFFFFFF
+        r.cnt += 8
+    end
+end
+
+local function bits(r, n)
+    if n == 0 then return 0 end
+    if r.cnt < n then fill(r) end
+    r.cnt -= n
+    return (r.buf >> r.cnt) & ((1 << n) - 1)
+end
+
+local function bit(r)
+    if r.cnt < 1 then fill(r) end
+    r.cnt -= 1
+    return (r.buf >> r.cnt) & 1
+end
+
+local function decode_symbol(r, h)
+    if r.cnt < 16 then fill(r) end
+    local look = (r.buf >> (r.cnt - 9)) & 511
+    local f = h.fast[look]
+    if f ~= 0 then
+        r.cnt -= f >> 8
+        return f & 255
+    end
+    -- longer than 9 bits: one bit at a time
+    local code = bits(r, 9)
+    for l = 10, 16 do
+        code = (code << 1) | bit(r)
+        if code <= h.maxcode[l - 1] then
+            return h.symbols[h.valptr[l - 1] + code - h.mincode[l - 1]]
+        end
+    end
+    return error("jpeg: bad Huffman code")
+end
+
+-- the value of an n-bit magnitude (the JPEG "extend")
+local function extend(v, n)
+    if n == 0 then return 0 end
+    if v < (1 << (n - 1)) then return v - (1 << n) + 1 end
+    return v
+end
+
+-- past a restart marker: the bits start over at the next byte
+local function restart(r)
+    if r.marker ~= nil and r.marker >= 0xD0 and r.marker <= 0xD7 then
+        r.pos += 2
+    else
+        -- the marker was not seen yet: find it
+        while r.pos < len(r.s) do
+            if string.byte(r.s, r.pos) == 0xFF then
+                local m = string.byte(r.s, r.pos + 1)
+                if m >= 0xD0 and m <= 0xD7 then
+                    r.pos += 2
+                    break
+                end
+            end
+            r.pos += 1
+        end
+    end
+    r.buf = 0
+    r.cnt = 0
+    r.marker = nil
+end
+
+-- ---- the frame ---------------------------------------------------------------
+
+-- the output block of one component's coefficients (64, natural order,
+-- dequantized) into the plane at (bx, by) in blocks, n × n pixels a block
+local function idct_block(coef, plane, pw, ph, bx, by, n)
+    local x0 = bx * n
+    local y0 = by * n
+    if n == 1 then
+        if x0 < pw and y0 < ph then
+            local v = math.floor(coef[0] / 8 + 128.5)
+            plane[y0 * pw + x0] = v < 0 and 0 or (v > 255 and 255 or v)
+        end
+        return
+    end
+    local t = IDCT[n]
+    -- rows: tmp[y * n + x] from the n low frequencies of row v
+    local tmp = []
+    for v = 0, n - 1 do
+        local row = v * 8
+        for x = 0, n - 1 do
+            local s = 0.0
+            local ti = x * n
+            for u = 0, n - 1 do s += t[ti + u] * coef[row + u] end
+            tmp[] = s
+        end
+    end
+    -- columns
+    for y = 0, n - 1 do
+        local py = y0 + y
+        if py < ph then
+            local ti = y * n
+            local line = py * pw
+            for x = 0, n - 1 do
+                local px = x0 + x
+                if px < pw then
+                    local s = 0.0
+                    for v = 0, n - 1 do s += t[ti + v] * tmp[v * n + x] end
+                    local p = math.floor(s + 128.5)
+                    plane[line + px] = p < 0 and 0 or (p > 255 and 255 or p)
+                end
+            end
+        end
+    end
+end
+
+-- the EXIF orientation of an APP1 segment (1 when none)
+local function exif_orientation(s, start, length)
+    if string.sub(s, start, start + 5) ~= "Exif\0\0" then return 1 end
+    local t = start + 6 -- the TIFF header
+    local le = string.sub(s, t, t + 1) == "II"
+    local function r16(i)
+        local a, b = string.byte(s, i), string.byte(s, i + 1)
+        if a == nil or b == nil then return 0 end
+        return le and (b * 256 + a) or (a * 256 + b)
+    end
+    local function r32(i)
+        return le and (r16(i + 2) * 65536 + r16(i)) or (r16(i) * 65536 + r16(i + 2))
+    end
+    local ifd = t + r32(t + 4)
+    local n = r16(ifd)
+    for k = 0, n - 1 do
+        local e = ifd + 2 + k * 12
+        if e + 12 > start + length then break end
+        if r16(e) == 0x0112 then return r16(e + 8) end
+    end
+    return 1
+end
+
+-- an image turned per an EXIF orientation (only the turns: 3, 6, 8; the
+-- mirrored ones are rare and kept as they are)
+local function orient(img, o)
+    if o ~= 3 and o ~= 6 and o ~= 8 then return img end
+    local w, h = img.width, img.height
+    local src = img.data
+    local out = int_array(w * h)
+    for _ = 0, w * h - 1 do out[] = 0 end
+    local nw, nh = w, h
+    if o == 6 or o == 8 then
+        nw, nh = h, w
+    end
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local v = src[y * w + x]
+            if o == 3 then
+                out[(h - 1 - y) * w + (w - 1 - x)] = v
+            elseif o == 6 then -- 90° clockwise
+                out[x * nw + (nw - 1 - y)] = v
+            else
+                -- 90° counter-clockwise
+                out[(nh - 1 - x) * nw + y] = v
+            end
+        end
+    end
+    local r = {}
+    r.width = nw
+    r.height = nh
+    r.data = out
+    return r
+end
+
+-- jpeg.decode(bytes [, opts]) → {width, height, data} | error
+function M.decode(s, opts)
+    opts = opts or {}
+    if type(s) ~= "string" or string.sub(s, 1, 2) ~= "\xff\xd8" then return error("jpeg: not a JPEG file") end
+    local qt = {}
+    local dc_tables = {}
+    local ac_tables = {}
+    local frame = nil
+    local restart_interval = 0
+    local orientation = 1
+    local pos = 3
+    local progressive = false
+    local done = false
+    while not done and pos < len(s) do
+        if string.byte(s, pos) ~= 0xFF then
+            pos += 1 -- garbage between segments
+            continue
+        end
+        local m = string.byte(s, pos + 1)
+        if m == 0xFF then
+            pos += 1
+            continue
+        end
+        if m == 0xD8 or (m >= 0xD0 and m <= 0xD7) or m == 0x01 then
+            pos += 2
+            continue
+        end
+        if m == 0xD9 then break end
+        do
+            local length = u16(s, pos + 2)
+            local seg = pos + 4           -- the segment's data
+            local stop = pos + 2 + length -- the byte after it
+            if m == 0xDB then             -- DQT
+                local p = seg
+                while p < stop do
+                    local pq = string.byte(s, p) >> 4
+                    local id = string.byte(s, p) & 15
+                    p += 1
+                    local q = int_array(64)
+                    for _ = 0, 63 do q[] = 0 end
+                    for k = 0, 63 do
+                        local v = 0
+                        if pq == 0 then
+                            v = string.byte(s, p)
+                            p += 1
+                        else
+                            v = u16(s, p)
+                            p += 2
+                        end
+                        q[ZIGZAG[k]] = v
+                    end
+                    qt[id] = q
+                end
+            elseif m == 0xC4 then -- DHT
+                local p = seg
+                while p < stop do
+                    local tc = string.byte(s, p) >> 4
+                    local id = string.byte(s, p) & 15
+                    local counts = []
+                    local total = 0
+                    for l = 0, 15 do
+                        counts[] = string.byte(s, p + 1 + l)
+                        total += counts[l]
+                    end
+                    local symbols = []
+                    for k = 0, total - 1 do symbols[] = string.byte(s, p + 17 + k) end
+                    p += 17 + total
+                    if tc == 0 then dc_tables[id] = huffman(counts, symbols) else ac_tables[id] = huffman(counts, symbols) end
+                end
+            elseif m == 0xC0 or m == 0xC1 or m == 0xC2 then
+                if string.byte(s, seg) ~= 8 then return error("jpeg: only 8-bit samples are read") end
+                progressive = m == 0xC2
+                frame = {}
+                frame.height = u16(s, seg + 1)
+                frame.width = u16(s, seg + 3)
+                local nc = string.byte(s, seg + 5)
+                frame.comps = []
+                frame.hmax = 1
+                frame.vmax = 1
+                for c = 0, nc - 1 do
+                    local p = seg + 6 + c * 3
+                    local comp = {}
+                    comp.id = string.byte(s, p)
+                    comp.h = string.byte(s, p + 1) >> 4
+                    comp.v = string.byte(s, p + 1) & 15
+                    comp.tq = string.byte(s, p + 2)
+                    frame.comps[] = comp
+                    if comp.h > frame.hmax then frame.hmax = comp.h end
+                    if comp.v > frame.vmax then frame.vmax = comp.v end
+                end
+                if frame.width == 0 or frame.height == 0 then return error("jpeg: the image has no size") end
+                frame.mcux = (frame.width + 8 * frame.hmax - 1) // (8 * frame.hmax)
+                frame.mcuy = (frame.height + 8 * frame.vmax - 1) // (8 * frame.vmax)
+                for _, comp in frame.comps do
+                    comp.bw = frame.mcux * comp.h -- blocks per line, padded to whole MCUs
+                    comp.bh = frame.mcuy * comp.v
+                    comp.pred = 0
+                    comp.eobrun = 0
+                end
+                -- the luminance is the first component
+                local y = frame.comps[0]
+                y.keep = true
+                if progressive then
+                    -- every coefficient of the luminance, kept across scans
+                    y.coefs = int_array(y.bw * y.bh * 64)
+                    for _ = 0, y.bw * y.bh * 64 - 1 do y.coefs[] = 0 end
+                end
+                -- the output size: scale 1, 2, 4 or 8
+                local scale = opts.scale or 1
+                if opts.max_side ~= nil then
+                    scale = 1
+                    while scale < 8 and math.max(frame.width, frame.height) // scale > opts.max_side do scale *= 2 end
+                end
+                if scale ~= 1 and scale ~= 2 and scale ~= 4 and scale ~= 8 then
+                    return error("jpeg: scale is 1, 2, 4 or 8")
+                end
+                frame.n = 8 // scale
+                -- the luminance plane, n pixels a block
+                y.pw = (frame.width * y.h // frame.hmax + scale - 1) // scale
+                y.ph = (frame.height * y.v // frame.vmax + scale - 1) // scale
+                y.plane = int_array(y.pw * y.ph)
+                for _ = 0, y.pw * y.ph - 1 do y.plane[] = 255 end
+                frame.scale = scale
+            elseif m == 0xC3 or (m >= 0xC5 and m <= 0xCF and m ~= 0xC8 and m ~= 0xCC) then
+                return error("jpeg: this kind of JPEG is not read (lossless, hierarchical or arithmetic coding)")
+            elseif m == 0xDD then -- DRI
+                restart_interval = u16(s, seg)
+            elseif m == 0xE1 then -- APP1: Exif
+                local o = exif_orientation(s, seg, length - 2)
+                if o > 1 then orientation = o end
+            elseif m == 0xDA then -- SOS
+                if frame == nil then return error("jpeg: a scan before the frame") end
+                local ns = string.byte(s, seg)
+                local scomps = []
+                for k = 0, ns - 1 do
+                    local cid = string.byte(s, seg + 1 + k * 2)
+                    local tables = string.byte(s, seg + 2 + k * 2)
+                    local comp = nil
+                    for _, c in frame.comps do
+                        if c.id == cid then comp = c end
+                    end
+                    if comp == nil then return error("jpeg: a scan of an unknown component") end
+                    comp.dc = dc_tables[tables >> 4]
+                    comp.ac = ac_tables[tables & 15]
+                    scomps[] = comp
+                end
+                local p = seg + 1 + ns * 2
+                local ss = string.byte(s, p)
+                local se = string.byte(s, p + 1)
+                local ah = string.byte(s, p + 2) >> 4
+                local al = string.byte(s, p + 2) & 15
+                local r = reader(s, stop)
+                local ok = nil
+                if progressive then
+                    ok = M._scan_progressive(r, frame, scomps, ss, se, ah, al, restart_interval)
+                else
+                    ok = M._scan_baseline(r, frame, scomps, qt, restart_interval)
+                end
+                if is_error(ok) then return ok end
+                -- the next marker: where the bits stopped
+                pos = r.pos
+                while pos < len(s) and not (string.byte(s, pos) == 0xFF and string.byte(s, pos + 1) ~= 0 and
+                    not (string.byte(s, pos + 1) >= 0xD0 and string.byte(s, pos + 1) <= 0xD7)) do
+                    pos += 1
+                end
+                continue
+            end
+            pos = stop
+        end
+    end
+    if frame == nil then return error("jpeg: no image in the file") end
+    local y = frame.comps[0]
+    if progressive then
+        -- every scan read: the luminance's blocks out
+        local q = qt[y.tq]
+        if q == nil then return error("jpeg: a quantization table is missing") end
+        local coef = int_array(64)
+        for _ = 0, 63 do coef[] = 0 end
+        local bw = (y.pw * frame.scale + 7) // 8
+        local bh = (y.ph * frame.scale + 7) // 8
+        for by = 0, math.min(bh, y.bh) - 1 do
+            for bx = 0, math.min(bw, y.bw) - 1 do
+                local base = (by * y.bw + bx) * 64
+                for k = 0, 63 do coef[k] = y.coefs[base + k] * q[k] end
+                idct_block(coef, y.plane, y.pw, y.ph, bx, by, frame.n)
+            end
+        end
+    end
+    local img = {}
+    img.width = y.pw
+    img.height = y.ph
+    img.data = y.plane
+    -- (a luminance sampled below the others: stretched to the frame's size)
+    local fw = (frame.width + frame.scale - 1) // frame.scale
+    local fh = (frame.height + frame.scale - 1) // frame.scale
+    if y.pw ~= fw or y.ph ~= fh then
+        local out = int_array(fw * fh)
+        for yy = 0, fh - 1 do
+            local sy = yy * y.ph // fh
+            for xx = 0, fw - 1 do out[] = y.plane[sy * y.pw + xx * y.pw // fw] end
+        end
+        img.width = fw
+        img.height = fh
+        img.data = out
+    end
+    if opts.orient ~= false then img = orient(img, orientation) end
+    return img
+end
+
+-- ---- sequential scans ---------------------------------------------------------
+
+-- one block's coefficients (natural order) into coef, dequantized; for a
+-- dropped component (coef nil) only read
+local function read_block(r, comp, coef, q)
+    local t = decode_symbol(r, comp.dc)?
+    local diff = extend(bits(r, t), t)
+    comp.pred += diff
+    if coef ~= nil then
+        for k = 0, 63 do coef[k] = 0 end
+        coef[0] = comp.pred * q[0]
+    end
+    local k = 1
+    while k < 64 do
+        local rs = decode_symbol(r, comp.ac)?
+        local run = rs >> 4
+        local size = rs & 15
+        if size == 0 then
+            if run ~= 15 then break end -- end of block
+            k += 16
+        else
+            k += run
+            if k > 63 then return error("jpeg: bad coefficient run") end
+            local v = extend(bits(r, size), size)
+            if coef ~= nil then
+                local z = ZIGZAG[k]
+                coef[z] = v * q[z]
+            end
+            k += 1
+        end
+    end
+    return true
+end
+
+function M._scan_baseline(r, frame, scomps, qt, restart_interval)
+    local coef = int_array(64)
+    for _ = 0, 63 do coef[] = 0 end
+    for _, c in scomps do c.pred = 0 end
+    local single = len(scomps) == 1
+    local y = frame.comps[0]
+    local q = qt[y.tq]
+    if q == nil then return error("jpeg: a quantization table is missing") end
+    -- the blocks of the luminance that reach the output (padding blocks are read, not drawn)
+    local n = frame.n
+    local bw_out = (y.pw + n - 1) // n
+    local bh_out = (y.ph + n - 1) // n
+    local units = 0
+    local function block(c, bx, by)
+        if c.keep and bx < bw_out and by < bh_out then
+            local _ = read_block(r, c, coef, q)?
+            idct_block(coef, y.plane, y.pw, y.ph, bx, by, n)
+        else
+            local _ = read_block(r, c, nil, nil)?
+        end
+        return true
+    end
+    if single then
+        -- one component, not interleaved: its own blocks, no MCU padding
+        local c = scomps[0]
+        local w = (frame.width * c.h // frame.hmax + 7) // 8
+        local h = (frame.height * c.v // frame.vmax + 7) // 8
+        for by = 0, h - 1 do
+            for bx = 0, w - 1 do
+                if restart_interval > 0 and units > 0 and units % restart_interval == 0 then
+                    restart(r)
+                    c.pred = 0
+                end
+                local _ = block(c, bx, by)?
+                units += 1
+            end
+        end
+        return true
+    end
+    for my = 0, frame.mcuy - 1 do
+        for mx = 0, frame.mcux - 1 do
+            if restart_interval > 0 and units > 0 and units % restart_interval == 0 then
+                restart(r)
+                for _, c in scomps do c.pred = 0 end
+            end
+            for _, c in scomps do
+                for v = 0, c.v - 1 do
+                    for h = 0, c.h - 1 do
+                        local _ = block(c, mx * c.h + h, my * c.v + v)?
+                    end
+                end
+            end
+            units += 1
+        end
+    end
+    return true
+end
+
+-- ---- progressive scans ---------------------------------------------------------
+
+-- the coefficients of one block (zigzag positions ss..se) for a progressive
+-- scan; coefs nil for a dropped component
+local function prog_block(r, c, coefs, base, ss, se, ah, al)
+    if ss == 0 then
+        -- DC: first pass or refinement
+        if ah == 0 then
+            local t = decode_symbol(r, c.dc)?
+            c.pred += extend(bits(r, t), t)
+            if coefs ~= nil then coefs[base] = c.pred << al end
+        else
+            local b = bit(r)
+            if coefs ~= nil and b == 1 then coefs[base] = coefs[base] | (1 << al) end
+        end
+        return true
+    end
+    if ah == 0 then
+        -- AC first pass
+        if c.eobrun > 0 then
+            c.eobrun -= 1
+            return true
+        end
+        local k = ss
+        while k <= se do
+            local rs = decode_symbol(r, c.ac)?
+            local run = rs >> 4
+            local size = rs & 15
+            if size == 0 then
+                if run < 15 then
+                    c.eobrun = (1 << run) - 1
+                    if run > 0 then c.eobrun += bits(r, run) end
+                    break
+                end
+                k += 16
+            else
+                k += run
+                if k > 63 then return error("jpeg: bad coefficient run") end
+                local v = extend(bits(r, size), size)
+                if coefs ~= nil then coefs[base + ZIGZAG[k]] = v * (1 << al) end
+                k += 1
+            end
+        end
+        return true
+    end
+    -- AC refinement: one more bit for the coefficients already nonzero,
+    -- and new ones of magnitude 1 << al
+    local p1 = 1 << al
+    local m1 = -1 << al
+    local k = ss
+    -- (for a dropped component coefs is its own record: the refinement bits
+    -- depend on which coefficients are already nonzero)
+    -- (the refinement of a nonzero coefficient is inlined below: this is the
+    -- hottest loop of a progressive JPEG)
+    local known = coefs
+    if c.eobrun <= 0 then
+        while k <= se do
+            local rs = decode_symbol(r, c.ac)?
+            local run = rs >> 4
+            local size = rs & 15
+            local value = 0
+            if size == 0 then
+                if run < 15 then
+                    c.eobrun = (1 << run)
+                    if run > 0 then c.eobrun += bits(r, run) end
+                    break
+                end
+            else
+                value = bit(r) == 1 and p1 or m1
+            end
+            while k <= se do
+                local i = base + ZIGZAG[k]
+                local cur = known[i]
+                if cur ~= 0 then
+                    if r.cnt < 1 then fill(r) end
+                    r.cnt -= 1
+                    if (r.buf >> r.cnt) & 1 == 1 and (cur & p1) == 0 then
+                        known[i] = cur >= 0 and cur + p1 or cur + m1
+                    end
+                else
+                    if run == 0 then
+                        if value ~= 0 then known[i] = value end
+                        k += 1
+                        break
+                    end
+                    run -= 1
+                end
+                k += 1
+            end
+        end
+    end
+    if c.eobrun > 0 then
+        -- the rest of the band in an end-of-band run: only refinements
+        while k <= se do
+            local i = base + ZIGZAG[k]
+            local cur = known[i]
+            if cur ~= 0 then
+                if r.cnt < 1 then fill(r) end
+                r.cnt -= 1
+                if (r.buf >> r.cnt) & 1 == 1 and (cur & p1) == 0 then
+                    known[i] = cur >= 0 and cur + p1 or cur + m1
+                end
+            end
+            k += 1
+        end
+        c.eobrun -= 1
+    end
+    return true
+end
+
+function M._scan_progressive(r, frame, scomps, ss, se, ah, al, restart_interval)
+    for _, c in scomps do
+        c.pred = 0
+        c.eobrun = 0
+    end
+    local units = 0
+    local function coefs_of(c)
+        if c.keep then return c.coefs end
+        -- a dropped component needs its coefficients only to refine AC
+        -- bands (the nonzero ones decide how the bits are read)
+        if ss > 0 then
+            if c.shadow == nil then
+                c.shadow = int_array(c.bw * c.bh * 64)
+                for _ = 0, c.bw * c.bh * 64 - 1 do c.shadow[] = 0 end
+            end
+            return c.shadow
+        end
+        return nil
+    end
+    if len(scomps) == 1 then
+        local c = scomps[0]
+        local coefs = coefs_of(c)
+        local w = (frame.width * c.h // frame.hmax + 7) // 8
+        local h = (frame.height * c.v // frame.vmax + 7) // 8
+        for by = 0, h - 1 do
+            for bx = 0, w - 1 do
+                if restart_interval > 0 and units > 0 and units % restart_interval == 0 then
+                    restart(r)
+                    c.pred = 0
+                    c.eobrun = 0
+                end
+                local _ = prog_block(r, c, coefs, (by * c.bw + bx) * 64, ss, se, ah, al)?
+                units += 1
+            end
+        end
+        return true
+    end
+    -- interleaved: DC scans only
+    local ccoefs = list.map(scomps, coefs_of)
+    for my = 0, frame.mcuy - 1 do
+        for mx = 0, frame.mcux - 1 do
+            if restart_interval > 0 and units > 0 and units % restart_interval == 0 then
+                restart(r)
+                for _, c in scomps do
+                    c.pred = 0
+                    c.eobrun = 0
+                end
+            end
+            for ci, c in scomps do
+                local coefs = ccoefs[ci]
+                for v = 0, c.v - 1 do
+                    for h = 0, c.h - 1 do
+                        local bx = mx * c.h + h
+                        local by = my * c.v + v
+                        local _ = prog_block(r, c, coefs, (by * c.bw + bx) * 64, ss, se, ah, al)?
+                    end
+                end
+            end
+            units += 1
+        end
+    end
+    return true
+end
+
+return M

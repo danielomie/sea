@@ -1550,14 +1550,15 @@ print(template.render("{{#bold}}hi {{who}}{{/bold}}", data))   -- <b>hi world</b
 ## `image`
 
 Grayscale images in pure Sea: PNG, BMP and PGM/PPM/PBM read and written,
-ASCII art in and out. Used by the OCR and QR code libraries. PNG goes
+JPEG read, ASCII art in and out. Used by the OCR and QR code libraries. PNG goes
 through `libs/compress` (build it with `make -C libs/compress`); the other
 formats need nothing.
 
 ```sea
 local image = require("image")
 
-local img = image.load("scan.png")?             -- PNG, BMP or PNM, by content
+local img = image.load("scan.png")?             -- PNG, BMP, PNM or JPEG, by content
+local photo = image.load("foto.jpg", {max_side = 2000})?   -- a big JPEG decoded smaller
 print(img.width, img.height, img:get(10, 20))   -- 0 (black) .. 255 (white)
 img:set(0, 0, 0)
 img:save("copy.bmp")?                           -- the format by extension
@@ -1571,12 +1572,22 @@ black and white. Color files are read as their luminance (an alpha channel
 is composed over white); 1-bit and 8-bit PNG (gray, RGB, palette, with
 alpha), 1/8/24/32-bit BMP and P1–P6 PNM are read.
 
+JPEG (`jpeg.sea`): baseline, extended sequential and progressive, 8-bit,
+Huffman coded, any chroma subsampling, restart intervals; only the
+luminance is decoded (the color components are read and dropped), and the
+EXIF orientation of a phone's photo is applied (the turns: 3, 6, 8).
+Arithmetic coding, lossless and 12-bit JPEG are refused. A JPEG decodes
+at about 3 s per MB of file in the interpreter; `scale` (2, 4 or 8, or
+`max_side` choosing it) decodes straight at that size and skips most of
+the inverse DCT, though the coded data is still read in full.
+
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `image.new` | `new(width, height [, fill]) → image` | A new image (`fill` default 255, white) |
-| `image.load` | `load(path) → image\|error` | Read a file (the format is detected from its bytes) |
-| `image.decode` | `decode(bytes) → image\|error` | The same, from a string |
+| `image.load` | `load(path [, opts]) → image\|error` | Read a file (the format is detected from its bytes; `opts` go to `decode_jpeg`) |
+| `image.decode` | `decode(bytes [, opts]) → image\|error` | The same, from a string |
 | `image.decode_png`, `decode_bmp`, `decode_pnm` | `decode_png(bytes) → image\|error` | One format |
+| `image.decode_jpeg` | `decode_jpeg(bytes [, opts]) → image\|error` | A JPEG's luminance. `opts`: `scale` (1, 2, 4, 8: that many times smaller), `max_side` (the smallest scale whose longest side fits), `orient` (`false` ignores the EXIF orientation) |
 | `image.encode_png`, `encode_bmp`, `encode_pgm`, `encode_pbm` | `encode_png(img) → string` | Encode (PBM: pixels below 128 are black) |
 | `image.save_png`, `save_bmp`, `save_pgm`, `save_pbm` | `save_png(img, path) → true\|error` | Encode and write |
 | `image.from_ascii` | `from_ascii(art [, opts]) → image` | One pixel per character: `.` ` ` `0` white; `#` `@` `█` `1` `*` black; `%` `▓` dark, `+` `=` `▒` mid, `-` `:` `░` light gray; anything else black. `opts`: `scale` (pixels per character, default 1), `pad` (white border), `binary` (every character but `.` ` ` `0` black). Empty first and last lines are dropped |

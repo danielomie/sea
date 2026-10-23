@@ -1,0 +1,46 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- JPEG decoding in libs/image (jpeg.sea): a baseline JPEG (a business card
+-- Chrome rendered, 4:2:0 color) read as its luminance, at full size and
+-- scaled down, its EXIF orientation applied, and bad input refused.
+
+local image = require("image")
+
+local bytes = fs.read(path.join(path.dirname(os.args[0] or "tests/unit/157_jpeg.sea"), "157_jpeg_card.jpg"))
+if is_error(bytes) then bytes = fs.read("tests/unit/157_jpeg_card.jpg") end
+local img = image.decode(bytes)
+print("size", img.width, img.height)
+print("background white", img:get(5, 5) > 245, img:get(700, 300) > 245)
+
+-- the text is dark: the first line's ink, between y 30 and 65
+local dark = 0
+for y = 30, 65 do
+    for x = 30, 540 do
+        if img:get(x, y) < 80 then dark += 1 end
+    end
+end
+print("ink in the title", dark > 2000)
+
+for _, s in [2, 4, 8] do
+    local small = image.decode(bytes, {scale = s})
+    print("scale", s, small.width, small.height)
+end
+print("max_side 200", image.decode(bytes, {max_side = 200}).width)
+
+-- an EXIF orientation 6 (stored sideways): an APP1 segment after SOI
+local function u16be(n) return string.char(n // 256, n % 256) end
+local tiff = "MM\0\x2a\0\0\0\x08" .. "\0\x01" .. "\x01\x12\0\x03\0\0\0\x01\0\x06\0\0" .. "\0\0\0\0"
+local app1 = "\xff\xe1" .. u16be(2 + 6 + len(tiff)) .. "Exif\0\0" .. tiff
+local turned = image.decode(string.sub(bytes, 1, 2) .. app1 .. string.sub(bytes, 3))
+print("orientation 6", turned.width, turned.height)
+-- the top-left of the card is now the top-right
+print("turned corner", turned:get(turned.width - 6, 5) == img:get(5, 5))
+local plain = image.decode(string.sub(bytes, 1, 2) .. app1 .. string.sub(bytes, 3), {orient = false})
+print("orient false", plain.width, plain.height)
+
+-- bad input
+print(image.decode("\xff\xd8\xff\xd9").message)
+print(is_error(image.decode(string.sub(bytes, 1, 600))))
+local jpeg = require("image/jpeg")
+print(jpeg.decode("not a jpeg").message)

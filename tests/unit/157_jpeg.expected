@@ -1,0 +1,13 @@
+size	760	320
+background white	true	true
+ink in the title	true
+scale	2	380	160
+scale	4	190	80
+scale	8	95	40
+max_side 200	190
+orientation 6	320	760
+turned corner	true
+orient false	760	320
+jpeg: no image in the file
+true
+jpeg: not a JPEG file
