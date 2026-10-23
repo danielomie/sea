@@ -30,6 +30,7 @@ pure-Sea libraries work out of the box.
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
+| `embed` | `libs/embed/embed` | Sea + native | `make -C libs/embed` (downloads and builds llama.cpp; needs cmake) |
 | `cockroach` | `libs/cockroach/cockroach` | pure Sea (PostgreSQL protocol; `libs/ssl` for TLS) | — |
 | `clickhouse` | `libs/clickhouse/clickhouse` | pure Sea (HTTP interface, uses `libs/http`) | `make -C libs/http` |
 | `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
@@ -1678,6 +1679,55 @@ tensor.matvec(x, 0, w, 2, 3, out, 0)      -- out = 9, 12, 15
 
 Calls from several goroutines on different arrays run in parallel. Test:
 `tests/unit/113_tensor.sea`.
+
+---
+
+## `embed`
+
+Text embeddings in-process, in the spirit of FastEmbed: GGUF models run by
+[llama.cpp](https://github.com/ggml-org/llama.cpp) on the CPU, a model by name, downloaded once,
+normalized vectors out. Build: `make -C libs/embed`. The first build runs `fetch.sh`, which
+downloads the llama.cpp source (release b11119, SHA-256 checked) and builds its shared libraries
+into `libs/embed/vendor/` (needs cmake and a C++ compiler; tuned for the machine's CPU). To use an
+installed copy: `make -C libs/embed LLAMA_INC=/usr/local/include LLAMA_LIB=/usr/local/lib`.
+Tests: `make -C libs/embed test` (they need a model: `EMBED_TEST_MODEL`, or ollama's `all-minilm`;
+skipped without one).
+
+```sea
+local embed = require("../libs/embed/embed")      -- relative to the requiring file
+
+local m = embed.load("embeddinggemma")?            -- downloaded the first time (~330 MB)
+local docs = m:documents(["Condições de parcelamento: 30/60/90 dias", "Contas bancárias e Pix"])?
+local q = m:query("prazos de pagamento")?
+print(embed.similarity(q, docs[0]), embed.similarity(q, docs[1]))
+m:close()
+```
+
+A model reference is one of:
+- a known name (`embed.models()`): `embeddinggemma` (multilingual, 768 dimensions), `qwen3-embedding`
+  (multilingual, 1024), `bge-m3` (multilingual, 1024), `all-minilm` (English, 384, small and fast).
+  The copy ollama already pulled is used when llama.cpp can load it (ollama converts some models,
+  such as embeddinggemma, for its own engine), else the GGUF is downloaded from Hugging Face;
+- `ollama:<name>[:<tag>]`: a model ollama pulled (`$OLLAMA_MODELS`, `/usr/share/ollama/.ollama/models`,
+  `~/.ollama/models`);
+- `hf:<owner>/<repo>/<file>.gguf`: downloaded from Hugging Face;
+- a path to a `.gguf` file.
+
+Downloads go to `$SEA_EMBED_CACHE` (default `~/.cache/sea/embed`). In a goroutine, loading and
+embedding run on a worker thread and only that goroutine waits; a model computes one call at a time.
+`SEA_EMBED_LOG=1` shows llama.cpp's own log.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `embed.load` | `load(ref [, opts]) → model\|error` | Load a model. `opts`: `threads` (default: the cores less one; all of them lose to the machine's other processes), `context` (tokens per text; longer texts are cut: default the model's, up to 2048), `pooling` (`"mean"`, `"cls"`, `"last"`; default the model's), `batch` (texts per pass, default 8), `query_prompt` / `document_prompt` (default: the known model's), `normalize` (default `true`) |
+| `embed.models` | `models() → array` | The known models: `{name, description, hf, ollama}` |
+| `embed.similarity` | `similarity(a, b) → number` | Cosine similarity of two vectors |
+| `embed.version` | `version() → string` | The llama.cpp release built in (`"b11119"`) |
+| `model:embed` | `embed(texts) → array\|error` | One vector (array of numbers) per text, as given; a string is one text |
+| `model:documents` | `documents(texts) → array\|error` | The same with the model's document prompt (embeddinggemma: `"title: none \| text: "`) |
+| `model:query` | `query(text) → vector\|error` | One text with the query prompt (embeddinggemma: `"task: search result \| query: "`) |
+| `model:info` | `info() → table\|error` | `{dimension, context, pooling, description, file}` |
+| `model:close` | `close()` | Free the model (after the calls still using it); later calls are errors |
 
 ---
 

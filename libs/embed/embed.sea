@@ -1,0 +1,280 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/embed/embed.sea — text embeddings in-process (GGUF models with llama.cpp),
+-- in the spirit of FastEmbed: a model by name, downloaded once, vectors out
+--
+-- Build first:  make -C libs/embed   (downloads and builds llama.cpp into vendor/)
+-- Usage:        local embed = require("../libs/embed/embed")
+--
+--   local m = embed.load("embeddinggemma")?          -- a known name (embed.models())
+--   local vs = m:documents(["texto 1", "texto 2"])?   -- with the model's document prompt
+--   local q = m:query("pergunta")?                     -- with its query prompt
+--   print(embed.similarity(q, vs[0]))                  -- cosine (vectors are normalized)
+--   m:close()
+--
+-- A model is also "ollama:<name>[:<tag>]" (a model ollama already pulled),
+-- "hf:<owner>/<repo>/<file>.gguf" (downloaded from Hugging Face) or a path to
+-- a .gguf file. Downloads go to $SEA_EMBED_CACHE (default ~/.cache/sea/embed).
+-- In a goroutine, loading and embedding run on a worker thread and only that
+-- goroutine waits. Failures are error values.
+
+local native = require("embed_native")
+local http = require("../http/http")
+
+local M = {}
+
+local Model = {}
+
+-- the known models: where to get them and the prompts they were trained with
+local KNOWN = {}
+local function known(name, spec)
+    KNOWN[name] = spec
+end
+known("embeddinggemma", {
+    hf = "ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf", ollama = "embeddinggemma",
+    query = "task: search result | query: ", document = "title: none | text: ",
+    description = "Google EmbeddingGemma 300M, multilingual, 768 dimensions",
+})
+known("qwen3-embedding", {
+    hf = "Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf", ollama = "qwen3-embedding:0.6b",
+    query = "Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ",
+    document = "", description = "Qwen3 Embedding 0.6B, multilingual, 1024 dimensions",
+})
+known("bge-m3", {
+    hf = "ggml-org/bge-m3-Q8_0-GGUF/bge-m3-q8_0.gguf", ollama = "bge-m3",
+    query = "", document = "", description = "BAAI bge-m3, multilingual, 1024 dimensions",
+})
+known("all-minilm", {
+    hf = "second-state/All-MiniLM-L6-v2-Embedding-GGUF/all-MiniLM-L6-v2-Q8_0.gguf", ollama = "all-minilm",
+    query = "", document = "", description = "all-MiniLM-L6-v2 (Sentence Transformers), English, 384 dimensions, small and fast",
+})
+
+local POOLING = {none = 0, mean = 1, cls = 2, last = 3}
+
+-- embed.version() → the llama.cpp release the library was built with
+function M.version()
+    return native.version()
+end
+
+-- embed.models() → [{name, description, hf, ollama}] of the known models
+function M.models()
+    local out = []
+    for _, name in sort.sorted(list.keys(KNOWN)) do
+        local s = KNOWN[name]
+        local e = {}
+        e.name = name
+        e.description = s.description
+        e.hf = s.hf
+        e.ollama = s.ollama
+        out[] = e
+    end
+    return out
+end
+
+local function home()
+    return os.getenv("HOME") or "/tmp"
+end
+
+-- where ollama keeps its models: $OLLAMA_MODELS, the service's, the user's
+local function ollama_dirs()
+    local dirs = []
+    local env = os.getenv("OLLAMA_MODELS")
+    if env ~= nil and env ~= "" then dirs[] = env end
+    dirs[] = "/usr/share/ollama/.ollama/models"
+    dirs[] = path.join(home(), ".ollama", "models")
+    return dirs
+end
+
+-- "embeddinggemma" / "qwen3-embedding:0.6b" → the GGUF blob ollama pulled | nil
+local function ollama_blob(name)
+    local tag = "latest"
+    local i = string.find(name, ":")
+    if i ~= nil then
+        tag = string.sub(name, i + 1)
+        name = string.sub(name, 1, i - 1)
+    end
+    local repo = string.contains(name, "/") and name or ("library/" .. name)
+    for _, dir in ollama_dirs() do
+        local manifest = path.join(dir, "manifests", "registry.ollama.ai", repo, tag)
+        if fs.isfile(manifest) then
+            local m = json.decode(fs.read(manifest) or "")
+            if not is_error(m) and m.layers ~= nil then
+                for _, l in m.layers do
+                    if l.mediaType == "application/vnd.ollama.image.model" then
+                        local blob = path.join(dir, "blobs", string.replace(l.digest, ":", "-"))
+                        if fs.isfile(blob) then return blob end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function cache_dir()
+    local d = os.getenv("SEA_EMBED_CACHE")
+    if d ~= nil and d ~= "" then return d end
+    return path.join(home(), ".cache", "sea", "embed")
+end
+
+-- "owner/repo/file.gguf" → the file in the cache, downloaded the first time
+local function hf_file(ref)
+    local parts = string.split(ref, "/")
+    if len(parts) < 3 or not string.ends_with(ref, ".gguf") then
+        return error(`embed: a Hugging Face model is owner/repo/file.gguf, not ${ref}`)
+    end
+    local file = path.join(cache_dir(), string.replace(ref, "/", "__"))
+    if fs.isfile(file) then return file end
+    fs.mkdir(cache_dir(), {parents = true})
+    local repo = parts[0] .. "/" .. parts[1]
+    local name = string.join(list.slice(parts, 2), "/")
+    local url = `https://huggingface.co/${repo}/resolve/main/${name}`
+    local part = file .. ".part"
+    local h = io.open(part, "wb")
+    if h == nil then return error("embed: cannot write " .. part) end
+    local r = http.get(url, {
+        timeout = 60000,
+        on_data = function(piece)
+            io.write_string(h, piece)
+            return true
+        end,
+    })
+    io.close(h)
+    if is_error(r) or not r.ok then
+        fs.remove(part)
+        return error(`embed: downloading ${url}: ${is_error(r) and r.message or (r.error or r.status)}`)
+    end
+    local _ = fs.rename(part, file)?
+    return file
+end
+
+-- the GGUF files to try for a model reference, in order: functions giving
+-- a path or an error (a known model: the copy ollama pulled, which saves
+-- the download, then Hugging Face's; ollama converts some models for its
+-- own engine, and llama.cpp cannot load those)
+local function candidates(ref)
+    if string.starts_with(ref, "ollama:") then
+        local name = string.sub(ref, 8)
+        return [
+            function()
+                local blob = ollama_blob(name)
+                if blob == nil then return error(`embed: ollama has no model ${name} (ollama pull ${name})`) end
+                return blob
+            end,
+        ]
+    end
+    if string.starts_with(ref, "hf:") then return [function() return hf_file(string.sub(ref, 4)) end] end
+    local spec = KNOWN[ref]
+    if spec ~= nil then
+        local out = []
+        if spec.ollama ~= nil then
+            out[] = function() return ollama_blob(spec.ollama) or error("embed: not in ollama") end
+        end
+        out[] = function() return hf_file(spec.hf) end
+        return out
+    end
+    if fs.isfile(ref) then return [function() return ref end] end
+    return []
+end
+
+-- the prompts of a reference: its own, else those of the known family in its name
+local function prompts_of(ref)
+    local spec = KNOWN[ref]
+    if spec == nil then
+        local low = string.lower(ref)
+        for name, s in KNOWN do
+            if string.contains(low, name) then spec = s end
+        end
+    end
+    if spec == nil then return ["", ""] end
+    return [spec.query, spec.document]
+end
+
+-- embed.load(ref [, opts]) → model | error
+-- opts: threads (default: the cores less one), context (tokens per text; longer
+-- texts are cut: default the model's, up to 2048), pooling ("mean", "cls",
+-- "last": default the model's), batch (texts per pass, default 8),
+-- query_prompt / document_prompt (default: the known model's), normalize
+-- (default true)
+function M.load(ref, opts)
+    opts = opts or {}
+    if type(ref) ~= "string" or ref == "" then return error("embed.load: a model name or path expected") end
+    local pooling = -1
+    if opts.pooling ~= nil then
+        pooling = POOLING[opts.pooling]
+        if pooling == nil then return error(`embed.load: unknown pooling ${opts.pooling}`) end
+    end
+    local tries = candidates(ref)
+    if len(tries) == 0 then
+        return error(`embed: unknown model ${ref} (a known name, ollama:<name>, hf:<owner>/<repo>/<file>.gguf or a .gguf path)`)
+    end
+    local h = nil
+    local file = nil
+    for _, try in tries do
+        file = try()
+        if not is_error(file) then
+            h = native.load(file, opts.threads or 0, opts.context or 0, pooling, opts.batch or 0)
+            if not is_error(h) then break end
+            file = h
+        end
+    end
+    if is_error(file) then return file end
+    local p = prompts_of(ref)
+    local m = {}
+    m.handle = h
+    m.ref = ref
+    m.file = file
+    m.query_prompt = opts.query_prompt or p[0]
+    m.document_prompt = opts.document_prompt or p[1]
+    m.normalize = opts.normalize ~= false
+    for k, f in Model do m[k] = f end
+    return m
+end
+
+-- model:embed(texts) → [vector] | error: the texts as they are (no prompt)
+function Model.embed(m, texts)
+    if type(texts) == "string" then texts = [texts] end
+    local r = native.embed(m.handle, texts, m.normalize)?
+    return r.vectors
+end
+
+-- model:documents(texts) → [vector] | error: with the document prompt
+function Model.documents(m, texts)
+    if type(texts) == "string" then texts = [texts] end
+    return m:embed(list.map(texts, function(t) return m.document_prompt .. t end))
+end
+
+-- model:query(text) → vector | error: with the query prompt
+function Model.query(m, text)
+    local vs = m:embed([m.query_prompt .. text])?
+    return vs[0]
+end
+
+-- model:info() → {dimension, context, pooling, description, file} | error
+function Model.info(m)
+    local i = native.info(m.handle)?
+    i.file = m.file
+    return i
+end
+
+-- model:close(): frees the model (after the calls still using it)
+function Model.close(m)
+    native.close(m.handle)
+end
+
+-- embed.similarity(a, b) → cosine similarity of two vectors
+function M.similarity(a, b)
+    local dot = 0.0
+    local na = 0.0
+    local nb = 0.0
+    for i, x in a do
+        dot += x * b[i]
+        na += x * x
+        nb += b[i] * b[i]
+    end
+    if na == 0 or nb == 0 then return 0 end
+    return dot / math.sqrt(na * nb)
+end
+
+return M

@@ -37,3 +37,4 @@ libs/duckdb/vendor/
 libs/duckdb/test.out
 libs/sqlite/vendor/
 libs/sqlite/test.out
+libs/embed/vendor/

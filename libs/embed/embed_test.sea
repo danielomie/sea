@@ -1,0 +1,107 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/embed: loading a GGUF model and embedding texts. Needs a model:
+-- EMBED_TEST_MODEL (anything embed.load takes), else ollama's all-minilm
+-- when ollama pulled it; without one the tests are skipped.
+
+local t = require("sea/test")
+local embed = require("./embed")
+
+local REF = os.getenv("EMBED_TEST_MODEL")
+if REF == nil or REF == "" then REF = "ollama:all-minilm" end
+
+local model = nil
+local available = nil
+
+local function need()
+    if available == nil then
+        local m = embed.load(REF)
+        available = not is_error(m)
+        if available then model = m else print("embed: skipped (" .. m.message .. ")") end
+    end
+    return available
+end
+
+local function norm(v)
+    local s = 0.0
+    for _, x in v do s += x * x end
+    return math.sqrt(s)
+end
+
+t.describe("embed", function()
+    t.after_all(function()
+        if model ~= nil then model:close() end
+    end)
+
+    t.it("knows the llama.cpp it was built with and the known models", function()
+        t.ok(len(embed.version()) > 0)
+        local names = list.map(embed.models(), function(m) return m.name end)
+        t.ok(list.contains(names, "embeddinggemma"))
+        t.ok(list.contains(names, "all-minilm"))
+    end)
+
+    t.it("refuses unknown models", function()
+        t.is_error(embed.load("no-such-model"))
+        t.is_error(embed.load("ollama:no-such-model"))
+        t.is_error(embed.load("hf:not-a-gguf"))
+        t.is_error(embed.load(""))
+    end)
+
+    t.it("embeds texts into normalized vectors that put alike texts close", function()
+        if not need() then return end
+        local info = t.no_error(model:info())
+        t.ok(info.dimension > 0)
+        t.ok(info.context > 0)
+        local vs = t.no_error(model:embed([
+            "The cat sits on the mat.", "A cat is sitting on a rug.",
+            "The stock market fell sharply today.",
+        ]))
+        t.eq(len(vs), 3)
+        for _, v in vs do
+            t.eq(len(v), info.dimension)
+            t.ok(math.abs(norm(v) - 1) < 1e-4)
+        end
+        t.ok(embed.similarity(vs[0], vs[1]) > embed.similarity(vs[0], vs[2]))
+        -- one string, an empty list, a long text (cut to the context)
+        t.eq(len(t.no_error(model:embed("hello"))), 1)
+        t.eq(t.no_error(model:embed([])), [])
+        local long = string.rep("word ", 5000)
+        t.eq(len(t.no_error(model:embed([long]))[0]), info.dimension)
+        -- the same text, the same vector
+        local again = t.no_error(model:embed(["The cat sits on the mat."]))[0]
+        t.ok(embed.similarity(again, vs[0]) > 0.9999)
+    end)
+
+    t.it("runs in goroutines without blocking the others", function()
+        if not need() then return end
+        local texts = ["one", "two", "three", "four"]
+        local expected = t.no_error(model:embed(texts))
+        local done = chan(4)
+        for i, text in texts do
+            go (function()
+                local v = model:embed([text])
+                done <- [i, is_error(v) and v or v[0]]
+            end)()
+        end
+        for _ = 1, 4 do
+            local r = <-done
+            t.no_error(r[1])
+            t.ok(embed.similarity(r[1], expected[r[0]]) > 0.9999, `text ${r[0]}`)
+        end
+    end)
+
+    t.it("adds the model's prompts to queries and documents", function()
+        if not need() then return end
+        local m = t.no_error(embed.load(REF, {query_prompt = "query: ", document_prompt = "passage: "}))
+        local q = t.no_error(m:query("cat"))
+        local plain = t.no_error(m:embed(["query: cat"]))[0]
+        t.ok(embed.similarity(q, plain) > 0.9999)
+        local d = t.no_error(m:documents(["cat"]))[0]
+        t.ok(embed.similarity(d, t.no_error(m:embed(["passage: cat"]))[0]) > 0.9999)
+        m:close()
+        -- a closed model is an error, not a crash
+        t.is_error(m:embed(["cat"]))
+        t.is_error(m:info())
+    end)
+end)
