@@ -3942,6 +3942,212 @@ static SeaValue n_f32_shortest(SeaVM *vm, int argc, SeaValue *args) {
     return r;
 }
 
+/* ---- FFT -------------------------------------------------------------------------------- */
+
+/* a transform of one length: radix-2 for powers of two, a direct DFT for
+ * other short lengths, Bluestein's chirp-z (through a power-of-two
+ * transform of at least 2n-1) for the rest */
+typedef struct {
+    int64_t n, m;          /* the length, and the power of two Bluestein uses (0: n is one) */
+    zcplx *tw;             /* twiddles of the power-of-two transform (of n or m) */
+    zcplx *chirp, *bf;     /* Bluestein: w_k = e^(-iπk²/n), and the transform of conj(w) */
+    zcplx *buf;
+    zcplx *scratch;        /* the power-of-two transform's second buffer */
+} FftPlan;
+
+static bool pow2(int64_t n) { return n > 0 && (n & (n - 1)) == 0; }
+
+/* (the C99 product checks for NaN and infinity on every call: too slow here) */
+static inline zcplx cmul(zcplx a, zcplx b) {
+    double ar = creal(a), ai = cimag(a), br = creal(b), bi = cimag(b);
+    return CMPLX(ar * br - ai * bi, ar * bi + ai * br);
+}
+
+/* below this length a length that is not a power of two is a direct DFT */
+#define DFT_MAX 64
+
+static zcplx *twiddles(int64_t n) {
+    /* the whole circle: radix-4 passes use angles up to 3/4 of a turn. Only
+     * the first eighth is computed (a million cexp calls took longer than the
+     * transform); the rest follows from symmetries, exactly: w(n/4 - k) =
+     * -i·conj(w(k)) and w(k + n/4) = -i·w(k) */
+    zcplx *t = malloc((size_t)(n + 1) * sizeof(zcplx));
+    if (n < 8) {
+        for (int64_t k = 0; k < n; k++) t[k] = cexp(CMPLX(0, -2 * M_PI * (double)k / (double)n));
+        return t;
+    }
+    int64_t q = n / 4, e = n / 8;
+    for (int64_t k = 0; k <= e; k++) {
+        double s, c;
+        sincos(2 * M_PI * (double)k / (double)n, &s, &c);
+        t[k] = CMPLX(c, -s);
+    }
+    for (int64_t k = 1; k < e; k++) t[q - k] = CMPLX(-cimag(t[k]), -creal(t[k]));   /* -i·conj(w) */
+    for (int64_t k = q; k < n; k++) t[k] = CMPLX(cimag(t[k - q]), -creal(t[k - q]));  /* -i·w */
+    return t;
+}
+
+/* i·z */
+static inline zcplx times_i(zcplx z) { return CMPLX(-cimag(z), creal(z)); }
+
+/* in place, forward, n a power of two (scratch: n more elements). Stockham's
+ * autosort, radix 4 (and one radix-2 pass when log2 n is odd): each pass
+ * reads and writes the memory in order between two buffers, with no
+ * bit-reversal permutation; a large transform is bound by memory traffic,
+ * so fewer passes (radix 4: half as many) is what makes it faster */
+static void fft2(zcplx *x, int64_t n, const zcplx *tw, zcplx *scratch) {
+    zcplx *a = x, *b = scratch;
+    int64_t s = 1;   /* the stride: how many interleaved transforms */
+    int64_t len = n;
+    for (; len >= 4; len /= 4) {
+        int64_t m = len / 4, step = n / len;
+        for (int64_t p = 0; p < m; p++) {
+            zcplx w1 = tw[p * step], w2 = tw[2 * p * step], w3 = tw[3 * p * step];   /* e^(-2πi kp/len) */
+            const zcplx *x0 = a + s * p, *x1 = a + s * (p + m), *x2 = a + s * (p + 2 * m), *x3 = a + s * (p + 3 * m);
+            zcplx *y0 = b + s * 4 * p, *y1 = y0 + s, *y2 = y0 + 2 * s, *y3 = y0 + 3 * s;
+            for (int64_t q = 0; q < s; q++) {
+                zcplx c0 = x0[q], c1 = x1[q], c2 = x2[q], c3 = x3[q];
+                zcplx apc = c0 + c2, amc = c0 - c2, bpd = c1 + c3, jbmd = times_i(c1 - c3);
+                y0[q] = apc + bpd;
+                y1[q] = cmul(amc - jbmd, w1);
+                y2[q] = cmul(apc - bpd, w2);
+                y3[q] = cmul(amc + jbmd, w3);
+            }
+        }
+        zcplx *t = a;
+        a = b;
+        b = t;
+        s *= 4;
+    }
+    if (len == 2) {
+        /* the last pass, radix 2 (its twiddle is 1) */
+        for (int64_t q = 0; q < s; q++) {
+            zcplx u = a[q], v = a[q + s];
+            b[q] = u + v;
+            b[q + s] = u - v;
+        }
+        zcplx *t = a;
+        a = b;
+        b = t;
+    }
+    if (a != x) memcpy(x, a, (size_t)n * sizeof(zcplx));
+}
+
+static void plan_init(FftPlan *p, int64_t n) {
+    memset(p, 0, sizeof *p);
+    p->n = n;
+    if (n <= 1) return;
+    if (pow2(n)) {
+        p->tw = twiddles(n);
+        p->scratch = malloc((size_t)n * sizeof(zcplx));
+        return;
+    }
+    if (n <= DFT_MAX) {
+        /* all n roots of unity, and a buffer */
+        p->tw = malloc((size_t)n * sizeof(zcplx));
+        for (int64_t k = 0; k < n; k++) p->tw[k] = cexp(CMPLX(0, -2 * M_PI * (double)k / (double)n));
+        p->buf = malloc((size_t)n * sizeof(zcplx));
+        return;
+    }
+    int64_t m = 1;
+    while (m < 2 * n - 1) m <<= 1;
+    p->m = m;
+    p->tw = twiddles(m);
+    p->chirp = malloc((size_t)n * sizeof(zcplx));
+    for (int64_t k = 0; k < n; k++) {
+        /* k² mod 2n keeps the angle exact for large k */
+        int64_t k2 = (int64_t)(((__int128)k * k) % (2 * n));
+        p->chirp[k] = cexp(CMPLX(0, -M_PI * (double)k2 / (double)n));
+    }
+    p->bf = calloc((size_t)m, sizeof(zcplx));
+    p->bf[0] = conj(p->chirp[0]);
+    for (int64_t k = 1; k < n; k++) p->bf[k] = p->bf[m - k] = conj(p->chirp[k]);
+    p->scratch = malloc((size_t)m * sizeof(zcplx));
+    fft2(p->bf, m, p->tw, p->scratch);
+    p->buf = malloc((size_t)m * sizeof(zcplx));
+}
+
+static void plan_free(FftPlan *p) { free(p->tw); free(p->chirp); free(p->bf); free(p->buf); free(p->scratch); }
+
+/* x (n elements) transformed in place, forward */
+static void plan_run(FftPlan *p, zcplx *x) {
+    int64_t n = p->n;
+    if (n <= 1) return;
+    if (pow2(n)) { fft2(x, n, p->tw, p->scratch); return; }
+    if (!p->m) {
+        zcplx *y = p->buf;
+        for (int64_t k = 0; k < n; k++) {
+            zcplx s = x[0];
+            for (int64_t j = 1; j < n; j++) s += cmul(x[j], p->tw[(j * k) % n]);
+            y[k] = s;
+        }
+        memcpy(x, y, (size_t)n * sizeof(zcplx));
+        return;
+    }
+    int64_t m = p->m;
+    zcplx *a = p->buf;
+    for (int64_t k = 0; k < n; k++) a[k] = cmul(x[k], p->chirp[k]);
+    for (int64_t k = n; k < m; k++) a[k] = 0;
+    fft2(a, m, p->tw, p->scratch);
+    for (int64_t k = 0; k < m; k++) a[k] = conj(cmul(a[k], p->bf[k]));
+    /* the inverse transform: conj, forward, conj, / m */
+    fft2(a, m, p->tw, p->scratch);
+    for (int64_t k = 0; k < n; k++) x[k] = cmul(conj(a[k]), p->chirp[k]) / (double)m;
+}
+
+typedef struct { FftPlan plan; zcplx *line; bool inverse; double scale; } FftCtx;
+
+static void line_fft(void *ctx, char *pa, int64_t sa, char *pb, int64_t sb, int64_t n, int64_t k) {
+    (void)pb; (void)sb; (void)k;
+    FftCtx *c = ctx;
+    zcplx *x = (zcplx *)pa, *l = c->line;
+    for (int64_t i = 0; i < n; i++) l[i] = c->inverse ? conj(x[i * sa]) : x[i * sa];
+    plan_run(&c->plan, l);
+    for (int64_t i = 0; i < n; i++) x[i * sa] = (c->inverse ? conj(l[i]) : l[i]) * c->scale;
+}
+
+/* fft(a, n, axis, inverse, norm) → complex128: the discrete Fourier
+ * transform along one axis, a cut or padded with zeros to n there; norm
+ * "backward" (the default: the inverse divides by n), "ortho" or "forward" */
+static SeaValue n_fft(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1) FAIL("ndarray.fft: expected an array");
+    Tmp t = { 0 };
+    ND a;
+    opnd(vm, args[0], &a, &t, "fft");
+    if (a.nd == 0) FAIL("ndarray.fft: an array with no dimensions has no transform");
+    int axis = norm_axis(vm, argc > 2 && !sea_is_nil(args[2]) ? iv(args[2]) : -1, a.nd, "fft");
+    int64_t n = argc > 1 && !sea_is_nil(args[1]) ? iv(args[1]) : a.shape[axis];
+    if (n < 1) FAIL("ndarray.fft: invalid number of data points (%lld)", (long long)n);
+    bool inverse = argc > 3 && sea_is_truthy(args[3]);
+    int mode = 0;   /* 0 backward, 1 ortho, 2 forward */
+    if (argc > 4 && !sea_is_nil(args[4])) {
+        if (str_eq(args[4], "ortho")) mode = 1;
+        else if (str_eq(args[4], "forward")) mode = 2;
+        else if (!str_eq(args[4], "backward")) FAIL("ndarray.fft: norm is \"backward\", \"ortho\" or \"forward\"");
+    }
+    int64_t shape[MAXD];
+    memcpy(shape, a.shape, sizeof(int64_t) * a.nd);
+    shape[axis] = n;
+    ND o;
+    SeaValue r = nd_new(vm, DT_C128, a.nd, shape, &o);
+    /* a's first min(n, len) elements along axis into the zeroed result */
+    int64_t keep = a.shape[axis] < n ? a.shape[axis] : n;
+    ND dst = o, src = a;
+    dst.shape[axis] = keep;
+    src.shape[axis] = keep;
+    assign(vm, &dst, &src, "fft");
+    FftCtx c;
+    plan_init(&c.plan, n);
+    c.line = malloc((size_t)n * sizeof(zcplx));
+    c.inverse = inverse;
+    c.scale = mode == 1 ? 1 / sqrt((double)n) : (mode == 0) == inverse ? 1 / (double)n : 1;
+    if (o.size > 0) lines2(&o, NULL, axis, line_fft, &c);
+    plan_free(&c.plan);
+    free(c.line);
+    tmp_free(&t);
+    return r;
+}
+
 /* real(a), imag(a): views of a complex array's parts (float64, writable);
  * of a real array: a itself, and zeros */
 static SeaValue complex_part(SeaVM *vm, int argc, SeaValue *args, int part, const char *fn) {
@@ -4038,6 +4244,7 @@ static const Reg REG[] = {
     { "expand_dims", n_expand_dims }, { "broadcast_to", n_broadcast_to }, { "flip", n_flip },
     { "as_strided", n_as_strided }, { "f32_shortest", n_f32_shortest },
     { "conjugate", n_conjugate }, { "angle", n_angle }, { "real", n_real }, { "imag", n_imag }, { "eig", n_eig },
+    { "fft", n_fft },
     { "diagonal", n_diagonal }, { "copy", n_copy }, { "astype", n_astype }, { "ravel", n_ravel },
     { "ascontiguousarray", n_ascontiguous }, { "tolist", n_tolist }, { "fill", n_fill },
     { "concatenate", n_concatenate }, { "stack", n_stack }, { "take", n_take }, { "get", n_get }, { "set", n_set },

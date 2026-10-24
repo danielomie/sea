@@ -1342,6 +1342,126 @@ function M.einsum(spec, ...)
     return cur
 end
 
+-- ---- fft --------------------------------------------------------------------------------------
+
+local fft = {}
+M.fft = fft
+
+-- np.fft.fft(a [, n [, axis = -1 [, norm]]]) and ifft: the discrete Fourier
+-- transform along one axis (complex128), a cut or padded with zeros to n;
+-- norm "backward" (default: ifft divides by n), "ortho" or "forward"
+function fft.fft(a, n, axis, norm) return native.fft(a, n, axis, false, norm) end
+function fft.ifft(a, n, axis, norm) return native.fft(a, n, axis, true, norm) end
+
+-- the axes of an N-D transform and their lengths: axes nil (all, or the
+-- last len(s)) and s nil (the array's)
+local function nd_axes(a, s, axes)
+    a = M.asarray(a)
+    if axes == nil then
+        axes = []
+        local k = s ~= nil and len(s) or a.ndim
+        for i = a.ndim - k, a.ndim - 1 do axes[] = i end
+    end
+    axes = list.map(axes, function(ax) return ax < 0 and ax + a.ndim or ax end)
+    return a, axes, s or list.map(axes, function(ax) return a.shape[ax] end)
+end
+
+-- np.fft.fftn(a [, s [, axes [, norm]]]), ifftn, fft2 / ifft2 (axes [-2, -1])
+function fft.fftn(a, s, axes, norm)
+    local x, ax, n = nd_axes(a, s, axes)
+    for i, k in ax do x = native.fft(x, n[i], k, false, norm) end
+    return x
+end
+function fft.ifftn(a, s, axes, norm)
+    local x, ax, n = nd_axes(a, s, axes)
+    for i, k in ax do x = native.fft(x, n[i], k, true, norm) end
+    return x
+end
+function fft.fft2(a, s, axes, norm) return fft.fftn(a, s, axes or [-2, -1], norm) end
+function fft.ifft2(a, s, axes, norm) return fft.ifftn(a, s, axes or [-2, -1], norm) end
+
+-- index strings selecting start:stop along axis of an array of ndim dimensions
+local function along(ndim, axis, start, stop)
+    local idx = []
+    for d = 0, ndim - 1 do idx[] = d == axis and `${start}:${stop or ""}` or ":" end
+    return string.join(idx, ",")
+end
+
+-- np.fft.rfft(a [, n [, axis [, norm]]]): the transform of a real array, its
+-- n // 2 + 1 non-negative frequencies
+function fft.rfft(a, n, axis, norm)
+    a = M.asarray(a)
+    if a.dtype == "complex128" then a = native.real(a) end
+    axis = axis or -1
+    if axis < 0 then axis += a.ndim end
+    n = n or a.shape[axis]
+    local f = native.fft(a, n, axis, false, norm)
+    return native.copy(native.get(f, along(f.ndim, axis, 0, n // 2 + 1)))
+end
+
+-- np.fft.irfft(a [, n [, axis [, norm]]]): the real signal of length n
+-- (default 2 * (m - 1)) whose rfft is a
+function fft.irfft(a, n, axis, norm)
+    a = M.asarray(a)
+    axis = axis or -1
+    if axis < 0 then axis += a.ndim end
+    n = n or 2 * (a.shape[axis] - 1)
+    if n < 1 then panic("ndarray.fft.irfft: invalid number of data points") end
+    local m = n // 2 + 1
+    -- the first m coefficients (cut or padded with zeros), then the conjugate mirror of the rest
+    local have = a.shape[axis]
+    local head = native.get(a, along(a.ndim, axis, 0, math.min(m, have)))
+    if have < m then
+        local pad = list.copy(a.shape)
+        pad[axis] = m - have
+        head = native.concatenate([head, native.full(pad, 0, "complex128")], axis)
+    end
+    local parts = [head]
+    if n - m > 0 then
+        parts[] = native.conjugate(native.flip(native.get(head, along(head.ndim, axis, 1, n - m + 1)), axis))
+    end
+    local full = native.concatenate(parts, axis)
+    return native.copy(native.real(native.fft(full, n, axis, true, norm)))
+end
+
+-- np.fft.rfftn / irfftn (the real transform on the last axis), rfft2 / irfft2
+function fft.rfftn(a, s, axes, norm)
+    local x, ax, n = nd_axes(a, s, axes)
+    local last = len(ax) - 1
+    x = fft.rfft(x, n[last], ax[last], norm)
+    for i = 0, last - 1 do x = native.fft(x, n[i], ax[i], false, norm) end
+    return x
+end
+function fft.irfftn(a, s, axes, norm)
+    local x, ax, n = nd_axes(a, s, axes)
+    local last = len(ax) - 1
+    for i = 0, last - 1 do x = native.fft(x, n[i], ax[i], true, norm) end
+    return fft.irfft(x, s ~= nil and n[last] or nil, ax[last], norm)
+end
+function fft.rfft2(a, s, axes, norm) return fft.rfftn(a, s, axes or [-2, -1], norm) end
+function fft.irfft2(a, s, axes, norm) return fft.irfftn(a, s, axes or [-2, -1], norm) end
+
+-- np.fft.fftfreq(n [, d = 1]), rfftfreq: the frequencies of the bins
+function fft.fftfreq(n, d)
+    local k = native.concatenate([native.arange(0, (n - 1) // 2 + 1, 1), native.arange(-(n // 2), 0, 1)], 0)
+    return native.divide(k, (d or 1.0) * n)
+end
+function fft.rfftfreq(n, d) return native.divide(native.arange(0, n // 2 + 1, 1), (d or 1.0) * n) end
+
+-- np.fft.fftshift(x [, axes]): the zero frequency to the middle; ifftshift undoes it
+function fft.fftshift(x, axes)
+    x = M.asarray(x)
+    if axes == nil then axes = list.range(x.ndim) elseif type(axes) == "int" then axes = [axes] end
+    for _, ax in axes do x = M.roll(x, x.shape[ax < 0 and ax + x.ndim or ax] // 2, ax) end
+    return x
+end
+function fft.ifftshift(x, axes)
+    x = M.asarray(x)
+    if axes == nil then axes = list.range(x.ndim) elseif type(axes) == "int" then axes = [axes] end
+    for _, ax in axes do x = M.roll(x, -(x.shape[ax < 0 and ax + x.ndim or ax] // 2), ax) end
+    return x
+end
+
 -- ---- files ------------------------------------------------------------------------------------
 
 local DESCR = {float64 = "<f8", float32 = "<f4", int64 = "<i8", bool = "|b1", complex128 = "<c16"}

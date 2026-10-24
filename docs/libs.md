@@ -1704,7 +1704,7 @@ Calls from several goroutines on different arrays run in parallel. Test:
 
 N-dimensional arrays in the manner of NumPy: float64, float32, complex128, int64 and bool arrays of any number
 of dimensions, views that share data (slices, transposes, reshapes), element-wise operations with
-broadcasting, reductions along axes, matrix products, `einsum`, linear algebra, random numbers, and
+broadcasting, reductions along axes, matrix products, `einsum`, linear algebra, Fourier transforms, random numbers, and
 `.npy` / `.npz` / text files. The loops run in C (`ndarray_native.so`); the API around them is Sea
 (`ndarray.sea`). Sea has no operator overloading, so arithmetic is written with methods or
 functions: NumPy's `(a + 1) * b` is `a:add(1):mul(b)`, and `a[1, 1:]` is `a:get("1, 1:")`.
@@ -1804,6 +1804,15 @@ true [, compute_uv = true]])` (u, s, vh: one-sided Jacobi), `norm(x [, ord [, ax
 keepdims]]])` (vector p-norms, `inf`, `"fro"`, `"nuc"`, matrix 1 / 2 / inf), `matrix_rank`,
 `pinv`, `lstsq(a, b [, rcond])` (x, residuals, rank, s), `cond`, `matrix_power(a, n)`,
 `multi_dot`. `eig` takes about 50 ms for a 100×100 matrix and 0.4 s for 200×200.
+
+**`np.fft`**: `fft(a [, n [, axis = -1 [, norm]]])` and `ifft` (complex128; `a` cut or padded with
+zeros to `n` along the axis; `norm` `"backward"` (the default: `ifft` divides by n), `"ortho"` or
+`"forward"`), `fft2` / `ifft2`, `fftn(a [, s [, axes [, norm]]])` / `ifftn`, `rfft` (the n // 2 + 1
+non-negative frequencies of a real signal) / `irfft(a [, n])`, `rfft2` / `irfft2`, `rfftn` /
+`irfftn`, `fftfreq(n [, d])`, `rfftfreq`, `fftshift([axes])`, `ifftshift`. Any length: a radix-4
+Stockham transform for powers of two, a direct DFT below 64 points, Bluestein's algorithm (through
+a power of two) for the others. A transform of 2^20 points takes about 80 ms, a batch of 1024
+transforms of 1024 points about 27 ms (NumPy's pocketfft is a few times faster: no SIMD here).
 
 **`np.random`**: `default_rng([seed])` returns a generator (xoshiro256**; without a seed, the
 system's entropy) with `random([size [, dtype]])`, `uniform([low, high, size [, dtype]])`,
