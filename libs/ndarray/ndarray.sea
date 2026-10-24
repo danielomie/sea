@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- libs/ndarray/ndarray.sea — N-dimensional arrays for Sea, in the manner of
--- NumPy: arrays of float64, int64 or bool with any number of dimensions,
+-- NumPy: arrays of float64, float32, int64 or bool with any number of dimensions,
 -- views (slices, transposes, reshapes) that share data, element-wise
 -- operations with broadcasting, reductions along axes, matrix products,
 -- linear algebra, random numbers, and .npy / .npz / text files. The loops
@@ -40,6 +40,7 @@ M.inf = 1.0 / 0.0
 M.nan = 0.0 / 0.0
 M.newaxis = "newaxis"
 M.float64 = "float64"
+M.float32 = "float32"
 M.int64 = "int64"
 M.bool = "bool"
 
@@ -56,7 +57,7 @@ local NATIVE = [
     "prod", "min", "max", "any", "all", "mean", "var", "std", "nanmean", "argmax", "argmin", "cumsum",
     "cumprod", "argsort", "searchsorted", "matmul", "reshape", "transpose", "swapaxes", "squeeze",
     "expand_dims", "broadcast_to", "flip", "diagonal", "copy", "astype", "ravel", "ascontiguousarray",
-    "tolist", "fill", "take", "get", "set", "nonzero",
+    "tolist", "fill", "take", "get", "set", "nonzero", "as_strided",
 ]
 
 for _, name in NATIVE do
@@ -110,9 +111,9 @@ function M.arange(a, b, step, dtype)
     return native.arange(a, b, step or 1, dtype)
 end
 
--- np.linspace(start, stop [, num = 50 [, endpoint = true]])
-function M.linspace(start, stop, num, endpoint)
-    return native.linspace(start, stop, num or 50, endpoint)
+-- np.linspace(start, stop [, num = 50 [, endpoint = true [, dtype]]])
+function M.linspace(start, stop, num, endpoint, dtype)
+    return native.linspace(start, stop, num or 50, endpoint, dtype)
 end
 
 -- np.logspace(start, stop [, num = 50 [, endpoint [, base = 10]]])
@@ -574,9 +575,17 @@ function M.unique(a, opts)
     return out[0], out[1], out[2], out[3]
 end
 
+local quantile64
+
 -- np.quantile(a, q [, axis [, keepdims]]) with linear interpolation; q a
 -- number or an array of them (in [0, 1]); np.percentile takes q in [0, 100]
 function M.quantile(a, q, axis, keepdims)
+    a = M.asarray(a)
+    if a.dtype == "float32" then return M.asarray(quantile64(a, q, axis, keepdims)):astype("float32") end
+    return quantile64(a, q, axis, keepdims)
+end
+
+quantile64 = function(a, q, axis, keepdims)
     a = M.asarray(a, "float64")
     if axis == nil then
         a = native.ravel(a)
@@ -635,7 +644,7 @@ A.ptp = M.ptp
 -- np.bincount(x [, weights [, minlength]])
 function M.bincount(x, weights, minlength)
     x = native.ravel(M.asarray(x))
-    if x.dtype == "float64" then panic("ndarray.bincount: expected non-negative ints") end
+    if x.dtype == "float64" or x.dtype == "float32" then panic("ndarray.bincount: expected non-negative ints") end
     local n = minlength or 0
     if x.size > 0 then
         if native.min(x) < 0 then panic("ndarray.bincount: expected non-negative ints") end
@@ -759,10 +768,12 @@ local function shown_values(a, summarize)
 end
 
 local function format_array(a, sep, indent)
+    -- float32 values are shown with the digits that tell them apart as float32
+    if a.dtype == "float32" then a = native.f32_shortest(a) end
     local summarize = a.size > THRESHOLD
     local vals = shown_values(a, summarize)
     local fmt = nil
-    if a.dtype == "float64" then
+    if a.dtype == "float64" or a.dtype == "float32" then
         fmt = float_formatter(vals)
     elseif a.dtype == "bool" then
         fmt = function(x) return x and "True" or "False" end
@@ -845,16 +856,25 @@ A.repr = M.array_repr
 local linalg = {}
 M.linalg = linalg
 
+-- (computed in float64; the results of a float32 matrix are float32, as in NumPy)
+local function like(a, r)
+    if is_error(r) or not is_nd(r) or not is_nd(a) or a.dtype ~= "float32" then return r end
+    return native.astype(r, "float32")
+end
+local function like_all(a, rs)
+    return list.map(rs, function(r) return like(a, r) end)
+end
+
 linalg.det = native.det
-linalg.inv = native.inv
-linalg.solve = native.solve
-linalg.cholesky = native.cholesky
-A.inv = native.inv
+function linalg.inv(a) return like(a, native.inv(a)) end
+function linalg.solve(a, b) return like(a, native.solve(a, b)) end
+function linalg.cholesky(a) return like(a, native.cholesky(a)) end
+A.inv = linalg.inv
 A.det = native.det
 
 -- np.linalg.qr(a [, mode = "reduced" | "complete" | "r"]) → q, r (or r)
 function linalg.qr(a, mode)
-    local r = native.qr(a, mode == "complete" and "complete" or "reduced")
+    local r = like_all(a, native.qr(a, mode == "complete" and "complete" or "reduced"))
     if mode == "r" then return r[1] end
     return r[0], r[1]
 end
@@ -862,15 +882,15 @@ end
 -- np.linalg.eigh(a) → w (ascending), v (eigenvectors as columns); the
 -- lower triangle of a symmetric matrix is used
 function linalg.eigh(a)
-    local r = native.eigh(a)
+    local r = like_all(a, native.eigh(a))
     return r[0], r[1]
 end
-function linalg.eigvalsh(a) return native.eigh(a)[0] end
+function linalg.eigvalsh(a) return like(a, native.eigh(a)[0]) end
 
 -- np.linalg.svd(a [, full_matrices = true [, compute_uv = true]]) → u, s, vh (or s)
 function linalg.svd(a, full_matrices, compute_uv)
     if full_matrices == nil then full_matrices = true end
-    local r = native.svd(a, full_matrices)
+    local r = like_all(a, native.svd(a, full_matrices))
     if compute_uv == false then return r[1] end
     return r[0], r[1], r[2]
 end
@@ -998,12 +1018,19 @@ function random.default_rng(seed)
     return g
 end
 
--- generator methods (size: nil for one number, an int, or a shape)
-function Gen.random(g, size) return native.rng_draw(g.state, RD_RANDOM, size) end
-function Gen.uniform(g, low, high, size) return native.rng_draw(g.state, RD_UNIFORM, size, low or 0.0, high or 1.0) end
-function Gen.normal(g, loc, scale, size) return native.rng_draw(g.state, RD_NORMAL, size, loc or 0.0, scale or 1.0) end
-function Gen.standard_normal(g, size) return native.rng_draw(g.state, RD_NORMAL, size, 0.0, 1.0) end
-function Gen.exponential(g, scale, size) return native.rng_draw(g.state, RD_EXPONENTIAL, size, scale or 1.0) end
+-- generator methods (size: nil for one number, an int, or a shape; dtype:
+-- "float64" (the default) or "float32")
+function Gen.random(g, size, dtype) return native.rng_draw(g.state, RD_RANDOM, size, nil, nil, dtype) end
+function Gen.uniform(g, low, high, size, dtype)
+    return native.rng_draw(g.state, RD_UNIFORM, size, low or 0.0, high or 1.0, dtype)
+end
+function Gen.normal(g, loc, scale, size, dtype)
+    return native.rng_draw(g.state, RD_NORMAL, size, loc or 0.0, scale or 1.0, dtype)
+end
+function Gen.standard_normal(g, size, dtype) return native.rng_draw(g.state, RD_NORMAL, size, 0.0, 1.0, dtype) end
+function Gen.exponential(g, scale, size, dtype)
+    return native.rng_draw(g.state, RD_EXPONENTIAL, size, scale or 1.0, nil, dtype)
+end
 function Gen.poisson(g, lam, size) return native.rng_draw(g.state, RD_POISSON, size, lam or 1.0) end
 
 -- g:integers(low [, high] [, size]): in [low, high) (or [0, low))
@@ -1090,9 +1117,201 @@ function random.choice(a, size, replace, p) return global:choice(a, size, replac
 function random.shuffle(a) global:shuffle(a) end
 function random.permutation(x) return global:permutation(x) end
 
+-- ---- einsum -----------------------------------------------------------------------------------
+
+local LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+local function chars(s)
+    local out = []
+    for i = 1, len(s) do out[] = string.sub(s, i, i) end
+    return out
+end
+
+local function set_of(labels)
+    local s = {}
+    for _, l in labels do s[l] = true end
+    return s
+end
+
+-- the axes of labels in the order of want
+local function perm(labels, want)
+    return list.map(want, function(l) return list.index(labels, l) end)
+end
+
+-- repeated labels in one operand ("ii") take its diagonal: a view
+local function diag(a, labels)
+    local first = {}
+    local order = []
+    local shape = []
+    local strides = []
+    for i, l in labels do
+        local k = first[l]
+        if k == nil then
+            first[l] = len(order)
+            order[] = l
+            shape[] = a.shape[i]
+            strides[] = a.strides[i]
+        else
+            if shape[k] ~= a.shape[i] then
+                panic(`ndarray.einsum: the repeated label '${l}' has sizes ${shape[k]} and ${a.shape[i]}`)
+            end
+            strides[k] += a.strides[i]
+        end
+    end
+    if len(order) == len(labels) then return a, labels end
+    return native.as_strided(a, shape, strides, 0), order
+end
+
+-- the labels of a not in keep, summed away
+local function sum_out(a, labels, keep)
+    local axes = []
+    local rest = []
+    for i, l in labels do
+        if keep[l] then rest[] = l else axes[] = i end
+    end
+    if len(axes) == 0 then return a, labels end
+    return M.asarray(native.sum(a, axes)), rest
+end
+
+local function dims(shape, from, count)
+    local out = []
+    for i = from, from + count - 1 do out[] = shape[i] end
+    return out
+end
+
+-- a (labels la) times b (labels lb), summed over the labels not in out:
+-- as a batched matrix product (batch, kept from a, kept from b)
+local function contract(a, la, b, lb, out)
+    local want = set_of(out)
+    local ina = set_of(la)
+    local inb = set_of(lb)
+    local keep_a = {}
+    for _, l in la do keep_a[l] = want[l] or inb[l] end
+    local keep_b = {}
+    for _, l in lb do keep_b[l] = want[l] or ina[l] end
+    a, la = sum_out(a, la, keep_a)
+    b, lb = sum_out(b, lb, keep_b)
+    ina = set_of(la)
+    inb = set_of(lb)
+    local batch = []
+    local akeep = []
+    local bkeep = []
+    local contr = []
+    for _, l in out do
+        if ina[l] and inb[l] then
+            batch[] = l
+        elseif ina[l] then
+            akeep[] = l
+        elseif inb[l] then
+            bkeep[] = l
+        end
+    end
+    for _, l in la do
+        if inb[l] and not want[l] then contr[] = l end
+    end
+    local at = native.transpose(a, perm(la, list.concat(batch, akeep, contr)))
+    local bt = native.transpose(b, perm(lb, list.concat(batch, contr, bkeep)))
+    local nb = len(batch)
+    local adims = dims(at.shape, nb, len(akeep))
+    local cdims = dims(at.shape, nb + len(akeep), len(contr))
+    local bdims = dims(bt.shape, nb + len(contr), len(bkeep))
+    for i, l in contr do
+        local other = bt.shape[nb + i]
+        if cdims[i] ~= other then panic(`ndarray.einsum: the label '${l}' has sizes ${cdims[i]} and ${other}`) end
+    end
+    local m = list.reduce(adims, function(x, y) return x * y end, 1)
+    local k = list.reduce(cdims, function(x, y) return x * y end, 1)
+    local n = list.reduce(bdims, function(x, y) return x * y end, 1)
+    local a3 = native.reshape(at, list.concat(dims(at.shape, 0, nb), [m, k]))
+    local b3 = native.reshape(bt, list.concat(dims(bt.shape, 0, nb), [k, n]))
+    local c = native.matmul(a3, b3)
+    c = native.reshape(c, list.concat(dims(c.shape, 0, nb), adims, bdims))
+    return native.transpose(c, perm(list.concat(batch, akeep, bkeep), out)), out
+end
+
+-- np.einsum(subscripts, a, b, ...): "ij,jk->ik" (matrix product), "ii->i"
+-- (diagonal), "ii" (trace), "ij->ji", "bij,bjk->bik", "...ij,...jk";
+-- without "->" the output is the labels used once, in alphabetical order.
+-- Operands are contracted left to right, each step as a matrix product
+function M.einsum(spec, ...)
+    local ops = list.map([...], function(x) return M.asarray(x) end)
+    spec = string.replace(spec, " ", "")
+    local arrow = string.find(spec, "->")
+    local lhs = arrow ~= nil and string.sub(spec, 1, arrow - 1) or spec
+    local rhs = arrow ~= nil and string.sub(spec, arrow + 2) or nil
+    local terms = string.split(lhs, ",")
+    if len(terms) ~= len(ops) then
+        panic(`ndarray.einsum: ${len(terms)} operands in the subscripts, ${len(ops)} given`)
+    end
+    -- labels for the dimensions "..." stands for: letters the subscripts do not use
+    local used = set_of(chars(string.replace(spec, "...", "")))
+    local spare = list.filter(chars(LETTERS), function(c) return not used[c] end)
+    local ell = 0
+    for i, term in terms do
+        local letters = chars(string.replace(term, "...", ""))
+        for _, c in letters do
+            if string.find(LETTERS, c) == nil then panic(`ndarray.einsum: bad label '${c}' in "${spec}"`) end
+        end
+        local extra = ops[i].ndim - len(letters)
+        if string.contains(term, "...") then
+            if extra < 0 then panic(`ndarray.einsum: operand ${i} has too few dimensions for "${term}"`) end
+            ell = math.max(ell, extra)
+        elseif extra ~= 0 then
+            panic(`ndarray.einsum: operand ${i} has ${ops[i].ndim} dimensions, "${term}" gives ${len(letters)}`)
+        end
+    end
+    local E = list.slice(spare, 0, ell)
+    local labels = []
+    for i, term in terms do
+        local parts = string.split(term, "...")
+        if len(parts) == 1 then
+            labels[] = chars(term)
+        else
+            local k = ops[i].ndim - len(parts[0]) - len(parts[1])
+            labels[] = list.concat(chars(parts[0]), list.slice(E, ell - k), chars(parts[1]))
+        end
+    end
+    local out = nil
+    if rhs == nil then
+        local count = {}
+        for _, ls in labels do
+            for _, l in ls do count[l] = (count[l] or 0) + 1 end
+        end
+        local once = list.filter(list.keys(count), function(l) return count[l] == 1 and not list.contains(E, l) end)
+        sort.sort(once)
+        out = list.concat(E, once)
+    else
+        local parts = string.split(rhs, "...")
+        out = len(parts) == 1 and chars(rhs) or list.concat(chars(parts[0]), E, chars(parts[1]))
+        local seen = {}
+        for _, l in out do
+            if seen[l] then panic(`ndarray.einsum: the output label '${l}' is repeated`) end
+            seen[l] = true
+            if not list.any(labels, function(ls) return list.contains(ls, l) end) then
+                panic(`ndarray.einsum: the output label '${l}' is in no operand`)
+            end
+        end
+    end
+    local cur, lc = diag(ops[0], labels[0])
+    for i = 1, len(ops) - 1 do
+        local b, lb = diag(ops[i], labels[i])
+        -- the labels still needed: the output's and those of the operands to come
+        local need = set_of(out)
+        for j = i + 1, len(ops) - 1 do
+            for _, l in labels[j] do need[l] = true end
+        end
+        local inter = list.filter(list.unique(list.concat(lc, lb)), function(l) return need[l] end)
+        cur, lc = contract(cur, lc, b, lb, inter)
+    end
+    cur, lc = sum_out(cur, lc, set_of(out))
+    cur = native.transpose(cur, perm(lc, out))
+    if cur.ndim == 0 then return A.item(cur) end
+    return cur
+end
+
 -- ---- files ------------------------------------------------------------------------------------
 
-local DESCR = {float64 = "<f8", int64 = "<i8", bool = "|b1"}
+local DESCR = {float64 = "<f8", float32 = "<f4", int64 = "<i8", bool = "|b1"}
 
 -- the bytes of a .npy file (format 1.0)
 local function npy_bytes(a)
@@ -1185,7 +1404,7 @@ function M.savetxt(path, a, opts)
     opts = opts or {}
     a = M.asarray(a)
     if a.ndim > 2 then panic("ndarray.savetxt: expected a 1-D or 2-D array") end
-    local fmt = opts.fmt or (a.dtype == "float64" and "%.18e" or "%d")
+    local fmt = opts.fmt or ((a.dtype == "float64" or a.dtype == "float32") and "%.18e" or "%d")
     local delim = opts.delimiter or " "
     local nl = opts.newline or "\n"
     local rows = native.tolist(a.ndim == 1 and native.reshape(a, -1, 1) or a)

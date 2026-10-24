@@ -9,8 +9,9 @@
  *
  * An ndarray is a Sea table:
  *
- *   data     float_array (dtype "float64") or int_array ("int64", "bool": 0/1)
- *   dtype    "float64" | "int64" | "bool"
+ *   data     float_array (dtype "float64") or int_array ("int64", "bool": 0/1;
+ *            "float32": two 4-byte floats packed in each element)
+ *   dtype    "float64" | "float32" | "int64" | "bool"
  *   shape    array of ints
  *   strides  array of ints, in elements (not bytes)
  *   offset   index in data of the first element
@@ -38,11 +39,14 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { DT_BOOL = 0, DT_INT = 1, DT_FLOAT = 2 };
+/* float32 elements take 4 bytes (packed two to an int_array element), the
+ * others 8 (bool and int64 in an int_array, float64 in a float_array) */
+enum { DT_BOOL = 0, DT_INT = 1, DT_F32 = 2, DT_F64 = 3, DT_COUNT = 4 };
 #define MAXD 32
+#define ESZ(dt) ((dt) == DT_F32 ? 4 : 8)
 
-static const char *DT_NAME[3] = { "bool", "int64", "float64" };
-static SeaValue dt_str[3];        /* interned dtype names (shared) */
+static const char *DT_NAME[DT_COUNT] = { "bool", "int64", "float32", "float64" };
+static SeaValue dt_str[DT_COUNT]; /* interned dtype names (shared) */
 static SeaTable *proto = NULL;    /* the methods every array gets, and its fields */
 
 /* the field names of an array (shared strings, also the keys in proto) */
@@ -58,6 +62,7 @@ typedef struct {
     int64_t size;
     char *p;              /* address of the first element */
     SeaValue data;        /* borrowed */
+    bool weak;            /* a Sea scalar: it does not widen an array's dtype */
 } ND;
 
 /* owned values a call holds until it returns (conversions, casts) */
@@ -111,16 +116,42 @@ static int dt_parse(SeaVM *vm, SeaValue v, const char *fn) {
     static const char *names[][5] = {
         { "bool", "bool_", "b1", "?", NULL },
         { "int64", "int", "i8", "int_", NULL },
+        { "float32", "f4", "single", NULL, NULL },
         { "float64", "float", "f8", "double", NULL },
     };
-    for (int d = 0; d < 3; d++)
+    for (int d = 0; d < DT_COUNT; d++)
         for (int k = 0; names[d][k]; k++)
             if (str_eq(v, names[d][k])) return d;
-    if (sea_is_string(v) || sea_is_rope(v)) FAIL("ndarray.%s: unknown dtype (float64, int64 or bool)", fn);
+    if (sea_is_string(v) || sea_is_rope(v)) FAIL("ndarray.%s: unknown dtype (float64, float32, int64 or bool)", fn);
     FAIL("ndarray.%s: dtype expected as a string, got %s", fn, sea_type_name(v));
 }
 
-static inline int promote(int a, int b) { return a > b ? a : b; }
+static inline bool is_flt(int dt) { return dt == DT_F32 || dt == DT_F64; }
+
+/* bool < int64 < float32 < float64, but int64 with float32 is float64 */
+static inline int promote(int a, int b) {
+    if ((a == DT_INT && b == DT_F32) || (a == DT_F32 && b == DT_INT)) return DT_F64;
+    return a > b ? a : b;
+}
+
+/* an element as a double / an int64, and stored from one */
+static inline double load_d(int dt, const char *p) {
+    return dt == DT_F64 ? *(const double *)p : dt == DT_F32 ? (double)*(const float *)p : (double)*(const int64_t *)p;
+}
+static inline int64_t f2i(double x) {
+    return (x >= -9.2233720368547758e18 && x < 9.2233720368547758e18) ? (int64_t)x : INT64_MIN;
+}
+static inline void store_d(int dt, char *p, double x) {
+    if (dt == DT_F64) *(double *)p = x;
+    else if (dt == DT_F32) *(float *)p = (float)x;
+    else if (dt == DT_BOOL) *(int64_t *)p = x != 0;
+    else *(int64_t *)p = f2i(x);
+}
+static inline void store_i(int dt, char *p, int64_t x) {
+    if (dt == DT_F64) *(double *)p = (double)x;
+    else if (dt == DT_F32) *(float *)p = (float)x;
+    else *(int64_t *)p = dt == DT_BOOL ? x != 0 : x;
+}
 
 static int64_t prod(const int64_t *s, int n) {
     int64_t p = 1;
@@ -204,13 +235,14 @@ static void nd_read(SeaVM *vm, SeaValue v, ND *a, const char *fn) {
     SeaValue d = ffld(t, F_DATA), sh = ffld(t, F_SHAPE), st = ffld(t, F_STRIDES), off = ffld(t, F_OFFSET);
     SeaValue dt = ffld(t, F_DTYPE);
     a->dt = -1;
-    for (int k = 0; k < 3; k++) if (dt == dt_str[k]) a->dt = k;
-    for (int k = 0; k < 3 && a->dt < 0; k++) if (str_eq(dt, DT_NAME[k])) a->dt = k;
+    a->weak = false;
+    for (int k = 0; k < DT_COUNT; k++) if (dt == dt_str[k]) a->dt = k;
+    for (int k = 0; k < DT_COUNT && a->dt < 0; k++) if (str_eq(dt, DT_NAME[k])) a->dt = k;
     if (a->dt < 0 || !sea_is_array(sh) || !sea_is_array(st) || !is_num(off))
         FAIL("ndarray.%s: not an ndarray (a table without its data, dtype, shape, strides and offset)", fn);
-    if ((a->dt == DT_FLOAT) != sea_is_float_array(d))
+    if ((a->dt == DT_F64) != sea_is_float_array(d))
         FAIL("ndarray.%s: the data of a %s array must be a%s", fn, DT_NAME[a->dt],
-             a->dt == DT_FLOAT ? " float_array" : "n int_array");
+             a->dt == DT_F64 ? " float_array" : "n int_array");
     SeaArray *sa = SEA_AS_ARRAY(sh), *ta = SEA_AS_ARRAY(st);
     if (sa->len > MAXD || sa->len != ta->len) FAIL("ndarray.%s: bad shape or strides", fn);
     a->nd = (int)sa->len;
@@ -228,18 +260,20 @@ static void nd_read(SeaVM *vm, SeaValue v, ND *a, const char *fn) {
             if (e < 0) lo += e; else hi += e;
         }
     }
-    uint32_t len = a->dt == DT_FLOAT ? SEA_AS_FLOAT_ARRAY(d)->len : SEA_AS_INT_ARRAY(d)->len;
-    if (a->size > 0 && (a->off + lo < 0 || a->off + hi >= (int64_t)len))
-        FAIL("ndarray.%s: the shape and strides reach outside the data (%u elements)", fn, len);
-    char *base = a->dt == DT_FLOAT ? (char *)SEA_AS_FLOAT_ARRAY(d)->data : (char *)SEA_AS_INT_ARRAY(d)->data;
-    a->p = base + a->off * 8;
+    int64_t len = a->dt == DT_F64 ? SEA_AS_FLOAT_ARRAY(d)->len : SEA_AS_INT_ARRAY(d)->len;
+    if (a->dt == DT_F32) len *= 2;
+    if (a->size > 0 && (a->off + lo < 0 || a->off + hi >= len))
+        FAIL("ndarray.%s: the shape and strides reach outside the data (%lld elements)", fn, (long long)len);
+    char *base = a->dt == DT_F64 ? (char *)SEA_AS_FLOAT_ARRAY(d)->data : (char *)SEA_AS_INT_ARRAY(d)->data;
+    a->p = base + a->off * ESZ(a->dt);
 }
 
 /* fresh data of n elements (owned), zeroed unless the caller writes them all */
 static SeaValue alloc_data(SeaVM *vm, int dt, int64_t n, bool zero) {
     if (n >= (int64_t)UINT32_MAX) FAIL("ndarray: an array of %lld elements is too large", (long long)n);
+    if (dt == DT_F32) n = (n + 1) / 2;
     uint32_t cap = n > 0 ? (uint32_t)n : 1;
-    if (dt == DT_FLOAT) {
+    if (dt == DT_F64) {
         SeaFloatArray *a = sea_float_array_new(cap);
         if (zero || n == 0) memset(a->data, 0, (size_t)a->cap * 8);
         a->len = (uint32_t)n;
@@ -306,7 +340,7 @@ static SeaValue wrap(SeaValue data, int dt, int nd, const int64_t *shape, const 
 static SeaValue nd_alloc(SeaVM *vm, int dt, int nd, const int64_t *shape, ND *o, bool zero) {
     int64_t n = prod(shape, nd);
     SeaValue d = alloc_data(vm, dt, n, zero);
-    o->dt = dt; o->nd = nd; o->size = n; o->off = 0; o->data = d;
+    o->dt = dt; o->nd = nd; o->size = n; o->off = 0; o->data = d; o->weak = false;
     if (nd > 0) memcpy(o->shape, shape, sizeof(int64_t) * nd);
     contig_strides(nd, shape, o->strides);
     o->p = data_ptr(d);
@@ -327,7 +361,8 @@ static SeaValue view(const ND *a, int nd, const int64_t *shape, const int64_t *s
 }
 
 static SeaValue scalar_at(int dt, const char *p) {
-    if (dt == DT_FLOAT) return sea_number_val(*(const double *)p);
+    if (dt == DT_F64) return sea_number_val(*(const double *)p);
+    if (dt == DT_F32) return sea_number_val((double)*(const float *)p);
     int64_t x = *(const int64_t *)p;
     return dt == DT_BOOL ? sea_bool_val(x != 0) : int_out(x);
 }
@@ -347,8 +382,9 @@ typedef void (*Kern)(int64_t n, char **p, const int64_t *s, void *ctx);
 typedef struct {
     int nd, k;
     int64_t shape[MAXD];
-    int64_t st[4][MAXD];
+    int64_t st[4][MAXD];   /* in elements */
     char *p[4];
+    int esz[4];            /* each operand's element size */
 } It;
 
 static bool bshape(ND **ops, int n, int *nd, int64_t *shape) {
@@ -388,6 +424,7 @@ static void it_init(It *it, ND **ops, int k, int nd, const int64_t *shape) {
             else st[j][d] = ops[j]->strides[od];
         }
         it->p[j] = ops[j]->p;
+        it->esz[j] = ESZ(ops[j]->dt);
     }
     int m = 0;
     for (int d = 0; d < nd; d++) {
@@ -422,9 +459,9 @@ static void it_run(It *it, Kern f, void *ctx) {
         f(inner, p, s, ctx);
         int d = m - 2;
         for (; d >= 0; d--) {
-            for (int j = 0; j < k; j++) p[j] += it->st[j][d] * 8;
+            for (int j = 0; j < k; j++) p[j] += it->st[j][d] * it->esz[j];
             if (++idx[d] < it->shape[d]) break;
-            for (int j = 0; j < k; j++) p[j] -= it->st[j][d] * it->shape[d] * 8;
+            for (int j = 0; j < k; j++) p[j] -= it->st[j][d] * it->shape[d] * it->esz[j];
             idx[d] = 0;
         }
         if (d < 0) return;
@@ -442,26 +479,31 @@ static void run(ND **ops, int k, int nd, const int64_t *shape, Kern f, void *ctx
 
 typedef struct { int from, to; } Cast;
 
+#define CAST_LOOP(TO, TA, EXPR)                                                       \
+    do {                                                                              \
+        TO *o = (TO *)p[0]; const TA *a = (const TA *)p[1];                           \
+        for (int64_t i = 0; i < n; i++) { TA x = a[i * sa]; o[i * so] = (TO)(EXPR); } \
+    } while (0)
+
 static void k_cast(int64_t n, char **p, const int64_t *s, void *ctx) {
     const Cast *c = ctx;
     int64_t so = s[0], sa = s[1];
-    if (c->from == DT_FLOAT && c->to == DT_FLOAT) {
-        double *o = (double *)p[0]; const double *a = (const double *)p[1];
-        for (int64_t i = 0; i < n; i++) o[i * so] = a[i * sa];
-    } else if (c->from == DT_FLOAT) {
-        int64_t *o = (int64_t *)p[0]; const double *a = (const double *)p[1];
-        if (c->to == DT_BOOL) for (int64_t i = 0; i < n; i++) o[i * so] = a[i * sa] != 0;
-        else for (int64_t i = 0; i < n; i++) {
-            double x = a[i * sa];
-            o[i * so] = (x >= -9.2233720368547758e18 && x < 9.2233720368547758e18) ? (int64_t)x : INT64_MIN;
-        }
-    } else if (c->to == DT_FLOAT) {
-        double *o = (double *)p[0]; const int64_t *a = (const int64_t *)p[1];
-        for (int64_t i = 0; i < n; i++) o[i * so] = (double)a[i * sa];
+    int to = c->to, from = c->from;
+    if (from == DT_F64) {
+        if (to == DT_F64) CAST_LOOP(double, double, x);
+        else if (to == DT_F32) CAST_LOOP(float, double, x);
+        else if (to == DT_BOOL) CAST_LOOP(int64_t, double, x != 0);
+        else CAST_LOOP(int64_t, double, f2i(x));
+    } else if (from == DT_F32) {
+        if (to == DT_F64) CAST_LOOP(double, float, x);
+        else if (to == DT_F32) CAST_LOOP(float, float, x);
+        else if (to == DT_BOOL) CAST_LOOP(int64_t, float, x != 0);
+        else CAST_LOOP(int64_t, float, f2i(x));
     } else {
-        int64_t *o = (int64_t *)p[0]; const int64_t *a = (const int64_t *)p[1];
-        if (c->to == DT_BOOL && c->from != DT_BOOL) for (int64_t i = 0; i < n; i++) o[i * so] = a[i * sa] != 0;
-        else for (int64_t i = 0; i < n; i++) o[i * so] = a[i * sa];
+        if (to == DT_F64) CAST_LOOP(double, int64_t, x);
+        else if (to == DT_F32) CAST_LOOP(float, int64_t, x);
+        else if (to == DT_BOOL && from != DT_BOOL) CAST_LOOP(int64_t, int64_t, x != 0);
+        else CAST_LOOP(int64_t, int64_t, x);
     }
 }
 
@@ -498,13 +540,15 @@ static void opnd(SeaVM *vm, SeaValue v, ND *a, Tmp *t, const char *fn) {
         *slot = sea_is_int(v) ? sea_as_int(v) : sea_as_bool(v);
         a->dt = sea_is_int(v) ? DT_INT : DT_BOOL;
         a->p = (char *)slot;
+        a->weak = true;
         return;
     }
     if (sea_is_number(v)) {
         double *slot = &t->d[t->nd_++ & 3];
         *slot = sea_as_number(v);
-        a->dt = DT_FLOAT;
+        a->dt = DT_F64;
         a->p = (char *)slot;
+        a->weak = true;
         return;
     }
     if (is_nd(v)) { nd_read(vm, v, a, fn); return; }
@@ -523,17 +567,11 @@ static void as_dt(SeaVM *vm, ND *a, int dt, Tmp *t) {
     /* bool → int64: the same storage (0/1) */
     if (a->dt == DT_BOOL && dt == DT_INT) { a->dt = DT_INT; return; }
     if (a->nd == 0) {
-        if (dt == DT_FLOAT) {
-            double *slot = &t->d[t->nd_++ & 3];
-            *slot = a->dt == DT_FLOAT ? *(double *)a->p : (double)*(int64_t *)a->p;
-            a->p = (char *)slot;
-        } else {
-            int64_t *slot = &t->i[t->ni++ & 3];
-            int64_t x = a->dt == DT_FLOAT ? (int64_t)*(double *)a->p : *(int64_t *)a->p;
-            if (dt == DT_BOOL) x = a->dt == DT_FLOAT ? *(double *)a->p != 0 : x != 0;
-            *slot = x;
-            a->p = (char *)slot;
-        }
+        /* (a double slot holds a float32 too) */
+        char *slot = is_flt(dt) ? (char *)&t->d[t->nd_++ & 3] : (char *)&t->i[t->ni++ & 3];
+        if (is_flt(a->dt)) store_d(dt, slot, load_d(a->dt, a->p));
+        else store_i(dt, slot, *(int64_t *)a->p);
+        a->p = slot;
         a->dt = dt;
         return;
     }
@@ -541,6 +579,20 @@ static void as_dt(SeaVM *vm, ND *a, int dt, Tmp *t) {
     SeaValue c = copy_as(vm, a, dt, &o);
     tmp_hold(t, c);
     *a = o;
+}
+
+/* the dtype of an operation on a and b: a Sea scalar keeps an array's dtype
+ * when it is of the same kind or narrower (NumPy's rule for Python scalars:
+ * float32 array * 2.5 stays float32, int64 array * 2.5 is float64) */
+static int weak_with(int arr, int sc) {
+    if (sc == DT_F64) return is_flt(arr) ? arr : DT_F64;
+    if (sc == DT_INT) return arr == DT_BOOL ? DT_INT : arr;
+    return arr;
+}
+static int promote_w(const ND *a, const ND *b) {
+    if (a->weak && !b->weak) return weak_with(b->dt, a->dt);
+    if (b->weak && !a->weak) return weak_with(a->dt, b->dt);
+    return promote(a->dt, b->dt);
 }
 
 /* ---- conversion from Sea values --------------------------------------------------- */
@@ -556,7 +608,7 @@ static void probe(SeaVM *vm, SeaValue v, Probe *pr, int depth, const char *fn) {
     } else if (sea_is_float_array(v) || sea_is_int_array(v)) {
         if (depth == pr->nd) pr->shape[pr->nd++] = sea_is_float_array(v) ? SEA_AS_FLOAT_ARRAY(v)->len
                                                                          : SEA_AS_INT_ARRAY(v)->len;
-        pr->dt = promote(pr->dt, sea_is_float_array(v) ? DT_FLOAT : DT_INT);
+        pr->dt = promote(pr->dt, sea_is_float_array(v) ? DT_F64 : DT_INT);
     } else if (is_nd(v)) {
         ND a;
         nd_read(vm, v, &a, fn);
@@ -564,7 +616,7 @@ static void probe(SeaVM *vm, SeaValue v, Probe *pr, int depth, const char *fn) {
             if (depth + i == pr->nd) pr->shape[pr->nd++] = a.shape[i];
         pr->dt = promote(pr->dt, a.dt);
     } else if (sea_is_int(v)) pr->dt = promote(pr->dt, DT_INT);
-    else if (sea_is_number(v)) pr->dt = DT_FLOAT;
+    else if (sea_is_number(v)) pr->dt = DT_F64;
     else if (sea_is_bool(v)) pr->dt = promote(pr->dt, DT_BOOL);
     else FAIL("ndarray.%s: an array holds numbers and bools, got %s", fn, sea_type_name(v));
 }
@@ -578,21 +630,17 @@ static void fill_from(SeaVM *vm, SeaValue v, const Probe *pr, int depth, int dt,
     if (sea_is_array(v)) {
         SeaArray *a = SEA_AS_ARRAY(v);
         if (depth >= pr->nd || a->len != pr->shape[depth]) ragged(vm, fn);
-        for (uint32_t i = 0; i < a->len; i++) fill_from(vm, a->data[i], pr, depth + 1, dt, p + i * st[depth] * 8, st, fn);
+        for (uint32_t i = 0; i < a->len; i++)
+            fill_from(vm, a->data[i], pr, depth + 1, dt, p + i * st[depth] * ESZ(dt), st, fn);
         return;
     }
     if (sea_is_float_array(v) || sea_is_int_array(v)) {
         uint32_t n = sea_is_float_array(v) ? SEA_AS_FLOAT_ARRAY(v)->len : SEA_AS_INT_ARRAY(v)->len;
         if (depth != pr->nd - 1 || n != pr->shape[depth]) ragged(vm, fn);
         for (uint32_t i = 0; i < n; i++) {
-            char *q = p + i * st[depth] * 8;
-            if (sea_is_float_array(v)) {
-                double x = SEA_AS_FLOAT_ARRAY(v)->data[i];
-                if (dt == DT_FLOAT) *(double *)q = x; else *(int64_t *)q = dt == DT_BOOL ? x != 0 : (int64_t)x;
-            } else {
-                int64_t x = SEA_AS_INT_ARRAY(v)->data[i];
-                if (dt == DT_FLOAT) *(double *)q = (double)x; else *(int64_t *)q = dt == DT_BOOL ? x != 0 : x;
-            }
+            char *q = p + i * st[depth] * ESZ(dt);
+            if (sea_is_float_array(v)) store_d(dt, q, SEA_AS_FLOAT_ARRAY(v)->data[i]);
+            else store_i(dt, q, SEA_AS_INT_ARRAY(v)->data[i]);
         }
         return;
     }
@@ -609,10 +657,8 @@ static void fill_from(SeaVM *vm, SeaValue v, const Probe *pr, int depth, int dt,
         return;
     }
     if (depth != pr->nd) ragged(vm, fn);
-    double x = dv(v);
-    if (dt == DT_FLOAT) *(double *)p = x;
-    else if (dt == DT_BOOL) *(int64_t *)p = x != 0;
-    else *(int64_t *)p = sea_is_int(v) ? sea_as_int(v) : sea_is_bool(v) ? sea_as_bool(v) : (int64_t)x;
+    if (sea_is_number(v)) store_d(dt, p, sea_as_number(v));
+    else store_i(dt, p, sea_is_int(v) ? sea_as_int(v) : sea_as_bool(v));
 }
 
 /* np.array(v [, dtype]) (owned table) */
@@ -620,7 +666,7 @@ static SeaValue from_value(SeaVM *vm, SeaValue v, int dt, const char *fn) {
     Probe pr;
     memset(&pr, 0, sizeof pr);
     pr.dt = DT_BOOL;
-    if (sea_is_array(v) && SEA_AS_ARRAY(v)->len == 0) pr.dt = DT_FLOAT;
+    if (sea_is_array(v) && SEA_AS_ARRAY(v)->len == 0) pr.dt = DT_F64;
     probe(vm, v, &pr, 0, fn);
     if (dt < 0) dt = pr.dt;
     ND o;
@@ -687,29 +733,33 @@ static inline int64_t i_pow(int64_t x, int64_t y) {
 static inline double f_max(double x, double y) { return (x != x || x > y) ? x : (y != y ? y : (x == y ? x : y)); }
 static inline double f_min(double x, double y) { return (x != x || x < y) ? x : (y != y ? y : (x == y ? x : y)); }
 
-K2(f_add, double, double, x + y)
-K2(f_sub, double, double, x - y)
-K2(f_mul, double, double, x * y)
-K2(f_div, double, double, x / y)
-K2(f_fdiv, double, double, py_fdiv(x, y))
-K2(f_mod, double, double, py_fmod(x, y))
-K2(f_pow, double, double, pow(x, y))
-K2(f_maximum, double, double, f_max(x, y))
-K2(f_minimum, double, double, f_min(x, y))
-K2(f_fmax, double, double, fmax(x, y))
-K2(f_fmin, double, double, fmin(x, y))
-K2(f_atan2, double, double, atan2(x, y))
-K2(f_hypot, double, double, hypot(x, y))
-K2(f_copysign, double, double, copysign(x, y))
-K2(f_eq, double, int64_t, x == y)
-K2(f_ne, double, int64_t, x != y)
-K2(f_lt, double, int64_t, x < y)
-K2(f_le, double, int64_t, x <= y)
-K2(f_gt, double, int64_t, x > y)
-K2(f_ge, double, int64_t, x >= y)
-K2(f_land, double, int64_t, (x != 0) && (y != 0))
-K2(f_lor, double, int64_t, (x != 0) || (y != 0))
-K2(f_lxor, double, int64_t, (x != 0) != (y != 0))
+/* each float kernel twice: f_ on float64, g_ on float32 */
+#define KF2(n, EXPR) K2(f_##n, double, double, EXPR) K2(g_##n, float, float, EXPR)
+#define KC2(n, EXPR) K2(f_##n, double, int64_t, EXPR) K2(g_##n, float, int64_t, EXPR)
+
+KF2(add, x + y)
+KF2(sub, x - y)
+KF2(mul, x * y)
+KF2(div, x / y)
+KF2(fdiv, py_fdiv(x, y))
+KF2(mod, py_fmod(x, y))
+KF2(pow, pow(x, y))
+KF2(maximum, f_max(x, y))
+KF2(minimum, f_min(x, y))
+KF2(fmax, fmax(x, y))
+KF2(fmin, fmin(x, y))
+KF2(atan2, atan2(x, y))
+KF2(hypot, hypot(x, y))
+KF2(copysign, copysign(x, y))
+KC2(eq, x == y)
+KC2(ne, x != y)
+KC2(lt, x < y)
+KC2(le, x <= y)
+KC2(gt, x > y)
+KC2(ge, x >= y)
+KC2(land, (x != 0) && (y != 0))
+KC2(lor, (x != 0) || (y != 0))
+KC2(lxor, (x != 0) != (y != 0))
 
 K2(i_add_k, int64_t, int64_t, i_add(x, y))
 K2(i_sub_k, int64_t, int64_t, i_sub(x, y))
@@ -737,23 +787,25 @@ K2(i_shr, int64_t, int64_t, (y < 0 || y > 63) ? (x < 0 ? -1 : 0) : x >> y)
 /* kind: what dtype the result has */
 enum { B_ARITH, B_FLOAT, B_CMP, B_LOGIC, B_INT };
 
-typedef struct { const char *name; Kern f, i; int kind; } Bin;
+/* f: float64 kernel, g: float32, i: int64 (and bool) */
+typedef struct { const char *name; Kern f, g, i; int kind; } Bin;
 
+#define FG(n) f_##n, g_##n
 static const Bin BIN[] = {
-    { "add", f_add, i_add_k, B_ARITH },          { "subtract", f_sub, i_sub_k, B_ARITH },
-    { "multiply", f_mul, i_mul_k, B_ARITH },     { "divide", f_div, NULL, B_FLOAT },
-    { "floor_divide", f_fdiv, i_fdiv_k, B_ARITH }, { "mod", f_mod, i_mod_k, B_ARITH },
-    { "power", f_pow, i_pow_k, B_ARITH },        { "maximum", f_maximum, i_maximum, B_ARITH },
-    { "minimum", f_minimum, i_minimum, B_ARITH }, { "fmax", f_fmax, i_maximum, B_ARITH },
-    { "fmin", f_fmin, i_minimum, B_ARITH },      { "arctan2", f_atan2, NULL, B_FLOAT },
-    { "hypot", f_hypot, NULL, B_FLOAT },         { "copysign", f_copysign, NULL, B_FLOAT },
-    { "equal", f_eq, i_eq, B_CMP },              { "not_equal", f_ne, i_ne, B_CMP },
-    { "less", f_lt, i_lt, B_CMP },               { "less_equal", f_le, i_le, B_CMP },
-    { "greater", f_gt, i_gt, B_CMP },            { "greater_equal", f_ge, i_ge, B_CMP },
-    { "logical_and", f_land, i_land, B_LOGIC },  { "logical_or", f_lor, i_lor, B_LOGIC },
-    { "logical_xor", f_lxor, i_lxor, B_LOGIC },  { "bitwise_and", NULL, i_band, B_INT },
-    { "bitwise_or", NULL, i_bor, B_INT },        { "bitwise_xor", NULL, i_bxor, B_INT },
-    { "left_shift", NULL, i_shl, B_INT },        { "right_shift", NULL, i_shr, B_INT },
+    { "add", FG(add), i_add_k, B_ARITH },          { "subtract", FG(sub), i_sub_k, B_ARITH },
+    { "multiply", FG(mul), i_mul_k, B_ARITH },     { "divide", FG(div), NULL, B_FLOAT },
+    { "floor_divide", FG(fdiv), i_fdiv_k, B_ARITH }, { "mod", FG(mod), i_mod_k, B_ARITH },
+    { "power", FG(pow), i_pow_k, B_ARITH },        { "maximum", FG(maximum), i_maximum, B_ARITH },
+    { "minimum", FG(minimum), i_minimum, B_ARITH }, { "fmax", FG(fmax), i_maximum, B_ARITH },
+    { "fmin", FG(fmin), i_minimum, B_ARITH },      { "arctan2", FG(atan2), NULL, B_FLOAT },
+    { "hypot", FG(hypot), NULL, B_FLOAT },         { "copysign", FG(copysign), NULL, B_FLOAT },
+    { "equal", FG(eq), i_eq, B_CMP },              { "not_equal", FG(ne), i_ne, B_CMP },
+    { "less", FG(lt), i_lt, B_CMP },               { "less_equal", FG(le), i_le, B_CMP },
+    { "greater", FG(gt), i_gt, B_CMP },            { "greater_equal", FG(ge), i_ge, B_CMP },
+    { "logical_and", FG(land), i_land, B_LOGIC },  { "logical_or", FG(lor), i_lor, B_LOGIC },
+    { "logical_xor", FG(lxor), i_lxor, B_LOGIC },  { "bitwise_and", NULL, NULL, i_band, B_INT },
+    { "bitwise_or", NULL, NULL, i_bor, B_INT },    { "bitwise_xor", NULL, NULL, i_bxor, B_INT },
+    { "left_shift", NULL, NULL, i_shl, B_INT },    { "right_shift", NULL, NULL, i_shr, B_INT },
 };
 #define NBIN ((int)(sizeof BIN / sizeof BIN[0]))
 
@@ -797,10 +849,10 @@ static SeaValue binary(SeaVM *vm, int argc, SeaValue *args, const Bin *op) {
     ND a, b;
     opnd(vm, args[0], &a, &t, op->name);
     opnd(vm, args[1], &b, &t, op->name);
-    int c = promote(a.dt, b.dt);
+    int c = promote_w(&a, &b);
     if (c == DT_BOOL) c = DT_INT;
-    if (op->kind == B_FLOAT) c = DT_FLOAT;
-    if (op->kind == B_INT && c == DT_FLOAT) FAIL("ndarray.%s: only for int and bool arrays", op->name);
+    if (op->kind == B_FLOAT && !is_flt(c)) c = DT_F64;
+    if (op->kind == B_INT && is_flt(c)) FAIL("ndarray.%s: only for int and bool arrays", op->name);
     int odt = c;
     if (op->kind == B_CMP || op->kind == B_LOGIC) odt = DT_BOOL;
     if (op->kind == B_INT && a.dt == DT_BOOL && b.dt == DT_BOOL) odt = DT_BOOL;
@@ -812,7 +864,7 @@ static SeaValue binary(SeaVM *vm, int argc, SeaValue *args, const Bin *op) {
     ND r, out; bool has_out;
     SeaValue res = result_for(vm, argc, args, 2, odt, nd, shape, &r, &out, &has_out, op->name);
     ND *ops[3] = { &r, &a, &b };
-    run(ops, 3, nd, shape, c == DT_FLOAT ? op->f : op->i, NULL);
+    run(ops, 3, nd, shape, c == DT_F64 ? op->f : c == DT_F32 ? op->g : op->i, NULL);
     tmp_free(&t);
     return result_done(vm, argc, args, 2, res, &r, &out, has_out, op->name);
 }
@@ -837,41 +889,45 @@ BIN_FN(27, n_right_shift)
         else for (int64_t i = 0; i < n; i++) { TA x = a[i * sa]; o[i * so] = (TO)(EXPR); }           \
     }
 
-K1(u_negf, double, double, -x)
-K1(u_absf, double, double, fabs(x))
-K1(u_signf, double, double, x > 0 ? 1.0 : x < 0 ? -1.0 : x)
-K1(u_squaref, double, double, x * x)
-K1(u_sqrt, double, double, sqrt(x))
-K1(u_cbrt, double, double, cbrt(x))
-K1(u_recip, double, double, 1.0 / x)
-K1(u_exp, double, double, exp(x))
-K1(u_exp2, double, double, exp2(x))
-K1(u_expm1, double, double, expm1(x))
-K1(u_log, double, double, log(x))
-K1(u_log2, double, double, log2(x))
-K1(u_log10, double, double, log10(x))
-K1(u_log1p, double, double, log1p(x))
-K1(u_sin, double, double, sin(x))
-K1(u_cos, double, double, cos(x))
-K1(u_tan, double, double, tan(x))
-K1(u_asin, double, double, asin(x))
-K1(u_acos, double, double, acos(x))
-K1(u_atan, double, double, atan(x))
-K1(u_sinh, double, double, sinh(x))
-K1(u_cosh, double, double, cosh(x))
-K1(u_tanh, double, double, tanh(x))
-K1(u_asinh, double, double, asinh(x))
-K1(u_acosh, double, double, acosh(x))
-K1(u_atanh, double, double, atanh(x))
-K1(u_floor, double, double, floor(x))
-K1(u_ceil, double, double, ceil(x))
-K1(u_trunc, double, double, trunc(x))
-K1(u_rint, double, double, nearbyint(x))
-K1(u_isnan, double, int64_t, x != x)
-K1(u_isinf, double, int64_t, isinf(x) != 0)
-K1(u_isfinite, double, int64_t, isfinite(x) != 0)
-K1(u_notf, double, int64_t, x == 0)
-K1(u_signbit, double, int64_t, signbit(x) != 0)
+/* each float kernel twice: u_ on float64, v_ on float32 */
+#define KF1(n, EXPR) K1(u_##n, double, double, EXPR) K1(v_##n, float, float, EXPR)
+#define KB1(n, EXPR) K1(u_##n, double, int64_t, EXPR) K1(v_##n, float, int64_t, EXPR)
+
+KF1(negf, -x)
+KF1(absf, fabs(x))
+KF1(signf, x > 0 ? 1.0 : x < 0 ? -1.0 : x)
+KF1(squaref, x * x)
+KF1(sqrt, sqrt(x))
+KF1(cbrt, cbrt(x))
+KF1(recip, 1.0 / x)
+KF1(exp, exp(x))
+KF1(exp2, exp2(x))
+KF1(expm1, expm1(x))
+KF1(log, log(x))
+KF1(log2, log2(x))
+KF1(log10, log10(x))
+KF1(log1p, log1p(x))
+KF1(sin, sin(x))
+KF1(cos, cos(x))
+KF1(tan, tan(x))
+KF1(asin, asin(x))
+KF1(acos, acos(x))
+KF1(atan, atan(x))
+KF1(sinh, sinh(x))
+KF1(cosh, cosh(x))
+KF1(tanh, tanh(x))
+KF1(asinh, asinh(x))
+KF1(acosh, acosh(x))
+KF1(atanh, atanh(x))
+KF1(floor, floor(x))
+KF1(ceil, ceil(x))
+KF1(trunc, trunc(x))
+KF1(rint, nearbyint(x))
+KB1(isnan, x != x)
+KB1(isinf, isinf(x) != 0)
+KB1(isfinite, isfinite(x) != 0)
+KB1(notf, x == 0)
+KB1(signbit, signbit(x) != 0)
 K1(u_negi, int64_t, int64_t, (int64_t)(0 - (uint64_t)x))
 K1(u_absi, int64_t, int64_t, x < 0 ? (int64_t)(0 - (uint64_t)x) : x)
 K1(u_signi, int64_t, int64_t, (x > 0) - (x < 0))
@@ -888,27 +944,29 @@ K1(u_invertb, int64_t, int64_t, x == 0)
  * U_ROUND (ints unchanged), U_BOOL (a bool result), U_INT (ints only) */
 enum { U_FLOAT, U_SAME, U_ROUND, U_BOOL, U_INT };
 
-typedef struct { const char *name; Kern f, i; int kind; } Un;
+/* f: float64 kernel, g: float32, i: int64 (and bool) */
+typedef struct { const char *name; Kern f, g, i; int kind; } Un;
 
+#define UV(n) u_##n, v_##n
 static const Un UN[] = {
-    { "negative", u_negf, u_negi, U_SAME },     { "absolute", u_absf, u_absi, U_SAME },
-    { "sign", u_signf, u_signi, U_SAME },       { "square", u_squaref, u_squarei, U_SAME },
-    { "sqrt", u_sqrt, NULL, U_FLOAT },          { "cbrt", u_cbrt, NULL, U_FLOAT },
-    { "reciprocal", u_recip, NULL, U_FLOAT },   { "exp", u_exp, NULL, U_FLOAT },
-    { "exp2", u_exp2, NULL, U_FLOAT },          { "expm1", u_expm1, NULL, U_FLOAT },
-    { "log", u_log, NULL, U_FLOAT },            { "log2", u_log2, NULL, U_FLOAT },
-    { "log10", u_log10, NULL, U_FLOAT },        { "log1p", u_log1p, NULL, U_FLOAT },
-    { "sin", u_sin, NULL, U_FLOAT },            { "cos", u_cos, NULL, U_FLOAT },
-    { "tan", u_tan, NULL, U_FLOAT },            { "arcsin", u_asin, NULL, U_FLOAT },
-    { "arccos", u_acos, NULL, U_FLOAT },        { "arctan", u_atan, NULL, U_FLOAT },
-    { "sinh", u_sinh, NULL, U_FLOAT },          { "cosh", u_cosh, NULL, U_FLOAT },
-    { "tanh", u_tanh, NULL, U_FLOAT },          { "arcsinh", u_asinh, NULL, U_FLOAT },
-    { "arccosh", u_acosh, NULL, U_FLOAT },      { "arctanh", u_atanh, NULL, U_FLOAT },
-    { "floor", u_floor, u_copyi, U_ROUND },     { "ceil", u_ceil, u_copyi, U_ROUND },
-    { "trunc", u_trunc, u_copyi, U_ROUND },     { "rint", u_rint, u_copyi, U_ROUND },
-    { "isnan", u_isnan, u_falsei, U_BOOL },     { "isinf", u_isinf, u_falsei, U_BOOL },
-    { "isfinite", u_isfinite, u_truei, U_BOOL }, { "logical_not", u_notf, u_noti, U_BOOL },
-    { "signbit", u_signbit, u_signbiti, U_BOOL }, { "invert", NULL, u_inverti, U_INT },
+    { "negative", UV(negf), u_negi, U_SAME },     { "absolute", UV(absf), u_absi, U_SAME },
+    { "sign", UV(signf), u_signi, U_SAME },       { "square", UV(squaref), u_squarei, U_SAME },
+    { "sqrt", UV(sqrt), NULL, U_FLOAT },          { "cbrt", UV(cbrt), NULL, U_FLOAT },
+    { "reciprocal", UV(recip), NULL, U_FLOAT },   { "exp", UV(exp), NULL, U_FLOAT },
+    { "exp2", UV(exp2), NULL, U_FLOAT },          { "expm1", UV(expm1), NULL, U_FLOAT },
+    { "log", UV(log), NULL, U_FLOAT },            { "log2", UV(log2), NULL, U_FLOAT },
+    { "log10", UV(log10), NULL, U_FLOAT },        { "log1p", UV(log1p), NULL, U_FLOAT },
+    { "sin", UV(sin), NULL, U_FLOAT },            { "cos", UV(cos), NULL, U_FLOAT },
+    { "tan", UV(tan), NULL, U_FLOAT },            { "arcsin", UV(asin), NULL, U_FLOAT },
+    { "arccos", UV(acos), NULL, U_FLOAT },        { "arctan", UV(atan), NULL, U_FLOAT },
+    { "sinh", UV(sinh), NULL, U_FLOAT },          { "cosh", UV(cosh), NULL, U_FLOAT },
+    { "tanh", UV(tanh), NULL, U_FLOAT },          { "arcsinh", UV(asinh), NULL, U_FLOAT },
+    { "arccosh", UV(acosh), NULL, U_FLOAT },      { "arctanh", UV(atanh), NULL, U_FLOAT },
+    { "floor", UV(floor), u_copyi, U_ROUND },     { "ceil", UV(ceil), u_copyi, U_ROUND },
+    { "trunc", UV(trunc), u_copyi, U_ROUND },     { "rint", UV(rint), u_copyi, U_ROUND },
+    { "isnan", UV(isnan), u_falsei, U_BOOL },     { "isinf", UV(isinf), u_falsei, U_BOOL },
+    { "isfinite", UV(isfinite), u_truei, U_BOOL }, { "logical_not", UV(notf), u_noti, U_BOOL },
+    { "signbit", UV(signbit), u_signbiti, U_BOOL }, { "invert", NULL, NULL, u_inverti, U_INT },
 };
 
 static SeaValue unary(SeaVM *vm, int argc, SeaValue *args, const Un *op) {
@@ -919,13 +977,16 @@ static SeaValue unary(SeaVM *vm, int argc, SeaValue *args, const Un *op) {
     Kern k;
     int odt;
     if (op->kind == U_INT) {
-        if (a.dt == DT_FLOAT) FAIL("ndarray.%s: only for int and bool arrays", op->name);
+        if (is_flt(a.dt)) FAIL("ndarray.%s: only for int and bool arrays", op->name);
         k = a.dt == DT_BOOL ? u_invertb : op->i;
         odt = a.dt;
-    } else if (op->kind == U_FLOAT || (a.dt == DT_FLOAT)) {
-        as_dt(vm, &a, DT_FLOAT, &t);
+    } else if (is_flt(a.dt)) {
+        k = a.dt == DT_F32 ? op->g : op->f;
+        odt = op->kind == U_BOOL ? DT_BOOL : a.dt;
+    } else if (op->kind == U_FLOAT) {
+        as_dt(vm, &a, DT_F64, &t);
         k = op->f;
-        odt = op->kind == U_BOOL ? DT_BOOL : DT_FLOAT;
+        odt = DT_F64;
     } else {
         k = op->i;
         odt = op->kind == U_BOOL ? DT_BOOL : (op->kind == U_ROUND ? a.dt : DT_INT);
@@ -955,6 +1016,12 @@ static void k_where_f(int64_t n, char **p, const int64_t *s, void *ctx) {
     const double *x = (const double *)p[2], *y = (const double *)p[3];
     for (int64_t i = 0; i < n; i++) o[i * s[0]] = c[i * s[1]] ? x[i * s[2]] : y[i * s[3]];
 }
+static void k_where_g(int64_t n, char **p, const int64_t *s, void *ctx) {
+    (void)ctx;
+    float *o = (float *)p[0]; const int64_t *c = (const int64_t *)p[1];
+    const float *x = (const float *)p[2], *y = (const float *)p[3];
+    for (int64_t i = 0; i < n; i++) o[i * s[0]] = c[i * s[1]] ? x[i * s[2]] : y[i * s[3]];
+}
 static void k_where_i(int64_t n, char **p, const int64_t *s, void *ctx) {
     (void)ctx;
     int64_t *o = (int64_t *)p[0]; const int64_t *c = (const int64_t *)p[1];
@@ -969,7 +1036,7 @@ static SeaValue n_where(SeaVM *vm, int argc, SeaValue *args) {
     opnd(vm, args[0], &c, &t, "where");
     opnd(vm, args[1], &x, &t, "where");
     opnd(vm, args[2], &y, &t, "where");
-    int dt = promote(x.dt, y.dt);
+    int dt = promote_w(&x, &y);
     ND *ops0[3] = { &c, &x, &y };
     int nd; int64_t shape[MAXD];
     if (!bshape(ops0, 3, &nd, shape)) bfail(vm, "where", ops0, 3);
@@ -979,7 +1046,7 @@ static SeaValue n_where(SeaVM *vm, int argc, SeaValue *args) {
     ND r;
     SeaValue res = nd_raw(vm, dt, nd, shape, &r);
     ND *ops[4] = { &r, &c, &x, &y };
-    run(ops, 4, nd, shape, dt == DT_FLOAT ? k_where_f : k_where_i, NULL);
+    run(ops, 4, nd, shape, dt == DT_F64 ? k_where_f : dt == DT_F32 ? k_where_g : k_where_i, NULL);
     tmp_free(&t);
     return finish(res, &r);
 }
@@ -988,27 +1055,49 @@ static SeaValue n_where(SeaVM *vm, int argc, SeaValue *args) {
 
 enum { R_SUM, R_PROD, R_MIN, R_MAX, R_ANY, R_ALL, R_NANSUM };
 
-static void k_sum_f(int64_t n, char **p, const int64_t *s, void *ctx) {
-    (void)ctx;
-    double *o = (double *)p[0]; const double *a = (const double *)p[1];
-    int64_t so = s[0], sa = s[1];
-    if (so == 0) {
-        double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
-        int64_t i = 0;
-        if (sa == 1) for (; i + 4 <= n; i += 4) { s0 += a[i]; s1 += a[i + 1]; s2 += a[i + 2]; s3 += a[i + 3]; }
-        for (; i < n; i++) s0 += a[i * sa];
-        o[0] += (s0 + s1) + (s2 + s3);
-    } else if (so == 1 && sa == 1) {
-        for (int64_t i = 0; i < n; i++) o[i] += a[i];
-    } else {
-        for (int64_t i = 0; i < n; i++) o[i * so] += a[i * sa];
+/* float reductions accumulate into float64 (k_*_f from float64, k_*_g from
+ * float32: a float32 result is rounded at the end) */
+#define RED_FLOAT(SUFFIX, TA)                                                                          \
+    static void k_sum_##SUFFIX(int64_t n, char **p, const int64_t *s, void *ctx) {                     \
+        (void)ctx;                                                                                     \
+        double *o = (double *)p[0]; const TA *a = (const TA *)p[1];                                    \
+        int64_t so = s[0], sa = s[1];                                                                  \
+        if (so == 0) {                                                                                 \
+            double s0 = 0, s1 = 0, s2 = 0, s3 = 0;                                                     \
+            int64_t i = 0;                                                                             \
+            if (sa == 1) for (; i + 4 <= n; i += 4) { s0 += a[i]; s1 += a[i + 1]; s2 += a[i + 2]; s3 += a[i + 3]; } \
+            for (; i < n; i++) s0 += a[i * sa];                                                        \
+            o[0] += (s0 + s1) + (s2 + s3);                                                             \
+        } else if (so == 1 && sa == 1) {                                                               \
+            for (int64_t i = 0; i < n; i++) o[i] += a[i];                                              \
+        } else {                                                                                       \
+            for (int64_t i = 0; i < n; i++) o[i * so] += a[i * sa];                                    \
+        }                                                                                              \
+    }                                                                                                  \
+    static void k_nansum_##SUFFIX(int64_t n, char **p, const int64_t *s, void *ctx) {                  \
+        (void)ctx;                                                                                     \
+        double *o = (double *)p[0]; const TA *a = (const TA *)p[1];                                    \
+        for (int64_t i = 0; i < n; i++) { double x = a[i * s[1]]; if (x == x) o[i * s[0]] += x; }      \
+    }                                                                                                  \
+    static void k_prod_##SUFFIX(int64_t n, char **p, const int64_t *s, void *ctx) {                    \
+        (void)ctx;                                                                                     \
+        double *o = (double *)p[0]; const TA *a = (const TA *)p[1];                                    \
+        for (int64_t i = 0; i < n; i++) o[i * s[0]] *= a[i * s[1]];                                    \
+    }                                                                                                  \
+    static void k_min_##SUFFIX(int64_t n, char **p, const int64_t *s, void *ctx) {                     \
+        (void)ctx;                                                                                     \
+        double *o = (double *)p[0]; const TA *a = (const TA *)p[1];                                    \
+        for (int64_t i = 0; i < n; i++) { double x = a[i * s[1]], *q = &o[i * s[0]]; if (x < *q || x != x) *q = x; } \
+    }                                                                                                  \
+    static void k_max_##SUFFIX(int64_t n, char **p, const int64_t *s, void *ctx) {                     \
+        (void)ctx;                                                                                     \
+        double *o = (double *)p[0]; const TA *a = (const TA *)p[1];                                    \
+        for (int64_t i = 0; i < n; i++) { double x = a[i * s[1]], *q = &o[i * s[0]]; if (x > *q || x != x) *q = x; } \
     }
-}
-static void k_nansum_f(int64_t n, char **p, const int64_t *s, void *ctx) {
-    (void)ctx;
-    double *o = (double *)p[0]; const double *a = (const double *)p[1];
-    for (int64_t i = 0; i < n; i++) { double x = a[i * s[1]]; if (x == x) o[i * s[0]] += x; }
-}
+
+RED_FLOAT(f, double)
+RED_FLOAT(g, float)
+
 static void k_sum_i(int64_t n, char **p, const int64_t *s, void *ctx) {
     (void)ctx;
     int64_t *o = (int64_t *)p[0]; const int64_t *a = (const int64_t *)p[1];
@@ -1021,26 +1110,13 @@ static void k_sum_i(int64_t n, char **p, const int64_t *s, void *ctx) {
         for (int64_t i = 0; i < n; i++) o[i * so] = i_add(o[i * so], a[i * sa]);
     }
 }
-static void k_prod_f(int64_t n, char **p, const int64_t *s, void *ctx) {
-    (void)ctx;
-    double *o = (double *)p[0]; const double *a = (const double *)p[1];
-    for (int64_t i = 0; i < n; i++) o[i * s[0]] *= a[i * s[1]];
-}
+
 static void k_prod_i(int64_t n, char **p, const int64_t *s, void *ctx) {
     (void)ctx;
     int64_t *o = (int64_t *)p[0]; const int64_t *a = (const int64_t *)p[1];
     for (int64_t i = 0; i < n; i++) o[i * s[0]] = i_mul(o[i * s[0]], a[i * s[1]]);
 }
-static void k_min_f(int64_t n, char **p, const int64_t *s, void *ctx) {
-    (void)ctx;
-    double *o = (double *)p[0]; const double *a = (const double *)p[1];
-    for (int64_t i = 0; i < n; i++) { double x = a[i * s[1]], *q = &o[i * s[0]]; if (x < *q || x != x) *q = x; }
-}
-static void k_max_f(int64_t n, char **p, const int64_t *s, void *ctx) {
-    (void)ctx;
-    double *o = (double *)p[0]; const double *a = (const double *)p[1];
-    for (int64_t i = 0; i < n; i++) { double x = a[i * s[1]], *q = &o[i * s[0]]; if (x > *q || x != x) *q = x; }
-}
+
 static void k_min_i(int64_t n, char **p, const int64_t *s, void *ctx) {
     (void)ctx;
     int64_t *o = (int64_t *)p[0]; const int64_t *a = (const int64_t *)p[1];
@@ -1124,8 +1200,8 @@ static int64_t red_shapes(const ND *a, const bool *mask, bool keepdims, int64_t 
     return count;
 }
 
-/* reduce a (already in the compute dtype) into a new array of dtype odt
- * with the kept shape; *o describes it */
+/* reduce a (already in the compute dtype; float32 reduces into float64)
+ * into a new array of dtype odt with the kept shape; *o describes it */
 static SeaValue reduce_into(SeaVM *vm, ND *a, const bool *mask, int op, int odt, ND *o, const char *fn) {
     int64_t kshape[MAXD], fshape[MAXD];
     int fnd;
@@ -1134,7 +1210,7 @@ static SeaValue reduce_into(SeaVM *vm, ND *a, const bool *mask, int op, int odt,
         FAIL("ndarray.%s: zero-size array to a reduction with no identity", fn);
     SeaValue t = nd_new(vm, odt, a->nd, kshape, o);
     int64_t n = o->size;
-    if (odt == DT_FLOAT) {
+    if (odt == DT_F64) {
         double init = op == R_PROD ? 1.0 : op == R_MIN ? INFINITY : op == R_MAX ? -INFINITY : 0.0;
         for (int64_t i = 0; i < n; i++) ((double *)o->p)[i] = init;
     } else {
@@ -1142,13 +1218,13 @@ static SeaValue reduce_into(SeaVM *vm, ND *a, const bool *mask, int op, int odt,
         for (int64_t i = 0; i < n; i++) ((int64_t *)o->p)[i] = init;
     }
     Kern k;
-    bool f = a->dt == DT_FLOAT;
+    bool f = a->dt == DT_F64, g = a->dt == DT_F32;
     switch (op) {
-    case R_SUM: k = f ? k_sum_f : k_sum_i; break;
-    case R_NANSUM: k = f ? k_nansum_f : k_sum_i; break;
-    case R_PROD: k = f ? k_prod_f : k_prod_i; break;
-    case R_MIN: k = f ? k_min_f : k_min_i; break;
-    case R_MAX: k = f ? k_max_f : k_max_i; break;
+    case R_SUM: k = f ? k_sum_f : g ? k_sum_g : k_sum_i; break;
+    case R_NANSUM: k = f ? k_nansum_f : g ? k_nansum_g : k_sum_i; break;
+    case R_PROD: k = f ? k_prod_f : g ? k_prod_g : k_prod_i; break;
+    case R_MIN: k = f ? k_min_f : g ? k_min_g : k_min_i; break;
+    case R_MAX: k = f ? k_max_f : g ? k_max_g : k_max_i; break;
     case R_ANY: k = k_any_i; break;
     default: k = k_all_i; break;
     }
@@ -1170,6 +1246,18 @@ static SeaValue red_final(SeaValue t, ND *o, const ND *a, const bool *mask, bool
     return r;
 }
 
+/* a result computed in float64 for a float32 input, as float32 (owned in,
+ * owned out; a scalar is rounded to float32's precision) */
+static SeaValue as_f32_result(SeaVM *vm, SeaValue r) {
+    if (sea_is_number(r)) return sea_number_val((double)(float)sea_as_number(r));
+    if (!is_nd(r)) return r;
+    ND a, o;
+    nd_read(vm, r, &a, "float32");
+    SeaValue c = copy_as(vm, &a, DT_F32, &o);
+    sea_obj_release(sea_as_obj(r));
+    return c;
+}
+
 static SeaValue reduction(SeaVM *vm, int argc, SeaValue *args, int op, const char *fn) {
     if (argc < 1) FAIL("ndarray.%s: expected an array", fn);
     Tmp t = { 0 };
@@ -1187,7 +1275,7 @@ static SeaValue reduction(SeaVM *vm, int argc, SeaValue *args, int op, const cha
     else odt = a.dt == DT_BOOL ? DT_INT : a.dt;
     if (a.dt == DT_BOOL) a.dt = DT_INT;
     ND o;
-    SeaValue r = reduce_into(vm, &a, mask, op, a.dt, &o, fn);
+    SeaValue r = reduce_into(vm, &a, mask, op, a.dt == DT_F32 ? DT_F64 : a.dt, &o, fn);
     if (odt == DT_BOOL) {
         /* bool result: same storage, relabelled */
         SeaValue b = wrap(o.data, DT_BOOL, o.nd, o.shape, o.strides, 0);
@@ -1197,7 +1285,7 @@ static SeaValue reduction(SeaVM *vm, int argc, SeaValue *args, int op, const cha
     }
     SeaValue res = red_final(r, &o, &a, mask, ro.keepdims);
     tmp_free(&t);
-    return res;
+    return odt == DT_F32 ? as_f32_result(vm, res) : res;
 }
 
 static SeaValue n_sum(SeaVM *vm, int argc, SeaValue *args) { return reduction(vm, argc, args, R_SUM, "sum"); }
@@ -1239,16 +1327,17 @@ static SeaValue moments(SeaVM *vm, int argc, SeaValue *args, int what, const cha
     ropts(vm, argc, args, &ro);
     bool mask[MAXD];
     axes_arg(vm, ro.axis, a.nd, mask, fn);
-    as_dt(vm, &a, DT_FLOAT, &t);
+    bool f32 = a.dt == DT_F32;
+    as_dt(vm, &a, DT_F64, &t);
     int64_t kshape[MAXD], fshape[MAXD];
     int fnd;
     int64_t count = red_shapes(&a, mask, true, kshape, &fnd, fshape);
     ND m;
-    SeaValue mt = reduce_into(vm, &a, mask, what == 3 ? R_NANSUM : R_SUM, DT_FLOAT, &m, fn);
+    SeaValue mt = reduce_into(vm, &a, mask, what == 3 ? R_NANSUM : R_SUM, DT_F64, &m, fn);
     ND *mo[1] = { &m };
     if (what == 3) {
         ND c;
-        SeaValue ct = nd_new(vm, DT_FLOAT, a.nd, kshape, &c);
+        SeaValue ct = nd_new(vm, DT_F64, a.nd, kshape, &c);
         ND *ops[2] = { &c, &a };
         run(ops, 2, a.nd, a.shape, k_count_ok, NULL);
         ND *dv_[2] = { &m, &c };
@@ -1260,7 +1349,7 @@ static SeaValue moments(SeaVM *vm, int argc, SeaValue *args, int what, const cha
     }
     if (what == 1 || what == 2) {
         ND v;
-        SeaValue vt = nd_new(vm, DT_FLOAT, a.nd, kshape, &v);
+        SeaValue vt = nd_new(vm, DT_F64, a.nd, kshape, &v);
         ND *ops[3] = { &v, &a, &m };
         run(ops, 3, a.nd, a.shape, k_sqdev, NULL);
         double n = (double)count - ro.ddof;
@@ -1276,7 +1365,7 @@ static SeaValue moments(SeaVM *vm, int argc, SeaValue *args, int what, const cha
     }
     SeaValue res = red_final(mt, &m, &a, mask, ro.keepdims);
     tmp_free(&t);
-    return res;
+    return f32 ? as_f32_result(vm, res) : res;
 }
 
 static SeaValue n_mean(SeaVM *vm, int argc, SeaValue *args) { return moments(vm, argc, args, 0, "mean"); }
@@ -1300,12 +1389,13 @@ static void lines2(ND *a, ND *b, int axis, LineFn f, void *ctx) {
     int64_t total = prod(sh, m);
     char *pa = a->p, *pb = b ? b->p : NULL;
     int64_t n = a->shape[axis], ast = a->strides[axis], bst = b ? b->strides[axis] : 0;
+    int64_t ea = ESZ(a->dt), eb = b ? ESZ(b->dt) : 8;
     for (int64_t k = 0; k < total; k++) {
         f(ctx, pa, ast, pb, bst, n, k);
         for (int d = m - 1; d >= 0; d--) {
-            pa += sa[d] * 8; if (pb) pb += sb[d] * 8;
+            pa += sa[d] * ea; if (pb) pb += sb[d] * eb;
             if (++idx[d] < sh[d]) break;
-            pa -= sa[d] * sh[d] * 8; if (pb) pb -= sb[d] * sh[d] * 8;
+            pa -= sa[d] * sh[d] * ea; if (pb) pb -= sb[d] * sh[d] * eb;
             idx[d] = 0;
         }
     }
@@ -1317,7 +1407,7 @@ static void line_arg(void *ctx, char *pa, int64_t sa, char *pb, int64_t sb, int6
     (void)sb; (void)k;
     const ArgCtx *c = ctx;
     int64_t best = 0;
-    if (c->dt == DT_FLOAT) {
+    if (c->dt == DT_F64) {
         const double *a = (const double *)pa;
         double bv = a[0];
         if (bv == bv)
@@ -1342,6 +1432,7 @@ static SeaValue argext(SeaVM *vm, int argc, SeaValue *args, bool max, const char
     Tmp t = { 0 };
     ND a;
     opnd(vm, args[0], &a, &t, fn);
+    if (a.dt == DT_F32) as_dt(vm, &a, DT_F64, &t);
     ROpts ro;
     ropts(vm, argc, args, &ro);
     if (sea_is_nil(ro.axis)) {
@@ -1392,6 +1483,8 @@ static SeaValue cumulative(SeaVM *vm, int argc, SeaValue *args, int prodp, const
     opnd(vm, args[0], &a, &t, fn);
     SeaValue axv = argc > 1 ? args[1] : SEA_NIL_VAL;
     if (a.dt == DT_BOOL) as_dt(vm, &a, DT_INT, &t);
+    bool f32 = a.dt == DT_F32;
+    if (f32) as_dt(vm, &a, DT_F64, &t);
     if (sea_is_nil(axv)) {
         if (!is_contig(&a)) {
             ND c;
@@ -1403,10 +1496,11 @@ static SeaValue cumulative(SeaVM *vm, int argc, SeaValue *args, int prodp, const
     int axis = sea_is_nil(axv) ? 0 : norm_axis(vm, iv(axv), a.nd, fn);
     ND o;
     SeaValue r = nd_new(vm, a.dt, a.nd, a.shape, &o);
-    int what = prodp | (a.dt == DT_FLOAT ? 0 : 2);
+    int what = prodp | (a.dt == DT_F64 ? 0 : 2);
     if (a.nd > 0 && a.size > 0) lines2(&a, &o, axis, line_cumsum, &what);
     tmp_free(&t);
-    return finish(r, &o);
+    r = finish(r, &o);
+    return f32 ? as_f32_result(vm, r) : r;
 }
 
 static SeaValue n_cumsum(SeaVM *vm, int argc, SeaValue *args) { return cumulative(vm, argc, args, 0, "cumsum"); }
@@ -1432,13 +1526,13 @@ static void line_sort(void *ctx, char *pa, int64_t sa, char *pb, int64_t sb, int
     (void)pb; (void)sb; (void)k;
     SortCtx *c = ctx;
     for (int64_t i = 0; i < n; i++) memcpy(c->buf + i * 8, pa + i * sa * 8, 8);
-    qsort(c->buf, (size_t)n, 8, c->dt == DT_FLOAT ? cmp_f : cmp_i);
+    qsort(c->buf, (size_t)n, 8, c->dt == DT_F64 ? cmp_f : cmp_i);
     for (int64_t i = 0; i < n; i++) memcpy(pa + i * sa * 8, c->buf + i * 8, 8);
 }
 
 /* stable merge sort of idx[0..n) by the values in buf */
 static bool less_at(const SortCtx *c, int64_t i, int64_t j) {
-    if (c->dt == DT_FLOAT) {
+    if (c->dt == DT_F64) {
         double a = ((double *)c->buf)[i], b = ((double *)c->buf)[j];
         return a < b || (a == a && b != b);
     }
@@ -1478,6 +1572,8 @@ static SeaValue sorting(SeaVM *vm, int argc, SeaValue *args, bool arg, const cha
     Tmp t = { 0 };
     ND a;
     opnd(vm, args[0], &a, &t, fn);
+    bool f32 = a.dt == DT_F32;
+    if (f32) as_dt(vm, &a, DT_F64, &t);
     SeaValue axv = argc > 1 ? args[1] : sea_int_val(-1);
     if (sea_is_nil(axv)) {
         ND c;
@@ -1500,7 +1596,7 @@ static SeaValue sorting(SeaVM *vm, int argc, SeaValue *args, bool arg, const cha
     }
     free(c.buf); free(c.idx); free(c.tmp);
     tmp_free(&t);
-    return r;
+    return f32 && !arg ? as_f32_result(vm, r) : r;
 }
 
 static SeaValue n_sort(SeaVM *vm, int argc, SeaValue *args) { return sorting(vm, argc, args, false, "sort"); }
@@ -1508,7 +1604,7 @@ static SeaValue n_argsort(SeaVM *vm, int argc, SeaValue *args) { return sorting(
 
 /* equal values (NaNs equal to each other, as unique groups them) */
 static bool same_val(int dt, const char *p, const char *q) {
-    if (dt == DT_FLOAT) {
+    if (dt == DT_F64) {
         double x = *(const double *)p, y = *(const double *)q;
         return x == y || (x != x && y != y);
     }
@@ -1521,7 +1617,8 @@ static SeaValue n_unique(SeaVM *vm, int argc, SeaValue *args) {
     Tmp t = { 0 };
     ND a, c;
     opnd(vm, args[0], &a, &t, "unique");
-    tmp_hold(&t, copy_as(vm, &a, a.dt, &c));
+    bool f32 = a.dt == DT_F32;
+    tmp_hold(&t, copy_as(vm, &a, f32 ? DT_F64 : a.dt, &c));
     int64_t n = c.size;
     SortCtx sc = { c.dt, c.p, malloc((size_t)(n + 1) * 8), malloc((size_t)(n + 1) * 8) };
     for (int64_t i = 0; i < n; i++) sc.idx[i] = i;
@@ -1548,6 +1645,7 @@ static SeaValue n_unique(SeaVM *vm, int argc, SeaValue *args) {
     }
     free(sc.idx); free(sc.tmp);
     tmp_free(&t);
+    if (f32) tv = as_f32_result(vm, tv);
     SeaArray *out = sea_array_new(4);
     sea_array_push_move(out, tv);
     sea_array_push_move(out, tf);
@@ -1567,10 +1665,10 @@ static SeaValue n_searchsorted(SeaVM *vm, int argc, SeaValue *args) {
     opnd(vm, args[1], &v, &t, "searchsorted");
     if (a.nd != 1) FAIL("ndarray.searchsorted: a must be one-dimensional");
     bool right = argc > 2 && str_eq(args[2], "right");
-    as_dt(vm, &a, DT_FLOAT, &t);
-    as_dt(vm, &v, DT_FLOAT, &t);
+    as_dt(vm, &a, DT_F64, &t);
+    as_dt(vm, &v, DT_F64, &t);
     ND vc;
-    if (!is_contig(&v)) { tmp_hold(&t, copy_as(vm, &v, DT_FLOAT, &vc)); v = vc; }
+    if (!is_contig(&v)) { tmp_hold(&t, copy_as(vm, &v, DT_F64, &vc)); v = vc; }
     ND o;
     SeaValue r = nd_new(vm, DT_INT, v.nd, v.shape, &o);
     for (int64_t k = 0; k < v.size; k++) {
@@ -1599,38 +1697,46 @@ typedef struct {
     int64_t r0, r1;
 } Gemm;
 
+/* the rows r0..r1 of C += A·B for float elements of type T */
+#define GEMM_FLOAT(T)                                                                                  \
+    do {                                                                                               \
+        const T *A = (const T *)g->A, *B = (const T *)g->B;                                            \
+        T *C = (T *)g->C;                                                                              \
+        if (m == 1) {                                                                                  \
+            for (int64_t i = g->r0; i < g->r1; i++) {                                                  \
+                const T *a = A + i * k;                                                                \
+                T s0 = 0, s1 = 0, s2 = 0, s3 = 0;                                                      \
+                int64_t p = 0;                                                                         \
+                for (; p + 4 <= k; p += 4) { s0 += a[p] * B[p]; s1 += a[p + 1] * B[p + 1]; s2 += a[p + 2] * B[p + 2]; s3 += a[p + 3] * B[p + 3]; } \
+                for (; p < k; p++) s0 += a[p] * B[p];                                                  \
+                C[i] = (s0 + s1) + (s2 + s3);                                                          \
+            }                                                                                          \
+            break;                                                                                     \
+        }                                                                                              \
+        const int64_t KB = 256, JB = 1024;                                                             \
+        for (int64_t j0 = 0; j0 < m; j0 += JB) {                                                       \
+            int64_t j1 = j0 + JB < m ? j0 + JB : m;                                                    \
+            for (int64_t p0 = 0; p0 < k; p0 += KB) {                                                   \
+                int64_t p1 = p0 + KB < k ? p0 + KB : k;                                                \
+                for (int64_t i = g->r0; i < g->r1; i++) {                                              \
+                    T *c = C + i * m;                                                                  \
+                    const T *a = A + i * k;                                                            \
+                    for (int64_t p = p0; p < p1; p++) {                                                \
+                        T x = a[p];                                                                    \
+                        const T *b = B + p * m;                                                        \
+                        for (int64_t j = j0; j < j1; j++) c[j] += x * b[j];                            \
+                    }                                                                                  \
+                }                                                                                      \
+            }                                                                                          \
+        }                                                                                              \
+    } while (0)
+
 static void gemm_rows(Gemm *g) {
     int64_t k = g->k, m = g->m;
-    if (g->dt == DT_FLOAT) {
-        const double *A = (const double *)g->A, *B = (const double *)g->B;
-        double *C = (double *)g->C;
-        if (m == 1) {
-            for (int64_t i = g->r0; i < g->r1; i++) {
-                const double *a = A + i * k;
-                double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
-                int64_t p = 0;
-                for (; p + 4 <= k; p += 4) { s0 += a[p] * B[p]; s1 += a[p + 1] * B[p + 1]; s2 += a[p + 2] * B[p + 2]; s3 += a[p + 3] * B[p + 3]; }
-                for (; p < k; p++) s0 += a[p] * B[p];
-                C[i] = (s0 + s1) + (s2 + s3);
-            }
-            return;
-        }
-        const int64_t KB = 256, JB = 1024;
-        for (int64_t j0 = 0; j0 < m; j0 += JB) {
-            int64_t j1 = j0 + JB < m ? j0 + JB : m;
-            for (int64_t p0 = 0; p0 < k; p0 += KB) {
-                int64_t p1 = p0 + KB < k ? p0 + KB : k;
-                for (int64_t i = g->r0; i < g->r1; i++) {
-                    double *c = C + i * m;
-                    const double *a = A + i * k;
-                    for (int64_t p = p0; p < p1; p++) {
-                        double x = a[p];
-                        const double *b = B + p * m;
-                        for (int64_t j = j0; j < j1; j++) c[j] += x * b[j];
-                    }
-                }
-            }
-        }
+    if (g->dt == DT_F64) {
+        GEMM_FLOAT(double);
+    } else if (g->dt == DT_F32) {
+        GEMM_FLOAT(float);
     } else {
         const int64_t *A = (const int64_t *)g->A, *B = (const int64_t *)g->B;
         int64_t *C = (int64_t *)g->C;
@@ -1726,7 +1832,8 @@ static SeaValue n_matmul(SeaVM *vm, int argc, SeaValue *args) {
     for (int64_t q = 0; q < nb; q++) {
         int64_t ia = 0, ib = 0;
         for (int d = 0; d < bnd; d++) { ia += idx[d] * ast[d]; ib += idx[d] * bst[d]; }
-        gemm(dt, n, k, m, ac.p + ia * n * k * 8, bc.p + ib * k * m * 8, o.p + q * n * m * 8);
+        int64_t e = ESZ(dt);
+        gemm(dt, n, k, m, ac.p + ia * n * k * e, bc.p + ib * k * m * e, o.p + q * n * m * e);
         for (int d = bnd - 1; d >= 0; d--) { if (++idx[d] < bshp[d]) break; idx[d] = 0; }
     }
     tmp_free(&t);
@@ -1742,7 +1849,7 @@ static double *mat_of(SeaVM *vm, SeaValue v, int64_t *rows, int64_t *cols, bool 
     opnd(vm, v, &a, &t, fn);
     if (a.nd != 2) FAIL("ndarray.linalg.%s: expected a 2-D array, got %d dimensions", fn, a.nd);
     if (square && a.shape[0] != a.shape[1]) FAIL("ndarray.linalg.%s: the matrix must be square", fn);
-    tmp_hold(&t, copy_as(vm, &a, DT_FLOAT, &c));
+    tmp_hold(&t, copy_as(vm, &a, DT_F64, &c));
     double *m = malloc((size_t)(c.size + 1) * 8);
     memcpy(m, c.p, (size_t)c.size * 8);
     *rows = a.shape[0]; *cols = a.shape[1];
@@ -1753,14 +1860,14 @@ static double *mat_of(SeaVM *vm, SeaValue v, int64_t *rows, int64_t *cols, bool 
 static SeaValue mat_val(SeaVM *vm, const double *m, int64_t r, int64_t c) {
     ND o;
     int64_t s[2] = { r, c };
-    SeaValue t = nd_new(vm, DT_FLOAT, 2, s, &o);
+    SeaValue t = nd_new(vm, DT_F64, 2, s, &o);
     memcpy(o.p, m, (size_t)(r * c) * 8);
     return t;
 }
 static SeaValue vec_val(SeaVM *vm, const double *v, int64_t n) {
     ND o;
     int64_t s[1] = { n };
-    SeaValue t = nd_new(vm, DT_FLOAT, 1, s, &o);
+    SeaValue t = nd_new(vm, DT_F64, 1, s, &o);
     memcpy(o.p, v, (size_t)n * 8);
     return t;
 }
@@ -1829,7 +1936,7 @@ static SeaValue n_solve(SeaVM *vm, int argc, SeaValue *args) {
     if (b.nd < 1 || b.nd > 2) FAIL("ndarray.linalg.solve: b must be 1-D or 2-D");
     double *a = mat_of(vm, args[0], &n, &c, true, "solve");
     if (b.shape[0] != n) { free(a); FAIL("ndarray.linalg.solve: b has %lld rows, a has %lld", (long long)b.shape[0], (long long)n); }
-    SeaValue r = copy_as(vm, &b, DT_FLOAT, &bc);
+    SeaValue r = copy_as(vm, &b, DT_F64, &bc);
     int64_t *piv = malloc((size_t)(n + 1) * 8);
     int s = lu(a, n, piv);
     if (s) lu_solve(a, n, piv, (double *)bc.p, b.nd == 1 ? 1 : b.shape[1]);
@@ -1848,7 +1955,7 @@ static SeaValue n_inv(SeaVM *vm, int argc, SeaValue *args) {
     if (!s) { free(a); free(piv); return sea_make_error_str(vm, "ndarray.linalg.inv: singular matrix"); }
     ND o;
     int64_t sh[2] = { n, n };
-    SeaValue r = nd_new(vm, DT_FLOAT, 2, sh, &o);
+    SeaValue r = nd_new(vm, DT_F64, 2, sh, &o);
     double *x = (double *)o.p;
     for (int64_t i = 0; i < n; i++) x[i * n + i] = 1;
     lu_solve(a, n, piv, x, n);
@@ -2185,7 +2292,11 @@ static SeaValue n_rng_draw(SeaVM *vm, int argc, SeaValue *args) {
     int nd = shape_arg(vm, args[2], shape, "random");
     double p1 = argc > 3 && !sea_is_nil(args[3]) ? dv(args[3]) : 0;
     double p2 = argc > 4 && !sea_is_nil(args[4]) ? dv(args[4]) : 1;
-    int dt = kind == RD_INTEGERS || kind == RD_POISSON ? DT_INT : DT_FLOAT;
+    int dt = kind == RD_INTEGERS || kind == RD_POISSON ? DT_INT : DT_F64;
+    if (dt == DT_F64 && argc > 5 && !sea_is_nil(args[5])) {
+        dt = dt_parse(vm, args[5], "random");
+        if (!is_flt(dt)) FAIL("ndarray.random: dtype must be float64 or float32");
+    }
     int64_t lo = 0, span = 0;
     if (kind == RD_INTEGERS) {
         lo = iv(args[3]);
@@ -2195,16 +2306,16 @@ static SeaValue n_rng_draw(SeaVM *vm, int argc, SeaValue *args) {
     }
     ND o;
     SeaValue r = nd_new(vm, dt, nd, shape, &o);
-    double *d = (double *)o.p;
-    int64_t *q = (int64_t *)o.p;
+    int e = ESZ(dt);
     for (int64_t i = 0; i < o.size; i++) {
+        char *q = o.p + i * e;
         switch (kind) {
-        case RD_RANDOM: d[i] = next_double(s); break;
-        case RD_UNIFORM: d[i] = p1 + (p2 - p1) * next_double(s); break;
-        case RD_NORMAL: d[i] = p1 + p2 * gauss(s); break;
-        case RD_INTEGERS: q[i] = lo + (int64_t)bounded(s, (uint64_t)span); break;
-        case RD_EXPONENTIAL: d[i] = -p1 * log1p(-next_double(s)); break;
-        default: q[i] = poisson(s, p1); break;
+        case RD_RANDOM: store_d(dt, q, next_double(s)); break;
+        case RD_UNIFORM: store_d(dt, q, p1 + (p2 - p1) * next_double(s)); break;
+        case RD_NORMAL: store_d(dt, q, p1 + p2 * gauss(s)); break;
+        case RD_INTEGERS: *(int64_t *)q = lo + (int64_t)bounded(s, (uint64_t)span); break;
+        case RD_EXPONENTIAL: store_d(dt, q, -p1 * log1p(-next_double(s))); break;
+        default: *(int64_t *)q = poisson(s, p1); break;
         }
     }
     return finish(r, &o);
@@ -2230,8 +2341,8 @@ static SeaValue n_rng_shuffle(SeaVM *vm, int argc, SeaValue *args) {
         int64_t j = (int64_t)bounded(s, (uint64_t)(i + 1));
         if (i == j) continue;
         ND ri = row, rj = row, tb;
-        ri.p = a.p + i * a.strides[0] * 8;
-        rj.p = a.p + j * a.strides[0] * 8;
+        ri.p = a.p + i * a.strides[0] * ESZ(a.dt);
+        rj.p = a.p + j * a.strides[0] * ESZ(a.dt);
         memset(&tb, 0, sizeof tb);
         tb.dt = a.dt; tb.nd = row.nd; tb.p = tmp;
         memcpy(tb.shape, row.shape, sizeof(int64_t) * row.nd);
@@ -2257,11 +2368,10 @@ static SeaValue n_array(SeaVM *vm, int argc, SeaValue *args) {
     }
     if (is_num(args[0]) || sea_is_bool(args[0])) {
         ND o;
-        int d = dt >= 0 ? dt : sea_is_number(args[0]) ? DT_FLOAT : sea_is_int(args[0]) ? DT_INT : DT_BOOL;
+        int d = dt >= 0 ? dt : sea_is_number(args[0]) ? DT_F64 : sea_is_int(args[0]) ? DT_INT : DT_BOOL;
         SeaValue t = nd_new(vm, d, 0, NULL, &o);
-        double x = dv(args[0]);
-        if (d == DT_FLOAT) *(double *)o.p = x;
-        else *(int64_t *)o.p = d == DT_BOOL ? x != 0 : (sea_is_int(args[0]) ? sea_as_int(args[0]) : (int64_t)x);
+        if (sea_is_number(args[0])) store_d(d, o.p, sea_as_number(args[0]));
+        else store_i(d, o.p, sea_is_int(args[0]) ? sea_as_int(args[0]) : sea_as_bool(args[0]));
         return t;
     }
     return from_value(vm, args[0], dt, "array");
@@ -2273,11 +2383,12 @@ static SeaValue n_full(SeaVM *vm, int argc, SeaValue *args) {
     int nd = shape_arg(vm, argc > 0 ? args[0] : SEA_NIL_VAL, shape, "full");
     SeaValue v = argc > 1 ? args[1] : sea_int_val(0);
     int dt = argc > 2 ? dt_parse(vm, args[2], "full") : -1;
-    if (dt < 0) dt = sea_is_number(v) ? DT_FLOAT : sea_is_bool(v) ? DT_BOOL : DT_INT;
+    if (dt < 0) dt = sea_is_number(v) ? DT_F64 : sea_is_bool(v) ? DT_BOOL : DT_INT;
     if (!is_num(v) && !sea_is_bool(v)) FAIL("ndarray.full: the value must be a number or a bool");
     ND o;
     SeaValue t = nd_new(vm, dt, nd, shape, &o);
-    if (dt == DT_FLOAT) { double x = dv(v); for (int64_t i = 0; i < o.size; i++) ((double *)o.p)[i] = x; }
+    if (dt == DT_F64) { double x = dv(v); for (int64_t i = 0; i < o.size; i++) ((double *)o.p)[i] = x; }
+    else if (dt == DT_F32) { float x = (float)dv(v); for (int64_t i = 0; i < o.size; i++) ((float *)o.p)[i] = x; }
     else {
         int64_t x = sea_is_int(v) ? sea_as_int(v) : sea_is_bool(v) ? sea_as_bool(v) : (int64_t)dv(v);
         if (dt == DT_BOOL) x = x != 0 || (sea_is_number(v) && dv(v) != 0);
@@ -2291,7 +2402,7 @@ static SeaValue n_arange(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 3) FAIL("ndarray.arange: expected (start, stop, step)");
     int dt = argc > 3 ? dt_parse(vm, args[3], "arange") : -1;
     bool ints = sea_is_int(args[0]) && sea_is_int(args[1]) && sea_is_int(args[2]);
-    if (dt < 0) dt = ints ? DT_INT : DT_FLOAT;
+    if (dt < 0) dt = ints ? DT_INT : DT_F64;
     double a = dv(args[0]), b = dv(args[1]), st = dv(args[2]);
     if (st == 0) FAIL("ndarray.arange: step must not be zero");
     int64_t n = (int64_t)ceil((b - a) / st);
@@ -2303,7 +2414,7 @@ static SeaValue n_arange(SeaVM *vm, int argc, SeaValue *args) {
     ND o;
     int64_t sh[1] = { n };
     SeaValue t = nd_new(vm, dt, 1, sh, &o);
-    if (dt == DT_FLOAT) for (int64_t i = 0; i < n; i++) ((double *)o.p)[i] = a + (double)i * st;
+    if (is_flt(dt)) for (int64_t i = 0; i < n; i++) store_d(dt, o.p + i * ESZ(dt), a + (double)i * st);
     else if (ints) {
         int64_t ia = sea_as_int(args[0]), is = sea_as_int(args[2]);
         for (int64_t i = 0; i < n; i++) ((int64_t *)o.p)[i] = ia + i * is;
@@ -2317,14 +2428,17 @@ static SeaValue n_linspace(SeaVM *vm, int argc, SeaValue *args) {
     double a = dv(args[0]), b = dv(args[1]);
     int64_t n = iv(args[2]);
     bool endpoint = argc < 4 || sea_is_nil(args[3]) || sea_is_truthy(args[3]);
+    int dt = argc > 4 ? dt_parse(vm, args[4], "linspace") : -1;
+    if (dt < 0) dt = DT_F64;
     if (n < 0) FAIL("ndarray.linspace: num must not be negative");
     ND o;
     int64_t sh[1] = { n };
-    SeaValue t = nd_new(vm, DT_FLOAT, 1, sh, &o);
+    SeaValue t = nd_new(vm, dt, 1, sh, &o);
     double div = endpoint ? (double)(n - 1) : (double)n;
     double step = div > 0 ? (b - a) / div : 0;
-    for (int64_t i = 0; i < n; i++) ((double *)o.p)[i] = a + (double)i * step;
-    if (endpoint && n > 1) ((double *)o.p)[n - 1] = b;
+    int e = ESZ(dt);
+    for (int64_t i = 0; i < n; i++) store_d(dt, o.p + i * e, a + (double)i * step);
+    if (endpoint && n > 1) store_d(dt, o.p + (n - 1) * e, b);
     return t;
 }
 
@@ -2335,7 +2449,7 @@ static SeaValue n_eye(SeaVM *vm, int argc, SeaValue *args) {
     int64_t m = argc > 1 && !sea_is_nil(args[1]) ? iv(args[1]) : n;
     int64_t k = argc > 2 && !sea_is_nil(args[2]) ? iv(args[2]) : 0;
     int dt = argc > 3 ? dt_parse(vm, args[3], "eye") : -1;
-    if (dt < 0) dt = DT_FLOAT;
+    if (dt < 0) dt = DT_F64;
     if (n < 0 || m < 0) FAIL("ndarray.eye: negative dimensions are not allowed");
     ND o;
     int64_t sh[2] = { n, m };
@@ -2343,7 +2457,7 @@ static SeaValue n_eye(SeaVM *vm, int argc, SeaValue *args) {
     for (int64_t i = 0; i < n; i++) {
         int64_t j = i + k;
         if (j < 0 || j >= m) continue;
-        if (dt == DT_FLOAT) ((double *)o.p)[i * m + j] = 1; else ((int64_t *)o.p)[i * m + j] = 1;
+        store_i(dt, o.p + (i * m + j) * ESZ(dt), 1);
     }
     return t;
 }
@@ -2352,13 +2466,14 @@ static SeaValue n_eye(SeaVM *vm, int argc, SeaValue *args) {
 static SeaValue n_from_data(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 1 || !(sea_is_float_array(args[0]) || sea_is_int_array(args[0])))
         FAIL("ndarray.from_data: expected a float_array or an int_array");
-    int dt = sea_is_float_array(args[0]) ? DT_FLOAT : DT_INT;
+    int dt = sea_is_float_array(args[0]) ? DT_F64 : DT_INT;
     if (argc > 2 && !sea_is_nil(args[2])) {
         int d = dt_parse(vm, args[2], "from_data");
-        if ((d == DT_FLOAT) != (dt == DT_FLOAT)) FAIL("ndarray.from_data: that dtype needs the other kind of data");
+        if (d == DT_F32) FAIL("ndarray.from_data: float32 data is not a float_array (use astype)");
+        if ((d == DT_F64) != (dt == DT_F64)) FAIL("ndarray.from_data: that dtype needs the other kind of data");
         dt = d;
     }
-    uint32_t len = dt == DT_FLOAT ? SEA_AS_FLOAT_ARRAY(args[0])->len : SEA_AS_INT_ARRAY(args[0])->len;
+    uint32_t len = dt == DT_F64 ? SEA_AS_FLOAT_ARRAY(args[0])->len : SEA_AS_INT_ARRAY(args[0])->len;
     int64_t shape[MAXD], st[MAXD];
     int nd = 1;
     shape[0] = len;
@@ -2532,6 +2647,25 @@ bad:;
          shape_str(shape, nd, y, sizeof y));
 }
 
+/* as_strided(a, shape, strides [, offset]): a view of a's data with that
+ * geometry (strides in elements, offset added to a's); it must stay inside
+ * the data */
+static SeaValue n_as_strided(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 3 || !is_nd(args[0])) FAIL("ndarray.as_strided: expected (array, shape, strides [, offset])");
+    ND a;
+    nd_read(vm, args[0], &a, "as_strided");
+    int64_t shape[MAXD], st[MAXD];
+    int nd = shape_arg(vm, args[1], shape, "as_strided");
+    if (!sea_is_array(args[2]) || (int)SEA_AS_ARRAY(args[2])->len != nd)
+        FAIL("ndarray.as_strided: strides must be an array as long as the shape");
+    for (int i = 0; i < nd; i++) st[i] = iv(SEA_AS_ARRAY(args[2])->data[i]);
+    int64_t off = a.off + (argc > 3 && !sea_is_nil(args[3]) ? iv(args[3]) : 0);
+    SeaValue v = view(&a, nd, shape, st, off);
+    ND check;
+    nd_read(vm, v, &check, "as_strided");   /* panics when it reaches outside */
+    return v;
+}
+
 /* flip(a [, axis]) */
 static SeaValue n_flip(SeaVM *vm, int argc, SeaValue *args) {
     Tmp t = { 0 };
@@ -2611,7 +2745,7 @@ static SeaValue n_ascontiguous(SeaVM *vm, int argc, SeaValue *args) {
 static SeaValue tolist_rec(const ND *a, int d, const char *p) {
     if (d == a->nd) return scalar_at(a->dt, p);
     SeaArray *arr = sea_array_new((uint32_t)(a->shape[d] > 0 ? a->shape[d] : 1));
-    for (int64_t i = 0; i < a->shape[d]; i++) sea_array_push_move(arr, tolist_rec(a, d + 1, p + i * a->strides[d] * 8));
+    for (int64_t i = 0; i < a->shape[d]; i++) sea_array_push_move(arr, tolist_rec(a, d + 1, p + i * a->strides[d] * ESZ(a->dt)));
     return sea_obj_val(&arr->obj);
 }
 
@@ -2702,16 +2836,16 @@ static SeaValue joining(SeaVM *vm, int argc, SeaValue *args, bool stack, const c
             ND src = parts[i];
             if (!is_contig(&src)) { ND c; tmp_hold(&tmps[i], copy_as(vm, &src, src.dt, &c)); src = c; }
             src.nd = 1; src.shape[0] = src.size; src.strides[0] = 1;
-            dst.shape[0] = src.size; dst.p = o.p + pos * 8; pos += src.size;
+            dst.shape[0] = src.size; dst.p = o.p + pos * ESZ(o.dt); pos += src.size;
             assign(vm, &dst, &src, fn);
         } else if (stack) {
             dst.nd = nd;
             for (int d = 0, j = 0; d < ond; d++) if (d != axis) { dst.shape[j] = o.shape[d]; dst.strides[j] = o.strides[d]; j++; }
-            dst.p = o.p + (int64_t)i * o.strides[axis] * 8;
+            dst.p = o.p + (int64_t)i * o.strides[axis] * ESZ(o.dt);
             assign(vm, &dst, &parts[i], fn);
         } else {
             dst.shape[axis] = parts[i].shape[axis];
-            dst.p = o.p + pos * o.strides[axis] * 8;
+            dst.p = o.p + pos * o.strides[axis] * ESZ(o.dt);
             pos += parts[i].shape[axis];
             assign(vm, &dst, &parts[i], fn);
         }
@@ -2765,8 +2899,8 @@ static SeaValue take_nd(SeaVM *vm, ND *a, ND *idx, int axis, bool flat) {
     for (int64_t i = 0; i < ix.size; i++) {
         int64_t k = iv_[i] < 0 ? iv_[i] + n : iv_[i];
         ND s = sub, d_ = dst;
-        s.p = src.p + k * src.strides[axis] * 8;
-        d_.p = o.p + i * istride * 8;
+        s.p = src.p + k * src.strides[axis] * ESZ(src.dt);
+        d_.p = o.p + i * istride * ESZ(o.dt);
         ND *ops[2] = { &d_, &s };
         run(ops, 2, sub.nd, sub.shape, k_cast, &c);
     }
@@ -2780,7 +2914,7 @@ static SeaValue n_take(SeaVM *vm, int argc, SeaValue *args) {
     ND a, ix;
     opnd(vm, args[0], &a, &t, "take");
     opnd(vm, args[1], &ix, &t, "take");
-    if (ix.dt == DT_FLOAT) FAIL("ndarray.take: indices must be ints");
+    if (ix.dt == DT_F64) FAIL("ndarray.take: indices must be ints");
     bool flat = argc < 3 || sea_is_nil(args[2]);
     int axis = flat ? 0 : norm_axis(vm, iv(args[2]), a.nd, "take");
     SeaValue r = take_nd(vm, &a, &ix, axis, flat);
@@ -2932,7 +3066,7 @@ static void select_(SeaVM *vm, ND *a, int argc, SeaValue *args, Sel *sel, const 
             int64_t k = x->i < 0 ? x->i + len : x->i;
             if (k < 0 || k >= len)
                 FAIL("ndarray.%s: index %lld is out of bounds for axis %d with size %lld", fn, (long long)x->i, d, (long long)len);
-            off += k * st; p += k * st * 8;
+            off += k * st; p += k * st * ESZ(a->dt);
         } else if (x->kind == IX_SLICE) {
             int64_t step = x->has_step ? x->step : 1, start, stop;
             if (step > 0) {
@@ -2952,13 +3086,13 @@ static void select_(SeaVM *vm, ND *a, int argc, SeaValue *args, Sel *sel, const 
             }
             int64_t cnt = step > 0 ? (stop > start ? (stop - start + step - 1) / step : 0)
                                    : (start > stop ? (start - stop - step - 1) / -step : 0);
-            if (cnt > 0) { off += start * st; p += start * st * 8; }
+            if (cnt > 0) { off += start * st; p += start * st * ESZ(a->dt); }
             v->shape[v->nd] = cnt; v->strides[v->nd] = st * step; v->nd++;
         } else {
             if (sel->adv >= 0) FAIL("ndarray.%s: only one index array is supported (use take for more)", fn);
             ND ix;
             opnd(vm, x->arr, &ix, &sel->t, fn);
-            if (ix.dt == DT_FLOAT) FAIL("ndarray.%s: index arrays must be ints or bools", fn);
+            if (ix.dt == DT_F64) FAIL("ndarray.%s: index arrays must be ints or bools", fn);
             if (ix.dt == DT_BOOL) {
                 if (ix.nd != 1 || ix.shape[0] != len)
                     FAIL("ndarray.%s: a boolean index along axis %d must be 1-D with %lld elements", fn, d, (long long)len);
@@ -2992,7 +3126,8 @@ typedef struct { int dt; char *out; int64_t k; } MaskCtx;
 static void k_mask_get(int64_t n, char **p, const int64_t *s, void *ctx) {
     MaskCtx *c = ctx;
     const int64_t *m = (const int64_t *)p[0];
-    for (int64_t i = 0; i < n; i++) if (m[i * s[0]]) { memcpy(c->out + c->k * 8, p[1] + i * s[1] * 8, 8); c->k++; }
+    int e = ESZ(c->dt);
+    for (int64_t i = 0; i < n; i++) if (m[i * s[0]]) { memcpy(c->out + c->k * e, p[1] + i * s[1] * e, e); c->k++; }
 }
 static void k_mask_count(int64_t n, char **p, const int64_t *s, void *ctx) {
     MaskCtx *c = ctx;
@@ -3035,8 +3170,9 @@ static void k_mask_set(int64_t n, char **p, const int64_t *s, void *ctx) {
     const int64_t *m = (const int64_t *)p[0];
     for (int64_t i = 0; i < n; i++)
         if (m[i * s[0]]) {
-            const char *src = c->scalar ? c->val->p : c->val->p + c->k * c->val->strides[0] * 8;
-            memcpy(p[1] + i * s[1] * 8, src, 8);
+            int e = ESZ(c->dt);
+            const char *src = c->scalar ? c->val->p : c->val->p + c->k * c->val->strides[0] * e;
+            memcpy(p[1] + i * s[1] * e, src, e);
             c->k++;
         }
 }
@@ -3099,10 +3235,10 @@ static SeaValue n_set(SeaVM *vm, int argc, SeaValue *args) {
             int64_t k = iv_[q] < 0 ? iv_[q] + n : iv_[q];
             if (k < 0 || k >= n) FAIL("ndarray.set: index %lld is out of bounds for size %lld", (long long)iv_[q], (long long)n);
             ND dst = sub, src = vs;
-            dst.p = v->p + k * v->strides[sel.adv] * 8;
+            dst.p = v->p + k * v->strides[sel.adv] * ESZ(a.dt);
             int64_t so = 0;
             for (int d = 0; d < ixc.nd; d++) so += idx[d] * bv.strides[sel.adv + d];
-            src.p = bv.p + so * 8;
+            src.p = bv.p + so * ESZ(a.dt);
             Cast c = { a.dt, a.dt };
             ND *ops[2] = { &dst, &src };
             run(ops, 2, sub.nd, sub.shape, k_cast, &c);
@@ -3160,8 +3296,8 @@ static SeaValue n_to_bytes(SeaVM *vm, int argc, SeaValue *args) {
         if (!s || s->len != 2) FAIL("ndarray.to_bytes: kind is like \"f8\", \"i4\" or \"b1\"");
         memcpy(kind, s->data, 2);
         sea_obj_release(&s->obj);
-    } else strcpy(kind, a.dt == DT_FLOAT ? "f8" : a.dt == DT_INT ? "i8" : "b1");
-    tmp_hold(&t, copy_as(vm, &a, kind[0] == 'f' ? DT_FLOAT : DT_INT, &c));
+    } else strcpy(kind, a.dt == DT_F64 ? "f8" : a.dt == DT_F32 ? "f4" : a.dt == DT_INT ? "i8" : "b1");
+    tmp_hold(&t, copy_as(vm, &a, kind[0] == 'f' ? DT_F64 : DT_INT, &c));
     int w = kind_size(kind);
     size_t n = (size_t)c.size * (size_t)w;
     char *buf = malloc(n + 1);
@@ -3206,7 +3342,7 @@ static SeaValue n_from_bytes(SeaVM *vm, int argc, SeaValue *args) {
         sea_obj_release(&s->obj);
         return sea_make_error_str(vm, "ndarray: the data is shorter than its shape says");
     }
-    int dt = kind[0] == 'f' ? DT_FLOAT : kind[0] == 'b' ? DT_BOOL : DT_INT;
+    int dt = kind[0] == 'f' ? (kind[1] == '4' ? DT_F32 : DT_F64) : kind[0] == 'b' ? DT_BOOL : DT_INT;
     ND o;
     int64_t sh[MAXD];
     /* Fortran order: read as the reversed shape, then transpose */
@@ -3218,8 +3354,12 @@ static SeaValue n_from_bytes(SeaVM *vm, int argc, SeaValue *args) {
         for (int k = 0; k < w; k++) b[k] = big ? src[i * w + w - 1 - k] : src[i * w + k];
         if (kind[0] == 'f') {
             double x;
-            if (w == 8) memcpy(&x, b, 8); else { float f; memcpy(&f, b, 4); x = f; }
-            ((double *)o.p)[i] = x;
+            if (w == 8) {
+                memcpy(&x, b, 8);
+                ((double *)o.p)[i] = x;
+            } else {
+                memcpy(((float *)o.p) + i, b, 4);
+            }
         } else {
             uint64_t u = 0;
             for (int k = 0; k < w; k++) u |= (uint64_t)b[k] << (8 * k);
@@ -3237,6 +3377,33 @@ static SeaValue n_from_bytes(SeaVM *vm, int argc, SeaValue *args) {
         sea_obj_release(sea_as_obj(r));
         return v;
     }
+    return r;
+}
+
+/* f32_shortest(a) → a float64 copy of a float32 array, each value the
+ * shortest decimal that rounds back to the same float32 (0.6, not
+ * 0.60000002384): what printing shows */
+static SeaValue n_f32_shortest(SeaVM *vm, int argc, SeaValue *args) {
+    if (argc < 1 || !is_nd(args[0])) FAIL("ndarray.f32_shortest: expected an array");
+    ND a, c, o;
+    nd_read(vm, args[0], &a, "f32_shortest");
+    Tmp t = { 0 };
+    tmp_hold(&t, copy_as(vm, &a, DT_F32, &c));
+    SeaValue r = nd_raw(vm, DT_F64, a.nd, a.shape, &o);
+    for (int64_t i = 0; i < c.size; i++) {
+        float x = ((float *)c.p)[i];
+        double best = x;
+        if (isfinite(x)) {
+            char buf[40];
+            for (int p = 1; p <= 9; p++) {
+                snprintf(buf, sizeof buf, "%.*g", p, (double)x);
+                double y = strtod(buf, NULL);
+                if ((float)y == x) { best = y; break; }
+            }
+        }
+        ((double *)o.p)[i] = best;
+    }
+    tmp_free(&t);
     return r;
 }
 
@@ -3307,6 +3474,7 @@ static const Reg REG[] = {
     { "rng_seed", n_rng_seed }, { "rng_draw", n_rng_draw }, { "rng_shuffle", n_rng_shuffle },
     { "reshape", n_reshape }, { "transpose", n_transpose }, { "swapaxes", n_swapaxes }, { "squeeze", n_squeeze },
     { "expand_dims", n_expand_dims }, { "broadcast_to", n_broadcast_to }, { "flip", n_flip },
+    { "as_strided", n_as_strided }, { "f32_shortest", n_f32_shortest },
     { "diagonal", n_diagonal }, { "copy", n_copy }, { "astype", n_astype }, { "ravel", n_ravel },
     { "ascontiguousarray", n_ascontiguous }, { "tolist", n_tolist }, { "fill", n_fill },
     { "concatenate", n_concatenate }, { "stack", n_stack }, { "take", n_take }, { "get", n_get }, { "set", n_set },
@@ -3316,7 +3484,7 @@ static const Reg REG[] = {
 SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     (void)vm;
     if (!sea_is_obj(dt_str[0]))
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < DT_COUNT; i++) {
             SeaString *s = sea_string_intern(DT_NAME[i], strlen(DT_NAME[i]));
             sea_obj_mark_shared(&s->obj);
             sea_obj_pin(&s->obj);
