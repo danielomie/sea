@@ -1702,7 +1702,7 @@ Calls from several goroutines on different arrays run in parallel. Test:
 
 ## `ndarray`
 
-N-dimensional arrays in the manner of NumPy: float64, float32, int64 and bool arrays of any number
+N-dimensional arrays in the manner of NumPy: float64, float32, complex128, int64 and bool arrays of any number
 of dimensions, views that share data (slices, transposes, reshapes), element-wise operations with
 broadcasting, reductions along axes, matrix products, `einsum`, linear algebra, random numbers, and
 `.npy` / `.npz` / text files. The loops run in C (`ndarray_native.so`); the API around them is Sea
@@ -1734,8 +1734,9 @@ np.save("m.npy", m)?                            -- numpy.load reads it, and the 
 ```
 
 **Arrays.** An array is a Sea table holding `data` (a `float_array` for float64, an `int_array`
-for int64 and bool, and for float32 an `int_array` with two 4-byte floats packed in each element),
-`dtype` (`"float64"`, `"float32"`, `"int64"`, `"bool"`), `shape` and `strides` (arrays of ints;
+for int64 and bool, for float32 an `int_array` with two 4-byte floats packed in each element, for
+complex128 a `float_array` with each element's real and imaginary parts side by side),
+`dtype` (`"float64"`, `"float32"`, `"complex128"`, `"int64"`, `"bool"`), `shape` and `strides` (arrays of ints;
 strides in elements), `offset`, `ndim` and `size`, plus its methods. Every function of the
 module below is also a method: `np.sum(a, 0)` is `a:sum(0)`. Where an array is expected, a Sea
 number, bool, nested array, `float_array` or `int_array` works too (converted as by `np.array`). A
@@ -1752,7 +1753,24 @@ arithmetic, `matmul` and `einsum` run in float32 (half the memory, up to twice a
 reductions accumulate in float64 and round to float32 at the end; sorting, `linalg` and the
 statistics compute in float64 and return float32. Elements read back into Sea as numbers
 (`np.array([0.1], "float32"):get(0)` is `0.10000000149011612`, as NumPy's `tolist`); printing shows
-the shortest digits that tell float32 values apart (`0.1`). Integer arithmetic wraps around at 64 bits,
+the shortest digits that tell float32 values apart (`0.1`).
+
+**Complex numbers.** Sea has no complex type: a complex scalar is a table `{re, im}`, made by
+`np.complex(re [, im])` (`np.j` is `{re = 0, im = 1}`). Complex128 arrays come from such values
+(`np.array([np.complex(1, 2), 3])`), `astype("complex128")`, `np.zeros(n, "complex128")` or an
+operation with a complex operand (`a:add(np.j)`), and give them back (`z:get(0)`, `z:tolist()`,
+`z:sum()`). Complex is the widest dtype: anything with complex128 is complex128. Arithmetic,
+`power`, `equal` / `not_equal`, the logical functions, `sqrt`, `exp`, `log` (and `log2`, `log10`,
+`log1p`, `expm1`, `exp2`), the trigonometric and hyperbolic functions and their inverses,
+`reciprocal`, `square`, `sign` (`z / |z|`), `isnan` / `isinf` / `isfinite`, `sum`, `prod`, `mean`,
+`var` / `std` (of `|z - mean|`, float64), `cumsum`, `cumprod`, `matmul`, `einsum`, `where`,
+indexing, joining and files work on them; `absolute` and `angle` give float64; `real(a)` and
+`imag(a)` (also methods) are float64 **views** that write through (`z:imag():set(0, 9)`), and
+`conjugate` (`conj`) the conjugate. Complex numbers have no order: `min`, `max`, `argmax`, `sort`,
+`unique`, `searchsorted`, `floor_divide`, `mod`, `maximum`... panic with `complex numbers are not
+ordered` or `not defined for complex numbers`; a cast to a real dtype keeps the real part.
+
+Integer arithmetic wraps around at 64 bits,
 and integer `floor_divide` / `mod` by zero give 0 (as NumPy does, without its warning). Values
 are read back into Sea as ints while they fit 48 bits, as numbers beyond.
 
@@ -1767,22 +1785,25 @@ a damaged or unsupported file are error values.
 | Indexing | `a:get(index...)`: ints, slice strings (`"1:3"`, `"::-1"`, `":"`), `nil` (`:`), `"..."`, `np.newaxis`, several in one string (`"1, ::2"`); one index array (ints or 1-D bools) for an axis; a bool array of the same shape (a mask). Basic indices give a **view** (or a scalar), index arrays and masks a copy. `a:set(index..., value)` assigns in place with broadcasting and returns `a`. `take(a, indices [, axis])`, `item([i...])`, `nonzero`, `argwhere`, `flatnonzero`, `count_nonzero`, `where(cond, x, y)` |
 | Shape | `reshape(a, shape)` or `a:reshape(2, -1)` (a view when it can), `ravel`, `flatten`, `a:T()`, `transpose([axes])`, `swapaxes`, `moveaxis`, `squeeze([axis])`, `expand_dims`, `broadcast_to` (a view with strides 0: do not write into it), `atleast_1d`, `atleast_2d`, `as_strided(a, shape, strides [, offset])` (a view with any geometry inside the data; strides in elements), `flip([axis])`, `fliplr`, `flipud`, `roll`, `repeat`, `tile`, `diagonal([k])` (a view), `copy`, `astype(dtype)`, `ascontiguousarray`, `fill(value)`, `tolist()` |
 | Joining | `concatenate(arrays [, axis = 0])`, `stack(arrays [, axis])`, `vstack`, `hstack`, `column_stack`, `dstack`, `split(a, n_or_indices [, axis])`, `array_split` (arrays of views) |
-| Element-wise | `add` (`a:add`), `subtract` (`sub`), `multiply` (`mul`), `divide` (`div`), `floor_divide` (`floordiv`), `mod` (`remainder`), `power` (`pow`), `maximum`, `minimum`, `fmax`, `fmin`, `arctan2`, `hypot`, `copysign`; `equal` (`eq`), `not_equal` (`ne`), `less` (`lt`), `less_equal` (`le`), `greater` (`gt`), `greater_equal` (`ge`); `logical_and` / `or` / `xor` / `not`; `bitwise_and` / `or` / `xor`, `left_shift`, `right_shift`, `invert`; `negative` (`neg`), `absolute` (`abs`), `sign`, `square`, `sqrt`, `cbrt`, `reciprocal`, `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`, `sin` ... `arctanh`, `floor`, `ceil`, `trunc`, `rint`, `round(a [, decimals])` (halves to even), `clip(a, lo, hi)`, `isnan`, `isinf`, `isfinite`, `signbit`, `deg2rad`, `rad2deg`. The binary and unary functions take an `out` array last: `np.add(a, b, a)` |
+| Element-wise | `add` (`a:add`), `subtract` (`sub`), `multiply` (`mul`), `divide` (`div`), `floor_divide` (`floordiv`), `mod` (`remainder`), `power` (`pow`), `maximum`, `minimum`, `fmax`, `fmin`, `arctan2`, `hypot`, `copysign`; `equal` (`eq`), `not_equal` (`ne`), `less` (`lt`), `less_equal` (`le`), `greater` (`gt`), `greater_equal` (`ge`); `logical_and` / `or` / `xor` / `not`; `bitwise_and` / `or` / `xor`, `left_shift`, `right_shift`, `invert`; `negative` (`neg`), `absolute` (`abs`), `sign`, `square`, `sqrt`, `cbrt`, `reciprocal`, `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`, `sin` ... `arctanh`, `floor`, `ceil`, `trunc`, `rint`, `round(a [, decimals])` (halves to even), `clip(a, lo, hi)`, `isnan`, `isinf`, `isfinite`, `signbit`, `deg2rad`, `rad2deg`, `conjugate` (`conj`), `angle`, `real`, `imag`. The binary and unary functions take an `out` array last: `np.add(a, b, a)` |
 | Reductions | `sum`, `prod`, `min` (`amin`), `max` (`amax`), `mean`, `var`, `std`, `any`, `all`, `argmin`, `argmax`, `nansum`, `nanmean`, `ptp`, `median`, `average(a [, axis [, weights]])`, `quantile(a, q [, axis [, keepdims]])`, `percentile`; the axis is the 2nd argument (an int, an array of ints or nil for all) and `keepdims` the 3rd, or an options table: `a:sum({axis = 0, keepdims = true})`, `a:var({ddof = 1})`. `cumsum([axis])`, `cumprod`, `diff(a [, n [, axis]])` |
 | Sorting | `sort(a [, axis = -1])` (a copy; the method `a:sort()` sorts in place), `argsort` (stable), `unique(a [, {return_index, return_inverse, return_counts}])` (the extra arrays as multiple values), `searchsorted(a, v [, "left" \| "right"])`, `bincount`, `histogram(a [, bins [, range]])` (counts, edges) |
 | Products | `matmul(a, b)` (with batches broadcast; a blocked kernel, threaded above a few million operations), `dot`, `vdot`, `inner`, `outer`, `cross`, `convolve(a, v [, mode])`, `trace`; `einsum(subscripts, a, b, ...)`: `"ij,jk->ik"`, `"ii"` (trace), `"ii->i"` (diagonal), `"ij->ji"`, `"bij,bjk->bik"`, `"...ij,...jk"`, implicit output (the labels used once, in alphabetical order); operands are contracted left to right, each step a (batched) `matmul` |
 | Comparing | `isclose(a, b [, rtol [, atol]])`, `allclose`, `array_equal` |
 | Formatting | `array_str(a)` / `a:tostring()`, `array_repr(a)` / `a:repr()`: NumPy's layout (aligned columns, the fewest digits up to 8 decimals, scientific notation for wide ranges, `...` above 1000 elements) |
-| Files | `save(path, a)` / `load(path)` (`.npy` 1.0–3.0; it reads `<f4`, `<i4`, `u1`... and big-endian and Fortran-ordered files: `<f4` as float32, other floats as float64, integers as int64), `savez(path, arrays [, compressed])` / `savez_compressed` (`arrays` an array or a table of names) and `load` of a `.npz` (a table of names), `savetxt(path, a [, {fmt, delimiter, header}])`, `loadtxt(path [, {delimiter, skiprows, comments, usecols, dtype}])` |
+| Files | `save(path, a)` / `load(path)` (`.npy` 1.0–3.0; it reads `<f4`, `<i4`, `u1`... and big-endian and Fortran-ordered files: `<f4` as float32, other floats as float64, `<c16` and `<c8` as complex128, integers as int64), `savez(path, arrays [, compressed])` / `savez_compressed` (`arrays` an array or a table of names) and `load` of a `.npz` (a table of names), `savetxt(path, a [, {fmt, delimiter, header}])`, `loadtxt(path [, {delimiter, skiprows, comments, usecols, dtype}])` |
 
-**`np.linalg`** (float64, 2-D): `det`, `inv`, `solve(a, b)` (b 1-D or 2-D), `cholesky` (lower),
+**`np.linalg`** (float64, 2-D; `det`, `inv`, `solve` and `eig` also complex): `det`, `inv`, `solve(a, b)` (b 1-D or 2-D),
+`eig(a)` (w, v: the eigenvalues and right eigenvectors of any square matrix, unit columns with their
+largest component real; Householder reduction to Hessenberg form, then complex QR steps with
+Wilkinson shifts; float64 when the matrix is real and every eigenvalue is real, complex128
+otherwise, as NumPy), `eigvals`, `cholesky` (lower),
 `qr(a [, "reduced" | "complete" | "r"])` (q, r: Householder), `eigh(a)` (w ascending, v: a
 symmetric matrix's lower triangle, by Jacobi rotations), `eigvalsh`, `svd(a [, full_matrices =
 true [, compute_uv = true]])` (u, s, vh: one-sided Jacobi), `norm(x [, ord [, axis [,
 keepdims]]])` (vector p-norms, `inf`, `"fro"`, `"nuc"`, matrix 1 / 2 / inf), `matrix_rank`,
 `pinv`, `lstsq(a, b [, rcond])` (x, residuals, rank, s), `cond`, `matrix_power(a, n)`,
-`multi_dot`. There is no complex dtype, hence no general `eig` (non-symmetric matrices can have
-complex eigenvalues).
+`multi_dot`. `eig` takes about 50 ms for a 100×100 matrix and 0.4 s for 200×200.
 
 **`np.random`**: `default_rng([seed])` returns a generator (xoshiro256**; without a seed, the
 system's entropy) with `random([size [, dtype]])`, `uniform([low, high, size [, dtype]])`,
@@ -1797,7 +1818,7 @@ int or a shape. The module functions `seed`, `rand(d0, d1...)`, `randn`, `randin
 (float64) / 2 ms (float32), `x:sum()` in 0.6 / 0.4 ms; a 500×500 `matmul` in about 27 / 14 ms
 (threaded); about 3 µs of overhead per call on small arrays (each new array copies the method
 table into itself).
-Constants: `np.pi`, `np.e`, `np.inf`, `np.nan`, `np.newaxis`.
+Constants: `np.pi`, `np.e`, `np.inf`, `np.nan`, `np.newaxis`, `np.j`.
 
 ---
 

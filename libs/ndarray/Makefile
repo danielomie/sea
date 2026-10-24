@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 CC     = gcc
-CFLAGS = -std=c11 -O3 -march=native -fno-math-errno -Wall -Wextra -Wno-unused-parameter \
+CFLAGS = -std=c11 -O3 -march=native -fno-math-errno -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
          -fno-strict-aliasing -D_GNU_SOURCE -fPIC -shared
 SEA_SRC = ../../src
 

@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- libs/ndarray/ndarray.sea — N-dimensional arrays for Sea, in the manner of
--- NumPy: arrays of float64, float32, int64 or bool with any number of dimensions,
+-- NumPy: arrays of float64, float32, complex128, int64 or bool of any number of dimensions,
 -- views (slices, transposes, reshapes) that share data, element-wise
 -- operations with broadcasting, reductions along axes, matrix products,
 -- linear algebra, random numbers, and .npy / .npz / text files. The loops
@@ -41,6 +41,17 @@ M.nan = 0.0 / 0.0
 M.newaxis = "newaxis"
 M.float64 = "float64"
 M.float32 = "float32"
+M.complex128 = "complex128"
+
+-- np.complex(re [, im]): a complex scalar, the table {re, im} (what complex
+-- arrays take and give back: a:get(0) of a complex128 array is one)
+function M.complex(re_, im)
+    local z = {}
+    z.re = re_ + 0.0
+    z.im = (im or 0) + 0.0
+    return z
+end
+M.j = M.complex(0, 1)
 M.int64 = "int64"
 M.bool = "bool"
 
@@ -57,7 +68,7 @@ local NATIVE = [
     "prod", "min", "max", "any", "all", "mean", "var", "std", "nanmean", "argmax", "argmin", "cumsum",
     "cumprod", "argsort", "searchsorted", "matmul", "reshape", "transpose", "swapaxes", "squeeze",
     "expand_dims", "broadcast_to", "flip", "diagonal", "copy", "astype", "ravel", "ascontiguousarray",
-    "tolist", "fill", "take", "get", "set", "nonzero", "as_strided",
+    "tolist", "fill", "take", "get", "set", "nonzero", "as_strided", "conjugate", "angle", "real", "imag",
 ]
 
 for _, name in NATIVE do
@@ -70,7 +81,7 @@ local ALIASES = {
     sub = "subtract", mul = "multiply", div = "divide", floordiv = "floor_divide",
     pow = "power", neg = "negative", abs = "absolute", eq = "equal", ne = "not_equal", lt = "less",
     le = "less_equal", gt = "greater", ge = "greater_equal", amax = "max", amin = "min",
-    remainder = "mod", true_divide = "divide",
+    remainder = "mod", true_divide = "divide", conj = "conjugate",
 }
 for short, long in ALIASES do
     M[short] = native[long]
@@ -775,6 +786,16 @@ local function format_array(a, sep, indent)
     local fmt = nil
     if a.dtype == "float64" or a.dtype == "float32" then
         fmt = float_formatter(vals)
+    elseif a.dtype == "complex128" then
+        -- the real parts and the imaginary parts each aligned, as NumPy: 1.5+2.j  , 3. -1.25j
+        local real_fmt = float_formatter(list.map(vals, function(z) return z.re end))
+        local imag_fmt = float_formatter(list.map(vals, function(z) return math.abs(z.im) end))
+        fmt = function(z)
+            local im = imag_fmt(math.abs(z.im))
+            local digits = re.gsub(" +$", im, "")
+            local sign = (z.im < 0 or (z.im == 0 and 1 / z.im < 0)) and "-" or "+"
+            return real_fmt(z.re) .. sign .. digits .. "j" .. string.rep(" ", len(im) - len(digits))
+        end
     elseif a.dtype == "bool" then
         fmt = function(x) return x and "True" or "False" end
     else
@@ -844,7 +865,7 @@ function M.array_repr(a)
         return `array(${s}, dtype=${a.dtype})`
     end
     local body = format_array(a, ", ", "      ")
-    if a.dtype == "bool" or a.dtype == "float64" or a.dtype == "int64" then
+    if a.dtype == "bool" or a.dtype == "float64" or a.dtype == "int64" or a.dtype == "complex128" then
         return `array(${body})`
     end
     return `array(${body}, dtype=${a.dtype})`
@@ -886,6 +907,18 @@ function linalg.eigh(a)
     return r[0], r[1]
 end
 function linalg.eigvalsh(a) return like(a, native.eigh(a)[0]) end
+
+-- np.linalg.eig(a) → w, v: the eigenvalues and right eigenvectors (unit
+-- columns, the largest component real) of any square matrix; complex128
+-- unless a is real and every eigenvalue is real (then float64, as NumPy)
+function linalg.eig(a)
+    local r = native.eig(a, true)?
+    return r[0], r[1]
+end
+function linalg.eigvals(a)
+    local r = native.eig(a, false)?
+    return r[0]
+end
 
 -- np.linalg.svd(a [, full_matrices = true [, compute_uv = true]]) → u, s, vh (or s)
 function linalg.svd(a, full_matrices, compute_uv)
@@ -1311,7 +1344,7 @@ end
 
 -- ---- files ------------------------------------------------------------------------------------
 
-local DESCR = {float64 = "<f8", float32 = "<f4", int64 = "<i8", bool = "|b1"}
+local DESCR = {float64 = "<f8", float32 = "<f4", int64 = "<i8", bool = "|b1", complex128 = "<c16"}
 
 -- the bytes of a .npy file (format 1.0)
 local function npy_bytes(a)
@@ -1340,7 +1373,7 @@ local function npy_parse(bytes, name)
         start = 12
     end
     local header = string.sub(bytes, start + 1, start + hlen)
-    local descr = re.match("'descr':\\s*'([<>|=])([fiub])(\\d+)'", header)
+    local descr = re.match("'descr':\\s*'([<>|=])([fiubc])(\\d+)'", header)
     if descr == nil then return error(`ndarray.load: ${name}: unsupported dtype (${header})`) end
     local order = descr.groups[1]
     local kind = descr.groups[2] .. descr.groups[3]
