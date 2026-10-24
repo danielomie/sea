@@ -36,6 +36,7 @@ pure-Sea libraries work out of the box.
 | `cockroach` | `libs/cockroach/cockroach` | pure Sea (PostgreSQL protocol; `libs/ssl` for TLS) | — |
 | `clickhouse` | `libs/clickhouse/clickhouse` | pure Sea (HTTP interface, uses `libs/http`) | `make -C libs/http` |
 | `websocket` | `libs/websocket/websocket` | Sea + native | `make -C libs/websocket` (and `libs/http`, `libs/ssl`) |
+| `smtp` | `libs/smtp/smtp` | pure Sea (`net`; `libs/ssl` for TLS) | `make -C libs/ssl` |
 
 Require a library by its name: `require("http")`, `require("yaml")`. An installed `sea`
 (`make install`, see the README) finds it in `lib/sea/`; a `sea` run from the source tree
@@ -2184,6 +2185,44 @@ They read `COCKROACH_URL`.
 Tests: `bin/sea test libs/cockroach`; with
 `COCKROACH_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable`
 they also run against a server (`cockroach start-single-node --insecure`).
+
+---
+
+## `smtp`
+
+Sending e-mail in pure Sea: an SMTP client over the built-in `net` module, with
+TLS through `libs/ssl` (`make -C libs/ssl`). Every wait parks only the calling
+goroutine (netpoller).
+
+```sea
+local smtp = require("smtp")
+
+local r = smtp.send("smtps://ana%40x.com:secret@smtp.x.com", {
+    from = "Loja <no-reply@x.com>", to = ["ana@x.com"], cc = "bia@x.com", bcc = ["arquivo@x.com"],
+    reply_to = "sac@x.com", subject = "Seu pedido nº 12", text = "Olá!", html = "<p>Olá!</p>",
+    attachments = [{filename = "pedido.csv", content = csv_bytes, type = "text/csv"}],
+})?
+print(r.id, r.accepted)      -- the Message-ID, and the recipients the server took
+```
+
+URLs: `smtps://` (TLS from the start, port 465), `smtp://` (STARTTLS, port 587;
+refused when the server does not offer it), `smtp://…?tls=none` (plain text,
+for a local test server). `user:password` are URL-encoded; the client logs in
+with AUTH PLAIN, or AUTH LOGIN when that is all the server offers.
+
+| Function | Description |
+|----------|-------------|
+| `smtp.send(url, mail [, opts]) → result\|error` | Connect, send one message, quit. `result`: `{id, accepted = [address], rejected = [{address, error}]}`; refused recipients go in `rejected`, and only all of them refused is an error |
+| `smtp.dial(url [, opts]) → client\|error` | Connected, TLS on and logged in, for several messages: `client:send(mail)` (same result), `client:close()` (QUIT) |
+| `smtp.message(mail) → string` | The message's bytes (RFC 5322 + MIME): headers with accents as RFC 2047 words, text and HTML as `multipart/alternative`, attachments in base64 under `multipart/mixed`; `bcc` stays out of the headers |
+| `smtp.parse_url(url) → table\|error` | `{secure, plain, host, port, user, pass}` |
+| `smtp.address(s) → string` | The bare address of `"Name <a@b.com>"` |
+
+`mail`: `from`, `to` (a string or an array), `cc`, `bcc`, `reply_to`, `subject`,
+`text`, `html`, `attachments` (`[{filename, content, type}]`), `headers`
+(`{name = value}`), `id` (a Message-ID; one is made otherwise). `opts`:
+`timeout` (ms per operation, default 20000), `helo` (default `localhost`) and
+the `ssl.connect` options (`verify`, `ca`, ...).
 
 ---
 
