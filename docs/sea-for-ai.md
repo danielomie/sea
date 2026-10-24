@@ -661,7 +661,8 @@ need a build first: `make -C libs/<name>`. `json` and `csv` are built in.
 | `template` | `libs/template/template` | Text templates |
 | `console` | `libs/console/console` | Terminal colors, prompts, spinners |
 | `compress` | `libs/compress/compress` | gzip / zlib, ZIP and tar archives (`zip_write`, `tar_extract`, ...) |
-| `tensor` | `libs/tensor/tensor` | Numeric arrays and linear algebra |
+| `tensor` | `libs/tensor/tensor` | Numeric kernels on `float_array` (matvec, attention, Adam) |
+| `ndarray` | `libs/ndarray/ndarray` | NumPy-like N-dimensional arrays: `local np = require("ndarray")`, `np.arange(6):reshape(2, 3)`, methods instead of operators (`a:add(b):mul(2)`, `a:get("1, 1:")`, `a:set(":, 0", 9)`), `a:sum({axis = 0})`, `np.linalg`, `np.random.default_rng(seed)`, `np.save`/`np.load` (.npy) |
 | `test` | built in: `require("sea/test")` | The test framework (below) |
 
 Full APIs: [`docs/libs.md`](libs.md).

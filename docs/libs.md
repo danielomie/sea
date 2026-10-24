@@ -28,6 +28,7 @@ pure-Sea libraries work out of the box.
 | `image` | `libs/image/image` | pure Sea (PNG through `compress`) | `make -C libs/compress` for PNG |
 | `truetype` | `libs/truetype/truetype` | pure Sea (uses `image`) | — |
 | `tensor` | `libs/tensor/tensor` | native `.so` | `make -C libs/tensor` |
+| `ndarray` | `libs/ndarray/ndarray` | Sea + native | `make -C libs/ndarray` |
 | `duckdb` | `libs/duckdb/duckdb` | Sea + native | `make -C libs/duckdb` (downloads libduckdb) |
 | `sqlite` | `libs/sqlite/sqlite` | Sea + native | `make -C libs/sqlite` (downloads the SQLite source) |
 | `embed` | `libs/embed/embed` | Sea + native | `make -C libs/embed` (downloads and builds llama.cpp; needs cmake) |
@@ -1696,6 +1697,96 @@ tensor.matvec(x, 0, w, 2, 3, out, 0)      -- out = 9, 12, 15
 
 Calls from several goroutines on different arrays run in parallel. Test:
 `tests/unit/113_tensor.sea`.
+
+---
+
+## `ndarray`
+
+N-dimensional arrays in the manner of NumPy: float64, int64 and bool arrays of any number of
+dimensions, views that share data (slices, transposes, reshapes), element-wise operations with
+broadcasting, reductions along axes, matrix products, linear algebra, random numbers, and `.npy` /
+`.npz` / text files. The loops run in C (`ndarray_native.so`); the API around them is Sea
+(`ndarray.sea`). Sea has no operator overloading, so arithmetic is written with methods or
+functions: NumPy's `(a + 1) * b` is `a:add(1):mul(b)`, and `a[1, 1:]` is `a:get("1, 1:")`.
+
+**Require:** `require("ndarray")`
+**Build:** `make -C libs/ndarray` (`-O3 -march=native`; `.npz` files also need `make -C libs/compress`)
+**Test:** `make -C libs/ndarray test`
+
+```sea
+local np = require("ndarray")
+
+local a = np.arange(6):reshape(2, 3)            -- int64 [[0 1 2] [3 4 5]]
+print(a:repr())                                 -- array([[0, 1, 2],
+                                                --        [3, 4, 5]])
+print(a.shape, a.dtype, a.ndim, a.size)         -- [2, 3]  int64  2  6
+local b = a:mul(2):add(np.array([10, 20, 30]))  -- broadcasting
+print(b:sum({axis = 0}):tostring())             -- [26 50 74]
+print(a:get("1, 1:"):tostring())                -- [4 5]           a[1, 1:]
+a:set(":, 0", 9)                                -- a[:, 0] = 9 (in place)
+print(a:get(a:gt(4)):tolist())                  -- [9, 9, 5]       a[a > 4]
+
+local x = np.linalg.solve(np.array([ [3, 1], [1, 2] ]), np.array([9, 8]))   -- [2. 3.]
+local rng = np.random.default_rng(42)
+local m = rng:normal(0, 1, [1000, 3])
+print(m:mean({axis = 0}):repr())
+np.save("m.npy", m)?                            -- numpy.load reads it, and the other way round
+```
+
+**Arrays.** An array is a Sea table holding `data` (a `float_array` for float64, an `int_array`
+for int64 and bool), `dtype` (`"float64"`, `"int64"`, `"bool"`), `shape` and `strides` (arrays of
+ints; strides in elements), `offset`, `ndim` and `size`, plus its methods. Every function of the
+module below is also a method: `np.sum(a, 0)` is `a:sum(0)`. Where an array is expected, a Sea
+number, bool, nested array, `float_array` or `int_array` works too (converted as by `np.array`). A
+result with no dimensions (`a:sum()`, `a:get(1, 2)`, `np.dot` of two vectors) is a Sea scalar.
+`print(a)` shows the table: use `a:tostring()` (NumPy's `str`) or `a:repr()`.
+
+**Dtypes.** Integer literals make int64 arrays, any float makes float64, `true`/`false` make
+bool. Operations promote bool < int64 < float64; `divide` and the math functions give float64;
+comparisons give bool; the sum of bools is int64. Integer arithmetic wraps around at 64 bits,
+and integer `floor_divide` / `mod` by zero give 0 (as NumPy does, without its warning). Values
+are read back into Sea as ints while they fit 48 bits, as numbers beyond.
+
+**Errors.** Misuse is a panic with NumPy's message (`operands could not be broadcast together
+with shapes (2, 3) (4,)`, `index 5 is out of bounds for axis 0 with size 3`); `recover()` catches
+it. A singular matrix (`solve`, `inv`), a matrix that is not positive definite (`cholesky`) and
+a damaged or unsupported file are error values.
+
+| Area | Functions (all `np.`; the ones that take an array are also methods) |
+|------|-------------|
+| Creation | `array(v [, dtype])`, `asarray`, `zeros(shape [, dtype])`, `ones`, `empty`, `full(shape, value [, dtype])`, `zeros_like` / `ones_like` / `full_like` / `empty_like`, `arange([start,] stop [, step] [, dtype])`, `linspace(start, stop [, num = 50 [, endpoint]])`, `logspace`, `eye(n [, m [, k [, dtype]]])`, `identity`, `diag(v [, k])`, `tri`, `tril`, `triu`, `meshgrid(x, y, ... [, {indexing}])` (one array per input, as multiple values), `from_data(float_array [, shape [, dtype]])` (no copy: the array and the `float_array` share their elements) |
+| Indexing | `a:get(index...)`: ints, slice strings (`"1:3"`, `"::-1"`, `":"`), `nil` (`:`), `"..."`, `np.newaxis`, several in one string (`"1, ::2"`); one index array (ints or 1-D bools) for an axis; a bool array of the same shape (a mask). Basic indices give a **view** (or a scalar), index arrays and masks a copy. `a:set(index..., value)` assigns in place with broadcasting and returns `a`. `take(a, indices [, axis])`, `item([i...])`, `nonzero`, `argwhere`, `flatnonzero`, `count_nonzero`, `where(cond, x, y)` |
+| Shape | `reshape(a, shape)` or `a:reshape(2, -1)` (a view when it can), `ravel`, `flatten`, `a:T()`, `transpose([axes])`, `swapaxes`, `moveaxis`, `squeeze([axis])`, `expand_dims`, `broadcast_to` (a view with strides 0: do not write into it), `atleast_1d`, `atleast_2d`, `flip([axis])`, `fliplr`, `flipud`, `roll`, `repeat`, `tile`, `diagonal([k])` (a view), `copy`, `astype(dtype)`, `ascontiguousarray`, `fill(value)`, `tolist()` |
+| Joining | `concatenate(arrays [, axis = 0])`, `stack(arrays [, axis])`, `vstack`, `hstack`, `column_stack`, `dstack`, `split(a, n_or_indices [, axis])`, `array_split` (arrays of views) |
+| Element-wise | `add` (`a:add`), `subtract` (`sub`), `multiply` (`mul`), `divide` (`div`), `floor_divide` (`floordiv`), `mod` (`remainder`), `power` (`pow`), `maximum`, `minimum`, `fmax`, `fmin`, `arctan2`, `hypot`, `copysign`; `equal` (`eq`), `not_equal` (`ne`), `less` (`lt`), `less_equal` (`le`), `greater` (`gt`), `greater_equal` (`ge`); `logical_and` / `or` / `xor` / `not`; `bitwise_and` / `or` / `xor`, `left_shift`, `right_shift`, `invert`; `negative` (`neg`), `absolute` (`abs`), `sign`, `square`, `sqrt`, `cbrt`, `reciprocal`, `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`, `sin` ... `arctanh`, `floor`, `ceil`, `trunc`, `rint`, `round(a [, decimals])` (halves to even), `clip(a, lo, hi)`, `isnan`, `isinf`, `isfinite`, `signbit`, `deg2rad`, `rad2deg`. The binary and unary functions take an `out` array last: `np.add(a, b, a)` |
+| Reductions | `sum`, `prod`, `min` (`amin`), `max` (`amax`), `mean`, `var`, `std`, `any`, `all`, `argmin`, `argmax`, `nansum`, `nanmean`, `ptp`, `median`, `average(a [, axis [, weights]])`, `quantile(a, q [, axis [, keepdims]])`, `percentile`; the axis is the 2nd argument (an int, an array of ints or nil for all) and `keepdims` the 3rd, or an options table: `a:sum({axis = 0, keepdims = true})`, `a:var({ddof = 1})`. `cumsum([axis])`, `cumprod`, `diff(a [, n [, axis]])` |
+| Sorting | `sort(a [, axis = -1])` (a copy; the method `a:sort()` sorts in place), `argsort` (stable), `unique(a [, {return_index, return_inverse, return_counts}])` (the extra arrays as multiple values), `searchsorted(a, v [, "left" \| "right"])`, `bincount`, `histogram(a [, bins [, range]])` (counts, edges) |
+| Products | `matmul(a, b)` (with batches broadcast; a blocked kernel, threaded above a few million operations), `dot`, `vdot`, `inner`, `outer`, `cross`, `convolve(a, v [, mode])`, `trace` |
+| Comparing | `isclose(a, b [, rtol [, atol]])`, `allclose`, `array_equal` |
+| Formatting | `array_str(a)` / `a:tostring()`, `array_repr(a)` / `a:repr()`: NumPy's layout (aligned columns, the fewest digits up to 8 decimals, scientific notation for wide ranges, `...` above 1000 elements) |
+| Files | `save(path, a)` / `load(path)` (`.npy` 1.0–3.0; it reads `<f4`, `<i4`, `u1`... and big-endian and Fortran-ordered files, as float64 / int64), `savez(path, arrays [, compressed])` / `savez_compressed` (`arrays` an array or a table of names) and `load` of a `.npz` (a table of names), `savetxt(path, a [, {fmt, delimiter, header}])`, `loadtxt(path [, {delimiter, skiprows, comments, usecols, dtype}])` |
+
+**`np.linalg`** (float64, 2-D): `det`, `inv`, `solve(a, b)` (b 1-D or 2-D), `cholesky` (lower),
+`qr(a [, "reduced" | "complete" | "r"])` (q, r: Householder), `eigh(a)` (w ascending, v: a
+symmetric matrix's lower triangle, by Jacobi rotations), `eigvalsh`, `svd(a [, full_matrices =
+true [, compute_uv = true]])` (u, s, vh: one-sided Jacobi), `norm(x [, ord [, axis [,
+keepdims]]])` (vector p-norms, `inf`, `"fro"`, `"nuc"`, matrix 1 / 2 / inf), `matrix_rank`,
+`pinv`, `lstsq(a, b [, rcond])` (x, residuals, rank, s), `cond`, `matrix_power(a, n)`,
+`multi_dot`. There is no complex dtype, hence no general `eig` (non-symmetric matrices can have
+complex eigenvalues).
+
+**`np.random`**: `default_rng([seed])` returns a generator (xoshiro256**; without a seed, the
+system's entropy) with `random([size])`, `uniform([low, high, size])`, `normal([loc, scale,
+size])`, `standard_normal`, `integers(low [, high] [, size])` (high exclusive, unbiased),
+`exponential`, `poisson` (PTRS above λ = 30), `choice(a [, size [, replace [, p]]])`,
+`shuffle(a)` (in place, first axis), `permutation(n | a)`. `size` is nil (one Sea number), an
+int or a shape. The module functions `seed`, `rand(d0, d1...)`, `randn`, `randint`, `random`,
+`uniform`, `normal`, `choice`, `shuffle`, `permutation` use one shared generator.
+
+**Speed.** On one core of the machine it was written on: `x:mul(2):add(x)` over 1M float64 in
+about 10 ms, `x:sum()` in 0.6 ms; a 500×500 `matmul` in about 25 ms (threaded); about 3 µs of
+overhead per call on small arrays (each new array copies the method table into itself).
+Constants: `np.pi`, `np.e`, `np.inf`, `np.nan`, `np.newaxis`.
 
 ---
 
