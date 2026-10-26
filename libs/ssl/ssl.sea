@@ -298,6 +298,15 @@ function M.cert_pem(cert)
     return native.cert_pem(cert)
 end
 
+-- ssl.pkcs12_parse(bytes, password) → {cert_pem, key_pem, chain} | error
+-- Read a PKCS#12 file (.pfx/.p12: an A1 certificate) — its certificate,
+-- private key (PEM, not encrypted) and chain (an array of PEM). Older files
+-- (RC2, 3DES) work too. Errors: "pkcs12: wrong password", "pkcs12: not a
+-- PKCS#12 (.pfx/.p12) file".
+function M.pkcs12_parse(bytes, password)
+    return native.pkcs12_parse(bytes, password or "")
+end
+
 -- ssl.cert_save(cert, path) → bool
 function M.cert_save(cert, path)
     return native.cert_save(cert, path)

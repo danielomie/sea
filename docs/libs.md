@@ -920,6 +920,7 @@ TLS runs over sockets from the built-in `net` module (see `docs/reference.md`): 
 | `ssl.cert_load` | `cert_load(path) → cert\|nil` | Load X.509 cert from PEM file |
 | `ssl.cert_parse` | `cert_parse(pem) → cert\|nil` | Parse X.509 cert from PEM string |
 | `ssl.cert_info` | `cert_info(cert) → table` | `{subject, issuer, not_before, not_after, serial, fingerprint, san}`. `san` is a 0-indexed array |
+| `ssl.pkcs12_parse` | `pkcs12_parse(bytes, password) → {cert_pem, key_pem, chain}\|error` | Read a PKCS#12 file (`.pfx`/`.p12`, an A1 certificate): the certificate, its private key (PEM, not encrypted) and the chain (array of PEM). Older files (RC2, 3DES) work too (OpenSSL 3's legacy provider). Errors: `pkcs12: wrong password`, `pkcs12: not a PKCS#12 (.pfx/.p12) file` |
 | `ssl.cert_pem` | `cert_pem(cert) → string\|nil` | Serialize cert to PEM |
 | `ssl.cert_save` | `cert_save(cert, path) → bool` | Save cert to PEM file |
 | `ssl.cert_free` | `cert_free(cert)` | Free cert handle |

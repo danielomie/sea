@@ -14,7 +14,7 @@
  *                    non-blocking through the netpoller), tls_peer_cert,
  *                    tls_version, tls_cipher
  *   TLS server ctx — server_new, server_free
- *   Certificates   — cert_load_file, cert_parse, cert_info, cert_pem,
+ *   Certificates   — cert_load_file, cert_parse, cert_info, cert_pem, pkcs12_parse,
  *                    cert_save, cert_free, cert_verify, cert_self_signed,
  *                    cert_sign
  *   Keys           — key_generate, key_load_file, key_parse, key_pem,
@@ -42,6 +42,10 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+#include <openssl/pkcs12.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/provider.h>
+#endif
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -642,6 +646,90 @@ static SeaValue fn_cert_info(SeaVM *vm, int argc, SeaValue *args) {
         sea_obj_release(&arr->obj);
     }
 
+    return sea_obj_val(&t->obj);
+}
+
+/* drops a value this function owns (stored elsewhere, or not needed) */
+static void val_drop(SeaValue v) {
+    if (sea_is_obj(v)) sea_obj_release(sea_as_obj(v));
+}
+
+/* the PEM of a certificate or key written by fn, or nil */
+static SeaValue bio_pem(int (*write)(BIO *, void *), void *obj) {
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (!bio) return SEA_NIL_VAL;
+    write(bio, obj);
+    char *ptr; long len = BIO_get_mem_data(bio, &ptr);
+    SeaValue r = len > 0 ? make_str(ptr, (size_t)len) : SEA_NIL_VAL;
+    BIO_free(bio);
+    return r;
+}
+static int write_x509(BIO *b, void *o) { return PEM_write_bio_X509(b, (X509 *)o); }
+static int write_key(BIO *b, void *o) { return PEM_write_bio_PrivateKey(b, (EVP_PKEY *)o, NULL, NULL, 0, NULL, NULL); }
+
+/* pkcs12_parse(der, password) → {cert_pem, key_pem, chain = [pem, ...]} | error.
+ * A .pfx/.p12 (an A1 certificate): the certificate, its private key and the
+ * chain. Older files (RC2, 3DES: most A1 certificates in Brazil) need
+ * OpenSSL 3's legacy provider, loaded on first use. */
+static SeaValue fn_pkcs12_parse(SeaVM *vm, int argc, SeaValue *args) {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    static int providers = 0;
+    if (!providers) {
+        OSSL_PROVIDER_load(NULL, "legacy");
+        OSSL_PROVIDER_load(NULL, "default");
+        providers = 1;
+    }
+#endif
+    if (argc < 1) return sea_make_error_str(vm, "pkcs12: the file's bytes expected");
+    SeaString *der = sea_value_get_flat_string(args[0]);
+    if (!der) return sea_make_error_str(vm, "pkcs12: the file's bytes expected");
+    char pass[512] = {0};
+    if (argc >= 2) val_to_cstr(args[1], pass, sizeof(pass));
+    BIO *bio = BIO_new_mem_buf(der->data, (int)der->len);
+    sea_obj_release(&der->obj);
+    if (!bio) return sea_make_error_str(vm, "pkcs12: out of memory");
+    PKCS12 *p12 = d2i_PKCS12_bio(bio, NULL);
+    BIO_free(bio);
+    if (!p12) return sea_make_error_str(vm, "pkcs12: not a PKCS#12 (.pfx/.p12) file");
+    if (!PKCS12_verify_mac(p12, pass, -1)) {
+        PKCS12_free(p12);
+        ERR_clear_error();
+        return sea_make_error_str(vm, "pkcs12: wrong password");
+    }
+    EVP_PKEY *key = NULL;
+    X509 *cert = NULL;
+    STACK_OF(X509) *ca = NULL;
+    int ok = PKCS12_parse(p12, pass, &key, &cert, &ca);
+    PKCS12_free(p12);
+    if (!ok || !cert || !key) {
+        if (key) EVP_PKEY_free(key);
+        if (cert) X509_free(cert);
+        if (ca) sk_X509_pop_free(ca, X509_free);
+        unsigned long e = ERR_get_error();
+        char buf[256];
+        snprintf(buf, sizeof(buf), "pkcs12: cannot read it (%s)", e ? ERR_reason_error_string(e) : "no certificate or key");
+        ERR_clear_error();
+        return sea_make_error_str(vm, buf);
+    }
+    SeaTable *t = sea_table_new(TABLE_MAP);
+    SeaValue v = bio_pem(write_x509, cert);
+    sea_table_set_str(t, "cert_pem", v);
+    val_drop(v);
+    v = bio_pem(write_key, key);
+    sea_table_set_str(t, "key_pem", v);
+    val_drop(v);
+    int n = ca ? sk_X509_num(ca) : 0;
+    SeaArray *chain = sea_array_new((uint32_t)n);
+    for (int i = 0; i < n; i++) {
+        SeaValue p = bio_pem(write_x509, sk_X509_value(ca, i));
+        sea_array_push(chain, p);
+        val_drop(p);
+    }
+    sea_table_set_str(t, "chain", sea_obj_val(&chain->obj));
+    sea_obj_release(&chain->obj);
+    EVP_PKEY_free(key);
+    X509_free(cert);
+    if (ca) sk_X509_pop_free(ca, X509_free);
     return sea_obj_val(&t->obj);
 }
 
@@ -1437,6 +1525,7 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     sea_mod_set(mod, "cert_parse",       fn_cert_parse);
     sea_mod_set(mod, "cert_info",        fn_cert_info);
     sea_mod_set(mod, "cert_pem",         fn_cert_pem);
+    sea_mod_set(mod, "pkcs12_parse",     fn_pkcs12_parse);
     sea_mod_set(mod, "cert_save",        fn_cert_save);
     sea_mod_set(mod, "cert_free",        fn_cert_free);
     sea_mod_set(mod, "cert_verify",      fn_cert_verify);

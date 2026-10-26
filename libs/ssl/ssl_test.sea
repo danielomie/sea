@@ -1,0 +1,50 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/ssl: the parts that need no network — symmetric encryption and
+-- PKCS#12 (.pfx) files (made here with the openssl command, when it exists)
+
+local t = require("sea/test")
+local ssl = require("./ssl")
+
+-- a .pfx made by the openssl command: {bytes, dir} | nil when there is no openssl
+local function pfx(password, legacy)
+    local dir = fs.tempdir()
+    if is_error(dir) then return nil end
+    local cmd = `cd ${dir} && openssl req -x509 -newkey rsa:2048 -nodes -keyout k.pem -out c.pem -days 30 ` ..
+        `-subj "/C=BR/O=Loja Teste/CN=LOJA TESTE LTDA:12345678000195" 2>/dev/null && ` ..
+        `openssl pkcs12 -export ${legacy and "-legacy " or ""}-inkey k.pem -in c.pem -out c.pfx -passout pass:${password} 2>/dev/null`
+    local r = process.run(cmd)
+    if is_error(r) or not r.ok then return nil end
+    return {bytes = fs.read(path.join(dir, "c.pfx")), dir = dir}
+end
+
+t.describe("ssl", function()
+    t.it("encrypts and decrypts with AES-256-GCM, refusing a changed message", function()
+        local key = ssl.rand_bytes(32)
+        local box = ssl.encrypt("aes-256-gcm", key, "segredo")
+        t.not_nil(box)
+        t.eq(ssl.decrypt("aes-256-gcm", key, box.iv, box.data, box.tag), "segredo")
+        t.is_nil(ssl.decrypt("aes-256-gcm", key, box.iv, box.data .. "x", box.tag))
+    end)
+
+    t.it("reads a PKCS#12 file: certificate, key and chain; a wrong password says so", function()
+        for _, legacy in [false, true] do
+            local f = pfx("s3nh4", legacy)
+            if f == nil then
+                print("  (no openssl command: skipped)")
+                return
+            end
+            local p = t.no_error(ssl.pkcs12_parse(f.bytes, "s3nh4"))
+            t.contains(p.cert_pem, "BEGIN CERTIFICATE")
+            t.contains(p.key_pem, "PRIVATE KEY")
+            t.eq(type(p.chain), "array")
+            local info = ssl.cert_info(ssl.cert_parse(p.cert_pem))
+            t.contains(info.subject, "LOJA TESTE LTDA:12345678000195")
+            t.not_nil(info.not_after)
+            t.matches(ssl.pkcs12_parse(f.bytes, "errada").message, "wrong password")
+            local _ = fs.remove(f.dir, {recursive = true})
+        end
+        t.matches(ssl.pkcs12_parse("not a pfx", "x").message, "not a PKCS#12")
+    end)
+end)
