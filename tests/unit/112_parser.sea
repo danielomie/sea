@@ -40,6 +40,10 @@ local d = parser.check("local a = 1\na = ", {name = "c.sea"})
 print(d.phase, d.line, d.col, d.message)
 d = parser.check("const a = 1\na = 2\n", {name = "c.sea"})
 print(d.phase, d.line, d.col, d.text)
+-- an int is 48 bits: a wider literal is an error, not a number wrapped around
+d = parser.check("local n = 999999999999999\n", {name = "c.sea"})
+print(d.phase, d.line, d.col, d.message)
+print(parser.check("local n = 140737488355327\nlocal f = 999999999999999.0\n"))
 
 -- children and walk
 for i, ch in parser.children(add) do print(i, ch.type) end

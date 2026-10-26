@@ -443,6 +443,10 @@ static SeaToken scan_long_string(SeaLexer *l) {
 
 // ---- Number scanning ----
 
+#define SEA_LITERAL_INT_MAX 140737488355327.0   /* 2^47 - 1: the largest int */
+#define INT_TOO_LARGE "integer literal too large (an int is 48 bits, up to 140737488355327): " \
+    "write a float (1e15, 999999999999999.0) or use bigint.new(\"...\")"
+
 static SeaToken scan_number(SeaLexer *l) {
     // Hex?
     if (peek_char(l) == '0' && (peek_next(l) == 'x' || peek_next(l) == 'X')) {
@@ -452,6 +456,7 @@ static SeaToken scan_number(SeaLexer *l) {
         // Parse hex
         char *end;
         t.val.number = (double)strtoull(l->start + 2, &end, 16);
+        if (t.val.number > SEA_LITERAL_INT_MAX) return error_token(l, INT_TOO_LARGE);
         return t;
     }
 
@@ -472,6 +477,8 @@ static SeaToken scan_number(SeaLexer *l) {
     t.is_float = is_float;
     char *end;
     t.val.number = strtod(l->start, &end);
+    // an int is 48 bits: a wider literal would wrap around silently
+    if (!is_float && t.val.number > SEA_LITERAL_INT_MAX) return error_token(l, INT_TOO_LARGE);
     return t;
 }
 

@@ -406,6 +406,11 @@ These tools are Sea programs (`tools/fmt.sea`, `tools/doc.sea`,
 0xDEAD_BEEF -- (any hex digits)
 ```
 
+An integer literal must fit an `int` (48 bits, up to 140737488355327): a
+larger one is a compile error (`integer literal too large`), not a number
+wrapped around. Write it as a float (`1e15`, `999999999999999.0`) or with
+`bigint.new("...")`.
+
 Integer (`int`) and float (`number`) are **distinct types**. `1 == 1.0` is **false**.
 
 ---

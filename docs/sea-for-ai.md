@@ -86,6 +86,8 @@ says what to write instead (`undefined variable 'pairs' (iterate with
 13. **`int` and `number` are different types.** Integer literals are `int`
     (48-bit), literals with `.` or an exponent and the result of `/` are
     `number` (double). `1 == 1.0` is true, but they are different map keys.
+    An integer literal wider than 48 bits is a compile error (write `1e15`
+    or use `bigint`).
 14. **`int` overflow wraps around** at 48 bits (±140 737 488 355 327) with
     no error and no promotion to float. Use `bigint` for larger integers.
 15. **`//` and `%` floor** (toward minus infinity): `-7 // 2` is `-4`,
