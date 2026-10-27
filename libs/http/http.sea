@@ -1174,7 +1174,14 @@ local function do_request(method, url, o, redirects_left)
     if body ~= nil then lines[] = body end
     local request_text = string.join(lines, "")
 
+    -- a pooled connection is reused only with the same TLS settings: another
+    -- CA, client certificate or host check must not ride on it
     local key = u.scheme .. "://" .. u.host .. ":" .. u.port .. (o.verify == false and "/noverify" or "")
+    if u.scheme == "https" and o.tls then
+        local parts = []
+        for _, k in sort.sorted(list.keys(o.tls)) do parts[] = k .. "=" .. tostring(o.tls[k]) end
+        key = key .. "/" .. string.join(parts, "&")
+    end
     local resp = nil
     local reusable = false
     local last_err = "request failed"

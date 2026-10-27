@@ -714,7 +714,7 @@ Sockets come from the built-in `net` module: every network wait parks only the g
 | `query` | — | Map appended to the URL as a query string |
 | `timeout` | `30000` | Per network operation (connect, TLS handshake, each read/write) |
 | `follow_redirects` | `true` | `false`, `true` (up to 5 hops) or a max hop count. 303 — and 301/302 after a POST — become GET; `Authorization`/`Cookie` are dropped when redirected to another host |
-| `keep_alive` | `true` | Reuse connections (pool of up to 8 idle per host, 30 s max age; a stale reused connection is retried once, on a new connection) |
+| `keep_alive` | `true` | Reuse connections (pool of up to 8 idle per host, 30 s max age; a stale reused connection is retried once, on a new connection). A connection is reused only by requests with the same `verify` and `tls` options |
 | `basic_auth` | — | `{user, password}` |
 | `verify` | `true` | `false` skips TLS certificate checks |
 | `tls` | — | Extra `ssl.connect` opts (`cert`, `key`, `sni`, `min_version`) |

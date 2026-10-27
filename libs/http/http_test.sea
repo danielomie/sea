@@ -1,0 +1,54 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- libs/http over TLS with a CA of our own: the client trusts the server only
+-- with that CA, and a pooled keep-alive connection is not reused by a request
+-- with other TLS settings (it would skip the check, or ride on another
+-- client certificate)
+
+local t = require("sea/test")
+local http = require("./http")
+
+local dir = nil
+
+local function sh(cmd)
+    local r = process.run({"sh", "-c", cmd}, {cwd = dir})
+    return not is_error(r) and r.code == 0
+end
+
+-- a CA and a certificate for 127.0.0.1 it signed
+local function make_certs()
+    if not sh("command -v openssl >/dev/null") then return false end
+    return sh("openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 2 -subj '/CN=test CA' 2>/dev/null") and
+        sh("openssl req -x509 -newkey rsa:2048 -nodes -keyout other.key -out other.crt -days 2 -subj '/CN=other CA' 2>/dev/null") and
+        sh("openssl req -newkey rsa:2048 -nodes -keyout srv.key -out srv.csr -subj '/CN=127.0.0.1' 2>/dev/null") and
+        sh("printf 'subjectAltName=IP:127.0.0.1\\n' > san.ext && openssl x509 -req -in srv.csr -CA ca.crt -CAkey ca.key " ..
+            "-CAcreateserial -out srv.crt -days 2 -extfile san.ext 2>/dev/null")
+end
+
+t.describe("http over TLS", function()
+    t.before_all(function()
+        dir = path.join(os.getenv("TMPDIR") or "/tmp", "sea_http_test_" .. os.uuid())
+        fs.mkdir(dir, {parents = true})
+    end)
+    t.after_all(function() fs.remove(dir, {recursive = true, force = true}) end)
+
+    t.it("trusts a server only with its CA, whatever the pool holds", function()
+        if not make_certs() then
+            print("  (no openssl command: skipped)")
+            return
+        end
+        local srv = t.no_error(http.listen(0, function(req) return {status = 200, body = "olá"} end,
+            {host = "127.0.0.1", tls = {cert = path.join(dir, "srv.crt"), key = path.join(dir, "srv.key")}}))
+        defer srv.close()
+        local url = `https://127.0.0.1:${srv.port}/`
+        local ok = http.get(url, {tls = {ca = path.join(dir, "ca.crt")}})
+        t.eq(ok.status, 200)
+        t.eq(ok.body, "olá")
+        -- the connection above is pooled: these must not reuse it
+        t.eq(http.get(url).status, 0)
+        t.eq(http.get(url, {tls = {ca = path.join(dir, "other.crt")}}).status, 0)
+        t.eq(http.get(url, {verify = false}).status, 200)
+        t.eq(http.get(url, {tls = {ca = path.join(dir, "ca.crt")}}).status, 200)
+    end)
+end)
