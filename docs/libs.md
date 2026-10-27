@@ -965,8 +965,8 @@ Supported `algo` strings: `"aes-128-gcm"`, `"aes-256-gcm"`, `"aes-128-cbc"`, `"a
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `ssl.encrypt` | `encrypt(algo, key, plaintext [, iv]) → {data, iv, tag}\|nil` | Encrypt. For GCM/ChaCha20: IV auto-generated if omitted; `tag` is always filled |
-| `ssl.decrypt` | `decrypt(algo, key, iv, ciphertext [, tag]) → string\|nil` | Decrypt. `tag` required for authenticated ciphers |
+| `ssl.encrypt` | `encrypt(algo, key, plaintext [, iv [, aad]]) → {data, iv, tag}\|nil` | Encrypt. For GCM/ChaCha20: IV auto-generated if omitted (or nil); `tag` is always filled; `aad` (additional authenticated data, e.g. the record the value belongs to) is authenticated, not encrypted |
+| `ssl.decrypt` | `decrypt(algo, key, iv, ciphertext [, tag [, aad]]) → string\|nil` | Decrypt. `tag` required for authenticated ciphers; nil when the tag, the `aad`, the key or the IV do not match (a key or IV shorter than the cipher's is refused) |
 
 ### Asymmetric Sign / Verify
 

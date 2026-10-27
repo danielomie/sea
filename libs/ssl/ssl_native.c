@@ -1141,7 +1141,7 @@ static SeaValue fn_hmac_raw(SeaVM *vm, int argc, SeaValue *args) { (void)vm; ret
 
 static SeaValue fn_aes_encrypt(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    /* encrypt(algo, key, plaintext, [iv]) */
+    /* encrypt(algo, key, plaintext, [iv], [aad]) */
     if (argc < 3) return SEA_NIL_VAL;
     char algo[32];
     if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
@@ -1189,6 +1189,15 @@ static SeaValue fn_aes_encrypt(SeaVM *vm, int argc, SeaValue *args) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     EVP_EncryptInit_ex(ctx, cipher, NULL, (unsigned char*)key_s->data, iv);
     int len1 = 0, len2 = 0;
+    /* additional authenticated data: bound to the tag, not encrypted */
+    if (is_aead && argc >= 5) {
+        SeaString *aad = sea_value_get_flat_string(args[4]);
+        if (aad) {
+            int alen = 0;
+            EVP_EncryptUpdate(ctx, NULL, &alen, (unsigned char*)aad->data, (int)aad->len);
+            sea_obj_release(&aad->obj);
+        }
+    }
     EVP_EncryptUpdate(ctx, out, &len1, (unsigned char*)plain->data, (int)plain->len);
     EVP_EncryptFinal_ex(ctx, out + len1, &len2);
 
@@ -1208,7 +1217,7 @@ static SeaValue fn_aes_encrypt(SeaVM *vm, int argc, SeaValue *args) {
 
 static SeaValue fn_aes_decrypt(SeaVM *vm, int argc, SeaValue *args) {
     (void)vm;
-    /* decrypt(algo, key, iv, ciphertext, [tag]) */
+    /* decrypt(algo, key, iv, ciphertext, [tag], [aad]) */
     if (argc < 4) return SEA_NIL_VAL;
     char algo[32];
     if (!val_to_cstr(args[0], algo, sizeof(algo))) return SEA_NIL_VAL;
@@ -1226,6 +1235,13 @@ static SeaValue fn_aes_decrypt(SeaVM *vm, int argc, SeaValue *args) {
     }
 
     bool is_aead = strstr(algo, "gcm") || strstr(algo, "poly1305");
+    /* a key or an IV shorter than the cipher's would be read past its end */
+    if ((int)key_s->len < EVP_CIPHER_key_length(cipher) ||
+        (int)iv_s->len < (is_aead ? 12 : EVP_CIPHER_iv_length(cipher))) {
+        sea_obj_release(&key_s->obj); sea_obj_release(&iv_s->obj);
+        sea_obj_release(&cipher_s->obj);
+        return SEA_NIL_VAL;
+    }
     int outlen = (int)cipher_s->len + EVP_CIPHER_block_size(cipher);
     unsigned char *out = malloc((size_t)outlen);
     if (!out) {
@@ -1248,6 +1264,14 @@ static SeaValue fn_aes_decrypt(SeaVM *vm, int argc, SeaValue *args) {
     }
 
     int len1 = 0, len2 = 0;
+    if (is_aead && argc >= 6) {
+        SeaString *aad = sea_value_get_flat_string(args[5]);
+        if (aad) {
+            int alen = 0;
+            EVP_DecryptUpdate(ctx, NULL, &alen, (unsigned char*)aad->data, (int)aad->len);
+            sea_obj_release(&aad->obj);
+        }
+    }
     EVP_DecryptUpdate(ctx, out, &len1, (unsigned char*)cipher_s->data, (int)cipher_s->len);
     int ok = EVP_DecryptFinal_ex(ctx, out + len1, &len2);
     EVP_CIPHER_CTX_free(ctx);

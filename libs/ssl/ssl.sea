@@ -430,19 +430,22 @@ end
 
 -- ---- Symmetric encryption -------------------------------------------------
 
--- ssl.encrypt(algo, key, plaintext, [iv]) → {data, iv, tag}|nil
+-- ssl.encrypt(algo, key, plaintext, [iv], [aad]) → {data, iv, tag}|nil
 -- Supported algos: "aes-128-gcm", "aes-256-gcm", "aes-128-cbc",
 --                  "aes-256-cbc", "chacha20-poly1305"
--- For GCM/ChaCha20: iv is auto-generated if omitted; tag is always returned.
+-- For GCM/ChaCha20: iv is auto-generated if omitted (nil); tag is always
+-- returned; aad (additional authenticated data) is bound to the tag without
+-- being encrypted: decrypting needs the same aad.
 -- key must be at least as long as the cipher's key size (16 or 32 bytes).
-function M.encrypt(algo, key, plaintext, iv)
-    return native.aes_encrypt(algo, key, plaintext, iv)
+function M.encrypt(algo, key, plaintext, iv, aad)
+    return native.aes_encrypt(algo, key, plaintext, iv, aad)
 end
 
--- ssl.decrypt(algo, key, iv, ciphertext, [tag]) → string|nil
--- tag is required for authenticated ciphers (GCM, ChaCha20-Poly1305).
-function M.decrypt(algo, key, iv, ciphertext, tag)
-    return native.aes_decrypt(algo, key, iv, ciphertext, tag)
+-- ssl.decrypt(algo, key, iv, ciphertext, [tag], [aad]) → string|nil
+-- tag is required for authenticated ciphers (GCM, ChaCha20-Poly1305); nil
+-- when the tag, the aad or the key do not match.
+function M.decrypt(algo, key, iv, ciphertext, tag, aad)
+    return native.aes_decrypt(algo, key, iv, ciphertext, tag, aad)
 end
 
 -- ---- Asymmetric sign/verify -----------------------------------------------
