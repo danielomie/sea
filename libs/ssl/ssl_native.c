@@ -15,7 +15,7 @@
  *                    tls_version, tls_cipher
  *   TLS server ctx — server_new, server_free
  *   Certificates   — cert_load_file, cert_parse, cert_info, cert_pem, pkcs12_parse,
- *                    cert_save, cert_free, cert_verify, cert_self_signed,
+ *                    cert_save, cert_free, cert_verify, cert_pubkey, cert_self_signed,
  *                    cert_sign
  *   Keys           — key_generate, key_load_file, key_parse, key_pem,
  *                    key_pub_pem, key_save, key_free
@@ -259,6 +259,63 @@ static int tls_wait(SeaVM *vm, SSL *ssl, int r, const char *what, SeaValue *out)
     return 0;
 }
 
+/* A cert or key option: a PEM file's path, or the PEM itself (it starts
+ * with "-----BEGIN": a certificate kept in a database, never on disk). A
+ * certificate's PEM may carry its chain after it. */
+static bool is_pem(SeaString *s) {
+    return s->len > 10 && !memcmp(s->data, "-----BEGIN", 10);
+}
+
+static int ctx_use_cert(SSL_CTX *ctx, SeaValue v) {
+    SeaString *s = sea_value_get_flat_string(v);
+    if (!s) return 0;
+    int ok = 0;
+    if (is_pem(s)) {
+        BIO  *b = BIO_new_mem_buf(s->data, (int)s->len);
+        X509 *x = b ? PEM_read_bio_X509(b, NULL, NULL, NULL) : NULL;
+        ok = x && SSL_CTX_use_certificate(ctx, x) == 1;
+        X509_free(x);
+        X509 *extra;
+        while (ok && (extra = PEM_read_bio_X509(b, NULL, NULL, NULL)) != NULL) {
+            if (SSL_CTX_add_extra_chain_cert(ctx, extra) != 1) {   /* takes it on success */
+                X509_free(extra);
+                ok = 0;
+            }
+        }
+        if (ok) ERR_clear_error();   /* the end of the PEM */
+        BIO_free(b);
+    } else {
+        char p[1024];
+        size_t n = s->len < sizeof(p) - 1 ? s->len : sizeof(p) - 1;
+        memcpy(p, s->data, n);
+        p[n] = '\0';
+        ok = SSL_CTX_use_certificate_chain_file(ctx, p) == 1;
+    }
+    sea_obj_release(&s->obj);
+    return ok;
+}
+
+static int ctx_use_key(SSL_CTX *ctx, SeaValue v) {
+    SeaString *s = sea_value_get_flat_string(v);
+    if (!s) return 0;
+    int ok = 0;
+    if (is_pem(s)) {
+        BIO      *b = BIO_new_mem_buf(s->data, (int)s->len);
+        EVP_PKEY *k = b ? PEM_read_bio_PrivateKey(b, NULL, NULL, NULL) : NULL;
+        ok = k && SSL_CTX_use_PrivateKey(ctx, k) == 1;
+        EVP_PKEY_free(k);
+        BIO_free(b);
+    } else {
+        char p[1024];
+        size_t n = s->len < sizeof(p) - 1 ? s->len : sizeof(p) - 1;
+        memcpy(p, s->data, n);
+        p[n] = '\0';
+        ok = SSL_CTX_use_PrivateKey_file(ctx, p, SSL_FILETYPE_PEM) == 1;
+    }
+    sea_obj_release(&s->obj);
+    return ok;
+}
+
 static SSL *tls_new(SSL_CTX *ctx, int fd) {
     SSL *ssl = SSL_new(ctx);
     if (!ssl) return NULL;
@@ -271,7 +328,8 @@ static SSL *tls_new(SSL_CTX *ctx, int fd) {
 
 /* tls_client(fd, host [, opts]) → conn: client TLS on a connected socket
  * (no I/O yet; call tls_handshake). opts: verify, verify_host, ca, sni,
- * cert, key, min_version. On failure the fd is left open (the caller owns it). */
+ * cert, key (a path or the PEM), min_version. On failure the fd is left open
+ * (the caller owns it). */
 static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
     if (argc < 2 || !sea_is_int(args[0])) return sea_make_error_str(vm, "tls_client: fd and host expected");
     int fd = (int)sea_as_int(args[0]);
@@ -282,8 +340,8 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
     bool verify_host = true;
     char ca_p[512]   = {0};
     char sni[256]    = {0};
-    char cert_p[512] = {0};
-    char key_p[512]  = {0};
+    SeaValue cert_v  = SEA_NIL_VAL;   /* borrowed from the options */
+    SeaValue key_v   = SEA_NIL_VAL;
     long min_ver     = TLS1_2_VERSION;
 
     if (argc >= 3 && (sea_is_table(args[2]) || sea_is_struct(args[2]) || sea_is_map(args[2]))) {
@@ -292,15 +350,17 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
         if (opts_get(args[2], "verify_host", &v)) verify_host = sea_is_truthy(v);
         if (opts_get(args[2], "ca",          &v)) val_to_cstr(v, ca_p, sizeof(ca_p));
         if (opts_get(args[2], "sni",         &v)) val_to_cstr(v, sni,    sizeof(sni));
-        if (opts_get(args[2], "cert",        &v)) val_to_cstr(v, cert_p, sizeof(cert_p));
-        if (opts_get(args[2], "key",         &v)) val_to_cstr(v, key_p,  sizeof(key_p));
+        if (opts_get(args[2], "cert",        &v) && !sea_is_nil(v)) cert_v = v;
+        if (opts_get(args[2], "key",         &v) && !sea_is_nil(v)) key_v = v;
         if (opts_get(args[2], "min_version", &v)) {
             char mv[32]; val_to_cstr(v, mv, sizeof(mv));
             if (!strcmp(mv, "TLSv1.3") || !strcmp(mv, "1.3")) min_ver = TLS1_3_VERSION;
         }
     }
 
-    bool    needs_clone = !verify || ca_p[0] || cert_p[0] || key_p[0] || min_ver != TLS1_2_VERSION;
+    bool    has_cert    = !sea_is_nil(cert_v);
+    bool    has_key     = !sea_is_nil(key_v);
+    bool    needs_clone = !verify || ca_p[0] || has_cert || has_key || min_ver != TLS1_2_VERSION;
     SSL_CTX *ctx        = needs_clone ? NULL : get_client_ctx();
     if (needs_clone) {
         ctx = SSL_CTX_new(TLS_client_method());
@@ -318,11 +378,11 @@ static SeaValue fn_tls_client(SeaVM *vm, int argc, SeaValue *args) {
             } else
                 SSL_CTX_set_default_verify_paths(ctx);
         }
-        if (cert_p[0] && SSL_CTX_use_certificate_chain_file(ctx, cert_p) != 1) {
+        if (has_cert && !ctx_use_cert(ctx, cert_v)) {
             SSL_CTX_free(ctx);
             return tls_error(vm, "tls_client: cert");
         }
-        if (key_p[0] && SSL_CTX_use_PrivateKey_file(ctx, key_p, SSL_FILETYPE_PEM) != 1) {
+        if (has_key && !ctx_use_key(ctx, key_v)) {
             SSL_CTX_free(ctx);
             return tls_error(vm, "tls_client: key");
         }
@@ -776,6 +836,14 @@ static SeaValue fn_cert_verify(SeaVM *vm, int argc, SeaValue *args) {
     X509_STORE_CTX_free(ctx);
     X509_STORE_free(store);
     return sea_bool_val(ok == 1);
+}
+
+/* cert_pubkey(cert) → key: the certificate's public key (to verify) */
+static SeaValue fn_cert_pubkey(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc < 1 || !sea_is_int(args[0])) return SEA_NIL_VAL;
+    EVP_PKEY *k = X509_get_pubkey(UNPACK(args[0], X509*));   /* a reference of our own */
+    return k ? PACK_PTR(k) : SEA_NIL_VAL;
 }
 
 static SeaValue fn_cert_self_signed(SeaVM *vm, int argc, SeaValue *args) {
@@ -1553,6 +1621,7 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     sea_mod_set(mod, "cert_save",        fn_cert_save);
     sea_mod_set(mod, "cert_free",        fn_cert_free);
     sea_mod_set(mod, "cert_verify",      fn_cert_verify);
+    sea_mod_set(mod, "cert_pubkey",      fn_cert_pubkey);
     sea_mod_set(mod, "cert_self_signed", fn_cert_self_signed);
     sea_mod_set(mod, "cert_sign",        fn_cert_sign);
 

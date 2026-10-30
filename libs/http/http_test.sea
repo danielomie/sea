@@ -51,4 +51,26 @@ t.describe("http over TLS", function()
         t.eq(http.get(url, {verify = false}).status, 200)
         t.eq(http.get(url, {tls = {ca = path.join(dir, "ca.crt")}}).status, 200)
     end)
+
+    t.it("presents a client certificate given as PEM text (mutual TLS)", function()
+        if not make_certs() or not sh("openssl req -newkey rsa:2048 -nodes -keyout cli.key -out cli.csr -subj '/CN=client' 2>/dev/null") or
+            not sh("openssl x509 -req -in cli.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out cli.crt -days 2 2>/dev/null") then
+            print("  (no openssl command: skipped)")
+            return
+        end
+        -- the server asks for a client certificate signed by the CA
+        local srv = t.no_error(http.listen(0, function(req) return {status = 200, body = "mtls"} end,
+            {host = "127.0.0.1", tls = {cert = path.join(dir, "srv.crt"), key = path.join(dir, "srv.key"), ca = path.join(dir, "ca.crt")}}))
+        defer srv.close()
+        local url = `https://127.0.0.1:${srv.port}/`
+        local ca = path.join(dir, "ca.crt")
+        t.eq(http.get(url, {tls = {ca = ca}}).status, 0)
+        local r = http.get(url, {tls = {ca = ca, cert = fs.read(path.join(dir, "cli.crt")), key = fs.read(path.join(dir, "cli.key"))}})
+        t.eq(r.status, 200)
+        t.eq(r.body, "mtls")
+        -- (as files too)
+        t.eq(http.get(url, {tls = {ca = ca, cert = path.join(dir, "cli.crt"), key = path.join(dir, "cli.key")}}).status, 200)
+        -- a key that is not PEM
+        t.eq(http.get(url, {tls = {ca = ca, cert = fs.read(path.join(dir, "cli.crt")), key = "-----BEGIN nonsense"}}).status, 0)
+    end)
 end)

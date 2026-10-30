@@ -65,4 +65,27 @@ t.describe("ssl", function()
         end
         t.matches(ssl.pkcs12_parse("not a pfx", "x").message, "not a PKCS#12")
     end)
+
+    t.it("signs with RSA-SHA1 and verifies with the certificate's public key", function()
+        local key = ssl.keygen({type = "rsa", bits = 2048})
+        local cert = ssl.cert_self_signed(key, {cn = "EMPRESA:12345678000195", days = 30})
+        local data = "<SignedInfo>...</SignedInfo>"
+        local sig = ssl.sign("rsa-sha1", key, data)
+        t.eq(len(sig), 256)
+        -- the same key read back from the certificate's PEM, as a verifier gets it
+        local pub = ssl.cert_pubkey(ssl.cert_parse(ssl.cert_pem(cert)))
+        t.not_nil(pub)
+        t.ok(ssl.verify("rsa-sha1", pub, data, sig))
+        t.ok(not ssl.verify("rsa-sha1", pub, data .. " ", sig))
+        t.ok(not ssl.verify("rsa-sha256", pub, data, sig))
+        -- another key's certificate does not verify it
+        local other = ssl.keygen({type = "rsa", bits = 2048})
+        local opub = ssl.cert_pubkey(ssl.cert_self_signed(other, {cn = "outro", days = 1}))
+        t.ok(not ssl.verify("rsa-sha1", opub, data, sig))
+        ssl.key_free(pub)
+        ssl.key_free(opub)
+        ssl.cert_free(cert)
+        ssl.key_free(key)
+        ssl.key_free(other)
+    end)
 end)

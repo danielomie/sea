@@ -1179,7 +1179,12 @@ local function do_request(method, url, o, redirects_left)
     local key = u.scheme .. "://" .. u.host .. ":" .. u.port .. (o.verify == false and "/noverify" or "")
     if u.scheme == "https" and o.tls then
         local parts = []
-        for _, k in sort.sorted(list.keys(o.tls)) do parts[] = k .. "=" .. tostring(o.tls[k]) end
+        for _, k in sort.sorted(list.keys(o.tls)) do
+            -- (a certificate or key given as PEM text: its digest, not the key itself, in the pool's map)
+            local v = tostring(o.tls[k])
+            if len(v) > 256 then v = ssl.hash("sha256", v) end
+            parts[] = k .. "=" .. v
+        end
         key = key .. "/" .. string.join(parts, "&")
     end
     local resp = nil

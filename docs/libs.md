@@ -717,7 +717,7 @@ Sockets come from the built-in `net` module: every network wait parks only the g
 | `keep_alive` | `true` | Reuse connections (pool of up to 8 idle per host, 30 s max age; a stale reused connection is retried once, on a new connection). A connection is reused only by requests with the same `verify` and `tls` options |
 | `basic_auth` | — | `{user, password}` |
 | `verify` | `true` | `false` skips TLS certificate checks |
-| `tls` | — | Extra `ssl.connect` opts (`cert`, `key`, `sni`, `min_version`) |
+| `tls` | — | Extra `ssl.connect` opts (`cert`, `key`, `sni`, `min_version`); `cert`/`key` a path or the PEM text (mutual TLS with a certificate kept in a database) |
 | `max_body_bytes` | 100 MB | Larger responses fail (also the limit for a decompressed body) |
 | `decompress` | `true` | Send `Accept-Encoding: gzip` and decode gzip/deflate responses. Off when you set `Accept-Encoding` yourself (the body is then yours to decode) |
 | `on_data` | — | `function(piece)`: a 2xx body is passed in pieces as they arrive (chunked, `Content-Length` or until close) instead of being collected; `resp.body` is then `""`. Returning `false` stops reading (the connection is closed). Other statuses still fill `resp.body`, so an error message can be read. Turns off `Accept-Encoding: gzip`. For server-sent events and LLM streams |
@@ -886,7 +886,7 @@ TLS runs over sockets from the built-in `net` module (see `docs/reference.md`): 
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `ssl.connect` | `connect(host, port [, opts]) → conn\|nil` | Open a TLS client connection. `opts` (table or map): `{verify, verify_host, ca, cert, key, sni, min_version, timeout}`: `ca` is a PEM file of trusted CAs (instead of the system's), `verify_host = false` checks the chain but not the host name, `cert`/`key` a client certificate (a file that cannot be loaded is an error). On failure `ssl.last_error()` says why |
+| `ssl.connect` | `connect(host, port [, opts]) → conn\|nil` | Open a TLS client connection. `opts` (table or map): `{verify, verify_host, ca, cert, key, sni, min_version, timeout}`: `ca` is a PEM file of trusted CAs (instead of the system's), `verify_host = false` checks the chain but not the host name, `cert`/`key` a client certificate, each a PEM file's path or the PEM text itself (starting with `-----BEGIN`: a certificate kept in a database, as an A1 from `pkcs12_parse`; the certificate's PEM may carry its chain after it; one that cannot be loaded is an error). On failure `ssl.last_error()` says why |
 | `ssl.dial` | `dial(host, port [, opts]) → conn\|error` | Same as `connect`, but returns an error value (`is_error`) — safe from many goroutines at once |
 | `ssl.handshake_client` | `handshake_client(fd, host [, opts]) → conn\|error` | TLS client handshake on a socket already connected with `net.connect`, for protocols that switch to TLS after a plain exchange (PostgreSQL's SSLRequest, STARTTLS). Takes the `connect` opts; closes the socket on failure |
 | `ssl.last_error` | `last_error() → string\|nil` | Message of the last failure of a `nil`-returning function (shared, not per goroutine) |
@@ -925,6 +925,7 @@ TLS runs over sockets from the built-in `net` module (see `docs/reference.md`): 
 | `ssl.cert_save` | `cert_save(cert, path) → bool` | Save cert to PEM file |
 | `ssl.cert_free` | `cert_free(cert)` | Free cert handle |
 | `ssl.cert_verify` | `cert_verify(cert, ca_cert) → bool` | Verify cert was signed by ca_cert |
+| `ssl.cert_pubkey` | `cert_pubkey(cert) → key\|nil` | The certificate's public key, for `ssl.verify` (free it with `key_free`) |
 | `ssl.cert_self_signed` | `cert_self_signed(key, opts) → cert\|nil` | Self-signed cert. `opts`: `{cn, org, country, state, city, email, san=[], days=365, is_ca=false}` |
 | `ssl.cert_sign` | `cert_sign(csr, ca_key, ca_cert, opts) → cert\|nil` | CA-sign a CSR. `opts`: `{days=365, serial=1}` |
 
@@ -970,7 +971,7 @@ Supported `algo` strings: `"aes-128-gcm"`, `"aes-256-gcm"`, `"aes-128-cbc"`, `"a
 
 ### Asymmetric Sign / Verify
 
-Supported `algo` strings: `"rsa-sha256"`, `"rsa-sha384"`, `"rsa-sha512"`, `"rsa-pss-sha256"`, `"rsa-pss-sha384"`, `"rsa-pss-sha512"`, `"ecdsa-sha256"`, `"ecdsa-sha384"`, `"ecdsa-sha512"`.
+Supported `algo` strings: `"rsa-sha1"` (still required by XMLDSig in the Brazilian NF-e), `"rsa-sha256"`, `"rsa-sha384"`, `"rsa-sha512"`, `"rsa-pss-sha256"`, `"rsa-pss-sha384"`, `"rsa-pss-sha512"`, `"ecdsa-sha256"`, `"ecdsa-sha384"`, `"ecdsa-sha512"`.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|

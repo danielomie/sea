@@ -21,7 +21,7 @@ local M = {}
 -- blocks), so a slow peer never holds up the others.
 
 -- ssl.connect(host, port, [opts]) → conn|nil
--- opts: {verify=bool, verify_host=bool, ca=path, cert=path, key=path, sni=string,
+-- opts: {verify=bool, verify_host=bool, ca=path, cert=path|PEM, key=path|PEM, sni=string,
 --        min_version="TLSv1.2"|"TLSv1.3", timeout=ms}
 -- Returns an opaque TLS connection handle (nil on failure; ssl.last_error()
 -- tells why — from code running in many goroutines, prefer ssl.dial, whose
@@ -321,6 +321,12 @@ end
 -- Verify that cert was signed by ca_cert.
 function M.cert_verify(cert, ca)
     return native.cert_verify(cert, ca)
+end
+
+-- ssl.cert_pubkey(cert) → key|nil
+-- The certificate's public key, to verify what its holder signed (free it with key_free).
+function M.cert_pubkey(cert)
+    return native.cert_pubkey(cert)
 end
 
 -- ssl.cert_self_signed(key, opts) → cert|nil
