@@ -19,6 +19,7 @@ hi
 100
 nil
 nil
+10	8	int	-7	1250
 zero is truthy
 empty str is truthy
 nil is falsy

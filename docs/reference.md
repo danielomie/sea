@@ -646,7 +646,7 @@ a number (by value: `bigint.new(5) == 5`).
 | `printf` | `printf(fmt, ...)` | Format and print to stdout using `string.format` specifiers (`%d`, `%s`, `%f`, `%x`, etc.); no implicit newline |
 | `type` | `type(v) → string` | Return the type name of `v`: `"nil"`, `"bool"`, `"int"`, `"number"`, `"string"`, `"array"`, `"table"`, `"map"`, `"struct"`, `"function"`, `"channel"`, `"int_array"`, `"float_array"`, `"bigint"` |
 | `tostring` | `tostring(v) → string` | Convert any value to its string representation. Containers show their contents on one line: `[1, "two"]`, `{name = "ana", n = 1}` (keys sorted; a struct in its literal's order), `{"a", "b"}`, `[="k" = 1]` (map), `int_array[1, 2]`; at most 100 items per container (`... (N more)`), 4 levels deep (`[...]`), `<cycle>` for a container inside itself |
-| `tonumber` | `tonumber(v) → int\|number\|nil` | Parse a string to a number (an int when it fits Sea's 48-bit range, else a number); a bigint becomes a number; `nil` on failure |
+| `tonumber` | `tonumber(v) → int\|number\|nil` | Parse a string to a number (an int when it fits Sea's 48-bit range, else a number): decimal, or hex with `0x`; leading zeros are not octal (`"010"` is 10); a bigint becomes a number; `nil` on failure |
 | `len` | `len(v) → int` | Length of string, array, table, map, struct, int_array, or float_array |
 | `error` | `error(msg) → error` | Create an error value |
 | `is_error` | `is_error(v) → bool` | Check whether a value is an error |

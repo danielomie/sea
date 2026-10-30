@@ -28,6 +28,7 @@ print(tonumber("0xff"))   -- 255
 print(tonumber(100))      -- 100
 print(tonumber(nil))      -- nil
 print(tonumber("abc"))    -- nil
+print(tonumber("010"), tonumber("08"), type(tonumber("08")), tonumber("-007"), tonumber("000000000000001250"))  -- 10  8  int  -7  1250
 
 -- truthiness
 if 0 then print("zero is truthy") end       -- zero is truthy

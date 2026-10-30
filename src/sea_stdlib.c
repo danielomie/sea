@@ -120,9 +120,14 @@ static SeaValue fn_tonumber(SeaVM *vm, int argc, SeaValue *args) {
     if (sea_is_string(v)) {
         char *end;
         const char *str = SEA_AS_STRING(v)->data;
-        // Try integer first (within Sea's 48-bit ints; larger ones become numbers)
+        // Try integer first (within Sea's 48-bit ints; larger ones become numbers).
+        // Decimal unless "0x": leading zeros are not octal ("010" is 10, "08" is 8)
+        const char *p = str;
+        while (*p == ' ' || (*p >= '\t' && *p <= '\r')) p++;
+        if (*p == '+' || *p == '-') p++;
+        int base = (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) ? 16 : 10;
         errno = 0;
-        long long iv = strtoll(str, &end, 0);
+        long long iv = strtoll(str, &end, base);
         if (*end == '\0' && end != str && errno == 0 && iv >= -(1LL << 47) && iv < (1LL << 47))
             return sea_int_val((int64_t)iv);
         double n = strtod(str, &end);
