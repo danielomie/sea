@@ -13,6 +13,9 @@
 --       ...                              -- {format = "gray", width, height, data}
 --   end
 --
+-- And writing them (writer.sea): pdf.new() → pages with text in the
+-- standard fonts, lines and rectangles; doc:bytes() → the file.
+--
 -- Objects are found by scanning the file (a broken cross-reference table
 -- or incremental updates do not matter), object streams (PDF 1.5) are
 -- opened, and streams decoded (FlateDecode with PNG predictors,
@@ -23,6 +26,7 @@
 -- MacRoman, Standard, with Differences). An encrypted PDF is refused.
 
 local compress = require("../compress/compress")
+local writer = require("./writer")
 
 local M = {}
 
@@ -1273,5 +1277,9 @@ function M.load(file_path)
     local s = fs.read(file_path)?
     return M.open(s)
 end
+
+-- writing: pdf.new([info]) → a document (writer.sea)
+M.new = writer.new
+M.A4 = writer.A4
 
 return M

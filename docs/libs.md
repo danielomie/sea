@@ -1837,7 +1837,8 @@ Constants: `np.pi`, `np.e`, `np.inf`, `np.nan`, `np.newaxis`, `np.j`.
 ## `pdf`
 
 Reading PDF files in pure Sea: each page's text and its images (a scanned page is an image: a JPEG
-one goes to `image.decode`, and an OCR reads it). Streams go through `libs/compress` (build it with
+one goes to `image.decode`, and an OCR reads it). And writing them: pages with text in the standard
+fonts, lines and rectangles (`pdf.new`). Streams go through `libs/compress` (build it with
 `make -C libs/compress`). Tests: `bin/sea test libs/pdf`.
 
 ```sea
@@ -1869,6 +1870,34 @@ by glyph). Characters go through the font's ToUnicode CMap, else its encoding (W
 | `doc:page_text` | `page_text(i) → string\|error` | One page's text (`i` from 0) |
 | `doc:page_images` | `page_images(i) → array\|error` | The images the page draws: `{format = "jpeg", data, width, height}` (the JPEG file) or `{format = "gray", width, height, data}` (one byte a pixel, from 8-bit gray, RGB or CMYK) |
 | `doc:object`, `doc:resolve`, `doc:get`, `doc:stream_data` | | The parsed objects, for what the rest does not cover |
+
+**Writing** (`libs/pdf/writer.sea`): text in the standard fonts, which need nothing embedded —
+`helvetica`, `helvetica-bold`, `courier`, `courier-bold` — written in WinAnsi (Windows-1252: Portuguese
+and the other Western European languages; other characters become `?`), measured with the fonts'
+standard widths so alignment matches what a reader shows; lines, rectangles (stroked, filled or both,
+which also draws barcodes); content streams compressed. Colors are `{r, g, b}` from 0 to 1 or a gray.
+
+```sea
+local doc = pdf.new({title = "DANFE", author = "Loja"})
+local p = doc:page({top_down = true})           -- A4; y measured from the top
+p:text(40, 50, "Nota fiscal nº 123", {font = "helvetica-bold", size = 14})
+p:text(555, 50, "R$ 1.234,56", {align = "right"})
+p:line(40, 60, 555, 60, {width = 1})
+p:rect(40, 70, 515, 40, {width = 0.5})
+fs.write("nota.pdf", doc:bytes())
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `pdf.new` | `new([info]) → document` | A new document; `info`: `{title, author, producer}` |
+| `pdf.A4` | | `{width = 595.28, height = 841.89}` (points) |
+| `doc:page` | `page([opts]) → page` | A new page: `{width, height}` in points (A4 by default), `top_down` (y from the top edge; a rectangle's y is its top) |
+| `page:text` | `text(x, y, s [, opts]) → nil` | A line of text, `y` its baseline; `opts`: `font`, `size` (10), `align` (`left`, `center`, `right` of x), `color` |
+| `page:line` | `line(x1, y1, x2, y2 [, opts]) → nil` | `opts`: `width` (0.5), `color`, `dash` |
+| `page:rect` | `rect(x, y, w, h [, opts]) → nil` | Stroked by default; `fill = true` (or `fill_color`) fills it, and `stroke = true` keeps the border too; `width`, `color` |
+| `doc:width` | `width(s, font, size) → number` | The width of a line in points |
+| `doc:wrap` | `wrap(s, font, size, max_width) → array` | The text in lines that fit (by words; `\n` breaks a line) |
+| `doc:bytes` | `bytes() → string` | The PDF file |
 
 ---
 
