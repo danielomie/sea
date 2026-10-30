@@ -297,6 +297,15 @@ static SeaValue tm_in_zone(SeaVM *vm, int argc, SeaValue *args) {
     return make_time_z(vm, get_sec(args[0]), get_ns(args[0]), &z);
 }
 
+/* a fraction of a second in a layout: '.' and a run of 0s or 9s not followed by
+   another digit (as Go: in "02.01.2006" the ".01" is the month after a dot) */
+static bool frac_layout(const char *l) {
+    if (l[0] != '.' || (l[1] != '0' && l[1] != '9')) return false;
+    int n = 1;
+    while (l[n] == l[1]) n++;
+    return !(l[n] >= '0' && l[n] <= '9');
+}
+
 /* Go layout → output, for one broken-down time. Tokens: 2006 06 01 1 Jan
  * January 02 2 _2 15 03 3 04 4 05 5 PM pm Mon Monday MST -0700 -07:00
  * Z0700 Z07:00 .000 .000000 .000000000 (fractions, also with 9s) */
@@ -331,7 +340,7 @@ static void format_layout(const char *f, const struct tm *tm, int64_t ns, char *
         else if (!strncmp(f, "05", 2))      { PUT("%02d", tm->tm_sec); f += 2; }
         else if (!strncmp(f, "PM", 2))      { PUT("%s", tm->tm_hour < 12 ? "AM" : "PM"); f += 2; }
         else if (!strncmp(f, "pm", 2))      { PUT("%s", tm->tm_hour < 12 ? "am" : "pm"); f += 2; }
-        else if (f[0] == '.' && (f[1] == '0' || f[1] == '9')) {
+        else if (frac_layout(f)) {
             int digits = 0;
             char d = f[1];
             while (f[1 + digits] == d) digits++;
@@ -573,7 +582,7 @@ static bool parse_layout(const char *l, const char *s, Fields *f) {
             s += 2;
             l += 2;
         }
-        else if (l[0] == '.' && (l[1] == '0' || l[1] == '9')) {
+        else if (frac_layout(l)) {
             while (l[1] == '0' || l[1] == '9') l++;
             l++;
             if (!frac(&s, &f->ns)) return false;

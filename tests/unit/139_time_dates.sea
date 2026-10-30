@@ -44,3 +44,7 @@ local function try(f)
 end
 print(try(function() time.date(2026, 1, 1, 0, 0, 0, "Mars/Olympus") end))
 print(try(function() time.now():in_zone("../etc/passwd") end))
+
+-- a dot before the month is not a fraction of a second (".01" is followed by a digit)
+local dotted = time.parse("2026-10-30 14:05:06.123", "2006-01-02 15:04:05.000", "UTC")
+print(dotted:format("02.01.2006"), dotted:format("05.000"), time.parse("30.10.2026", "02.01.2006", "UTC"):format("2006-01-02"))  -- 30.10.2026  06.123  2026-10-30
