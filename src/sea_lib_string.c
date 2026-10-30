@@ -351,8 +351,10 @@ static SeaValue str_split(SeaVM *vm, int argc, SeaValue *args) {
             s++;
         }
     } else {
+        /* n separators give n + 1 pieces, empty ones included at either end
+           (as Go's strings.Split): split("a,", ",") is ["a", ""], split("", ",") [""] */
         const char *start = s;
-        while (start < end) {
+        for (;;) {
             const char *found = limit > 0 && (int64_t)arr->len == limit - 1 ? NULL :
                 memmem(start, (size_t)(end - start), sep, seplen);
             if (!found) {

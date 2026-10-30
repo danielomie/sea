@@ -738,7 +738,7 @@ a number (by value: `bigint.new(5) == 5`).
 | `string.char` | `char(...) → string` | Build a string from byte values |
 | `string.format` | `format(fmt, ...) → string` | Printf-style formatting: `%d`, `%i`, `%u`, `%f`, `%e`, `%g`, `%s`, `%c`, `%x`, `%X`, `%%`, with flags, width and precision (`%-8s`, `%05.1f`). No length limit; a plain `%s` copies any bytes. `%d`/`%x` print a bigint with all its digits. An unknown conversion is written as is |
 | `string.find` | `find(s, pattern [, init]) → int\|nil` | Return 1-based start position of first occurrence of `pattern` (plain text, not a regex: see module `re`), or `nil` |
-| `string.split` | `split(s, sep [, n]) → array` | Split `s` by separator string; returns an array of strings. With `n`, at most `n` pieces (the last holds the rest: `split("k=v=w", "=", 2)` is `["k", "v=w"]`) |
+| `string.split` | `split(s, sep [, n]) → array` | Split `s` by separator string; returns an array of strings: `k` separators give `k + 1` pieces, empty ones included (`split("a,,b,", ",")` is `["a", "", "b", ""]`, `split("", ",")` is `[""]`; for lines use `splitlines`). An empty `sep` splits into bytes. With `n`, at most `n` pieces (the last holds the rest: `split("k=v=w", "=", 2)` is `["k", "v=w"]`) |
 | `string.splitlines` | `splitlines(s) → array` | The lines, without `\n` / `\r\n` (a final newline adds no empty line) |
 | `string.format_number` | `format_number(n [, decimals [, sep [, point]]]) → string` | Digits grouped by thousands: `format_number(1234567.891)` is `"1,234,567.89"` (decimals default 0 for ints, 2 for numbers); `format_number(1234.5, 1, ".", ",")` is `"1.234,5"` |
 | `string.contains` | `contains(s, sub) → bool` | True if `sub` is present in `s` |

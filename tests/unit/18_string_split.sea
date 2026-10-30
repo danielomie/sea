@@ -21,9 +21,14 @@ end
 -- world
 -- foo
 
--- split empty string
+-- split empty string: one empty piece (k separators give k + 1 pieces)
 local empty = string.split("", ",")
-print(len(empty))   -- 0
+print(len(empty), empty[0] == "")   -- 1  true
+
+-- empty pieces at both ends and in the middle
+local edges = string.split(",a,,b,", ",")
+print(len(edges), string.join(edges, "|"))   -- 5  |a||b|
+print(len(string.split("x\n", "\n")))   -- 2
 
 -- split with no separator found (returns full string)
 local one = string.split("hello", ",")
