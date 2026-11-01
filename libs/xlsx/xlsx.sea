@@ -1,0 +1,404 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- xlsx — Excel workbooks (Office Open XML, .xlsx): read every sheet into
+-- rows of values, and write workbooks with several sheets. Pure Sea, on
+-- libs/compress (the ZIP) and libs/xml.
+--
+--   local xlsx = require("xlsx")
+--   local book = xlsx.read("pedidos.xlsx")?          -- or xlsx.decode(bytes)?
+--   for _, sheet in book.sheets do print(sheet.name, len(sheet.rows)) end
+--   xlsx.write("saida.xlsx", [{name = "Clientes", rows = [["Nome", "Limite"], ["Ana", 1500]]}])?
+--   local bytes = xlsx.encode(sheets)?
+--
+-- A row is an array of values, from column A; an empty cell is "" (so a row
+-- has no holes; trailing empty cells are left out). Values: strings,
+-- numbers (int when whole), booleans, and dates as text — "2026-10-31", or
+-- "2026-10-31 14:30:00" with a time — recognized by the cell's number
+-- format (the built-in date formats, or a custom one with d, m, y or h).
+-- A formula's cached value is read (the formula itself is not evaluated).
+-- To write a date, give {date = "2026-10-31"} (shown as dd/mm/yyyy).
+
+local compress = require("compress")
+local xml = require("xml")
+
+local M = {}
+
+-- ---- dates: Excel's serial numbers ----
+
+local function days_from(y, m, d)
+    if m <= 2 then y -= 1 end
+    local era = y // 400
+    local yoe = y - era * 400
+    local mp = (m + 9) % 12
+    local doy = (153 * mp + 2) // 5 + d - 1
+    local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+end
+
+local function civil(n)
+    local z = n + 719468
+    local era = z // 146097
+    local doe = z - era * 146097
+    local yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    local y = yoe + era * 400
+    local doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    local mp = (5 * doy + 2) // 153
+    local d = doy - (153 * mp + 2) // 5 + 1
+    local m = mp < 10 and mp + 3 or mp - 9
+    if m <= 2 then y += 1 end
+    return y, m, d
+end
+
+local EPOCH_1900 = days_from(1899, 12, 30) -- serial 0 (Excel's 1900 leap-year bug folded in)
+local EPOCH_1904 = days_from(1904, 1, 1)
+
+-- xlsx.serial_to_date(serial [, date1904]) → "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS"
+function M.serial_to_date(serial, date1904)
+    local days = math.floor(serial)
+    local secs = math.floor((serial - days) * 86400 + 0.5)
+    if secs >= 86400 then
+        days += 1
+        secs -= 86400
+    end
+    local y, m, d = civil((date1904 and EPOCH_1904 or EPOCH_1900) + days)
+    local out = string.format("%04d-%02d-%02d", y, m, d)
+    if secs > 0 then out ..= string.format(" %02d:%02d:%02d", secs // 3600, (secs % 3600) // 60, secs % 60) end
+    return out
+end
+
+-- xlsx.date_to_serial("YYYY-MM-DD[ HH:MM[:SS]]") → number | nil
+function M.date_to_serial(s)
+    local m = re.match("^(\\d{4})-(\\d{2})-(\\d{2})(?:[ T](\\d{2}):(\\d{2})(?::(\\d{2}))?)?", s or "")
+    if m == nil then return nil end
+    local n = days_from(tonumber(m.groups[1]), tonumber(m.groups[2]), tonumber(m.groups[3])) - EPOCH_1900
+    if m.groups[4] ~= nil then
+        n = n + (tonumber(m.groups[4]) * 3600 + tonumber(m.groups[5]) * 60 + tonumber(m.groups[6] or "0")) / 86400
+    end
+    return n
+end
+
+-- ---- reading ----
+
+-- the built-in number formats that are dates or times
+local DATE_IDS = {}
+for _, id in [14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 46, 47, 50, 57] do DATE_IDS[id] = true end
+
+-- a custom format code that shows a date or a time (not inside quotes or [colors])
+local function is_date_code(code)
+    local c = re.gsub("\"[^\"]*\"", code or "", "")
+    c = re.gsub("\\[[^\\]]*\\]", c, "")
+    c = re.gsub("\\\\.", c, "")
+    return re.match("(?i)[dmyhs]", c) ~= nil and re.match("(?i)^[#0.,%\\s]*$", c) == nil
+end
+
+local function local_name(tag)
+    local i = string.find(tag, ":", 1, true)
+    if i == nil then return tag end
+    return string.sub(tag, i + 1)
+end
+
+local function children(node, name)
+    local out = []
+    for _, c in node.children or [] do
+        if local_name(c.tag) == name then out[] = c end
+    end
+    return out
+end
+
+local function child(node, name)
+    for _, c in node.children or [] do
+        if local_name(c.tag) == name then return c end
+    end
+    return nil
+end
+
+local function attr(node, name)
+    if node == nil or node.attrs == nil then return nil end
+    for k, v in node.attrs do
+        if k == name or local_name(k) == name then return v end
+    end
+    return nil
+end
+
+-- all the text of <t> elements under a node (rich text runs; not the phonetic <rPh>)
+local function texts(node)
+    local parts = []
+    local function walk(n)
+        for _, c in n.children or [] do
+            local nm = local_name(c.tag)
+            if nm == "t" then
+                parts[] = xml.text(c, true)
+            elseif nm ~= "rPh" then
+                walk(c)
+            end
+        end
+    end
+    walk(node)
+    return string.join(parts, "")
+end
+
+-- "AB12" → 27 (0-based column)
+local function column_of(ref)
+    local m = re.match("^([A-Z]+)", ref or "")
+    if m == nil then return nil end
+    local n = 0
+    for i = 1, len(m.groups[1]) do n = n * 26 + (string.byte(m.groups[1], i) - 64) end
+    return n - 1
+end
+
+local function number_of(s)
+    local n = tonumber(s)
+    if n == nil then return s end
+    if n == math.floor(n) and math.abs(n) < 1e15 then return math.floor(n) end
+    return n
+end
+
+local function parse(text)
+    local doc = xml.parse(text)
+    if is_error(doc) then return doc end
+    if doc.root ~= nil then return doc.root end
+    return doc
+end
+
+-- the workbook's parts: a function reading one by name
+local function read_book(part)
+    local wb = parse(part("xl/workbook.xml")?)?
+    local date1904 = false
+    local pr = child(wb, "workbookPr")
+    if pr ~= nil then
+        local v = attr(pr, "date1904")
+        date1904 = v == "1" or v == "true"
+    end
+    -- the sheets' files, by relationship id
+    local targets = {}
+    local rels_text = part("xl/_rels/workbook.xml.rels")
+    if not is_error(rels_text) then
+        local rels = parse(rels_text)?
+        for _, r in children(rels, "Relationship") do
+            local t = attr(r, "Target") or ""
+            if string.starts_with(t, "/") then t = string.sub(t, 2) else t = "xl/" .. t end
+            targets[attr(r, "Id")] = t
+        end
+    end
+    -- the shared strings
+    local shared = []
+    local ss_text = part("xl/sharedStrings.xml")
+    if not is_error(ss_text) then
+        for _, si in children(parse(ss_text)?, "si") do shared[] = texts(si) end
+    end
+    -- the styles that show dates
+    local date_style = {}
+    local st_text = part("xl/styles.xml")
+    if not is_error(st_text) then
+        local st = parse(st_text)?
+        local custom = {}
+        local fmts = child(st, "numFmts")
+        if fmts ~= nil then
+            for _, f in children(fmts, "numFmt") do custom[tonumber(attr(f, "numFmtId"))] = attr(f, "formatCode") end
+        end
+        local xfs = child(st, "cellXfs")
+        if xfs ~= nil then
+            for i, xf in children(xfs, "xf") do
+                local id = tonumber(attr(xf, "numFmtId") or "0")
+                if DATE_IDS[id] or (custom[id] ~= nil and is_date_code(custom[id])) then date_style[i] = true end
+            end
+        end
+    end
+    local book = {}
+    book.sheets = []
+    local sheets_node = child(wb, "sheets")
+    for i, sh in children(sheets_node or {}, "sheet") do
+        local file = targets[attr(sh, "id")] or `xl/worksheets/sheet${i + 1}.xml`
+        local ws = parse(part(file)?)?
+        local rows = []
+        local data = child(ws, "sheetData")
+        for _, r in children(data or {}, "row") do
+            local rn = tonumber(attr(r, "r") or "") or (len(rows) + 1)
+            -- the rows in between, empty
+            while len(rows) < rn - 1 do rows[] = [] end
+            local row = []
+            for _, c in children(r, "c") do
+                local col = column_of(attr(c, "r")) or len(row)
+                while len(row) < col do row[] = "" end
+                local t = attr(c, "t") or "n"
+                local v = child(c, "v")
+                local raw = v ~= nil and xml.text(v, true) or nil
+                local value = ""
+                if t == "s" then
+                    value = shared[tonumber(raw or "")] or ""
+                elseif t == "inlineStr" then
+                    local is = child(c, "is")
+                    value = is ~= nil and texts(is) or ""
+                elseif t == "str" then
+                    value = raw or ""
+                elseif t == "b" then
+                    value = raw == "1"
+                elseif t == "e" then
+                    value = ""
+                elseif raw ~= nil and raw ~= "" then
+                    local s = tonumber(attr(c, "s") or "0")
+                    local n = tonumber(raw)
+                    if n ~= nil and date_style[s] then
+                        value = M.serial_to_date(n, date1904)
+                    else
+                        value = number_of(raw)
+                    end
+                end
+                row[] = value
+            end
+            -- trailing empty cells out
+            while len(row) > 0 and row[len(row) - 1] == "" do row = list.slice(row, 0, len(row) - 1) end
+            rows[] = row
+        end
+        while len(rows) > 0 and len(rows[len(rows) - 1]) == 0 do rows = list.slice(rows, 0, len(rows) - 1) end
+        local s = {}
+        s.name = attr(sh, "name") or `Planilha${i + 1}`
+        s.rows = rows
+        book.sheets[] = s
+    end
+    return book
+end
+
+-- xlsx.read(path) → {sheets = [{name, rows}]} | error
+function M.read(p)
+    if not fs.isfile(p) then return error(`xlsx: no file ${p}`) end
+    return read_book(function(name)
+        local r = compress.zip_read(p, name)
+        if is_error(r) then return error(`xlsx: ${name}: ${r.message}`) end
+        return r
+    end)
+end
+
+-- xlsx.decode(bytes) → {sheets} | error: a workbook's bytes (an upload)
+function M.decode(bytes)
+    if type(bytes) ~= "string" or string.sub(bytes, 1, 2) ~= "PK" then return error("xlsx: not an .xlsx file (a ZIP)") end
+    local p = fs.tempfile("xlsx-")?
+    defer fs.remove(p)
+    local _ = fs.write(p, bytes)?
+    return M.read(p)
+end
+
+-- ---- writing ----
+
+local function col_name(i)
+    local s = ""
+    local n = i + 1
+    while n > 0 do
+        local r = (n - 1) % 26
+        s = string.char(65 + r) .. s
+        n = (n - 1) // 26
+    end
+    return s
+end
+
+local function esc(s)
+    return xml.escape(tostring(s))
+end
+
+local function sheet_xml(rows)
+    local out = [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>",
+    ]
+    for r, row in rows do
+        local cells = []
+        for c, v in row do
+            local ref = col_name(c) .. tostring(r + 1)
+            local tv = type(v)
+            if v == nil or v == "" then
+                -- empty
+            elseif tv == "int" or tv == "number" then
+                cells[] = `<c r="${ref}"><v>${tostring(v)}</v></c>`
+            elseif tv == "bool" or tv == "boolean" then
+                cells[] = `<c r="${ref}" t="b"><v>${v and "1" or "0"}</v></c>`
+            elseif (tv == "table" or tv == "map" or tv == "struct") and v.date ~= nil then
+                local n = M.date_to_serial(v.date)
+                if n ~= nil then cells[] = `<c r="${ref}" s="1"><v>${tostring(n)}</v></c>` end
+            else
+                local s = tostring(v)
+                local space = (string.trim(s) ~= s) and " xml:space=\"preserve\"" or ""
+                cells[] = `<c r="${ref}" t="inlineStr"><is><t${space}>${esc(s)}</t></is></c>`
+            end
+        end
+        out[] = `<row r="${r + 1}">${string.join(cells, "")}</row>`
+    end
+    out[] = "</sheetData></worksheet>"
+    return string.join(out, "")
+end
+
+local function valid_sheet_name(name)
+    return type(name) == "string" and name ~= "" and utf8.len(name) <= 31 and re.match("[\\\\/?*\\[\\]:]", name) == nil
+end
+
+-- xlsx.write(path, sheets) → true | error; sheets [{name, rows}]
+function M.write(p, sheets)
+    if type(sheets) ~= "array" or len(sheets) == 0 then return error("xlsx: at least one sheet") end
+    local names = {}
+    for _, s in sheets do
+        if not valid_sheet_name(s.name) then return error(`xlsx: sheet name '${tostring(s.name)}': 1 to 31 characters, none of \\ / ? * [ ] :`) end
+        if names[utf8.lower(s.name)] then return error(`xlsx: sheet ${s.name} twice`) end
+        names[utf8.lower(s.name)] = true
+    end
+    local ct = [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>",
+        "<Default Extension=\"xml\" ContentType=\"application/xml\"/>",
+        "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>",
+        "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>",
+    ]
+    local wb_sheets = []
+    local rels = [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+    ]
+    local entries = []
+    for i, s in sheets do
+        local n = i + 1
+        ct[] = `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+        wb_sheets[] = `<sheet name="${esc(s.name)}" sheetId="${n}" r:id="rId${n}"/>`
+        rels[] = `<Relationship Id="rId${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${n}.xml"/>`
+        entries[] = {name = `xl/worksheets/sheet${n}.xml`, data = sheet_xml(s.rows or [])}
+    end
+    ct[] = "</Types>"
+    rels[] = `<Relationship Id="rId${len(sheets) + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`
+    rels[] = "</Relationships>"
+    entries[] = {name = "[Content_Types].xml", data = string.join(ct, "")}
+    entries[] = {
+        name = "_rels/.rels", data = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" ..
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" ..
+                "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" " ..
+                    "Target=\"xl/workbook.xml\"/></Relationships>",
+    }
+    entries[] = {
+        name = "xl/workbook.xml", data = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" ..
+            "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" " ..
+                "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>" ..
+                    string.join(wb_sheets, "") .. "</sheets></workbook>",
+    }
+    entries[] = {name = "xl/_rels/workbook.xml.rels", data = string.join(rels, "")}
+    entries[] = {
+        name = "xl/styles.xml", data = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" ..
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" ..
+                "<fonts count=\"1\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>" ..
+                    "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>" ..
+                        "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>" ..
+                            "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" ..
+                                "<cellXfs count=\"2\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>" ..
+                                    "<xf numFmtId=\"14\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/></cellXfs>" ..
+                                        "</styleSheet>",
+    }
+    local _ = compress.zip_write(p, entries)?
+    return true
+end
+
+-- xlsx.encode(sheets) → bytes | error
+function M.encode(sheets)
+    local p = fs.tempfile("xlsx-")?
+    defer fs.remove(p)
+    local _ = M.write(p, sheets)?
+    return fs.read(p)
+end
+
+return M

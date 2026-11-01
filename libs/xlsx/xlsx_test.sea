@@ -1,0 +1,69 @@
+-- Copyright (c) 2026 The Sea Authors
+-- SPDX-License-Identifier: BSD-3-Clause
+
+-- xlsx: a workbook made by LibreOffice (shared strings, styles, dates),
+-- writing and reading back several sheets, Excel's date serials, bytes
+
+local t = require("sea/test")
+local xlsx = require("./xlsx")
+
+local here = path.dirname(path.abs(os.args[0] or "."))
+local function testdata(name)
+    for _, base in [path.join(here, "testdata"), "libs/xlsx/testdata", "testdata"] do
+        local p = path.join(base, name)
+        if fs.isfile(p) then return p end
+    end
+    return path.join("libs/xlsx/testdata", name)
+end
+
+t.describe("xlsx", function()
+    t.it("reads a workbook made by LibreOffice: shared strings, numbers, booleans, dates", function()
+        local book = t.no_error(xlsx.read(testdata("libreoffice.xlsx")))
+        t.eq(len(book.sheets), 1)
+        local rows = book.sheets[0].rows
+        t.eq(rows[0], ["Código", "Descrição", "Preço", "Cadastro", "Ativo"])
+        t.eq(rows[1], ["CAN-01", "Caneta azul", 2.5, "2026-10-31", true])
+        t.eq(rows[2], ["LAP-02", "Lápis \"nº 2\" & cia", 1, "2024-02-29", false])
+        t.eq(rows[3], [])
+        t.eq(rows[4], ["BOR-03", "Borracha ção", 0.75, "1999-12-31", true])
+    end)
+
+    t.it("writes several sheets and reads them back", function()
+        local dir = t.no_error(fs.tempdir("xlsx-test-"))
+        defer fs.remove(dir, {recursive = true})
+        local p = path.join(dir, "book.xlsx")
+        t.no_error(xlsx.write(p, [
+            {
+                name = "Pedidos", rows = [
+                    ["Pedido", "Cliente", "Data", "Total"], [1001, "Padaria Pão & Cia", {date = "2026-10-31"}, 150.75],
+                    [1002, "  espaços  ", {date = "2026-11-01 08:30"}, 0],
+                ],
+            },
+            {name = "Itens", rows = [ ["Pedido", "Produto", "Qtd"], [1001, "", 3], [], [1002, "Café", true] ]},
+        ]))
+        local book = t.no_error(xlsx.read(p))
+        t.eq(list.map(book.sheets, function(s) return s.name end), ["Pedidos", "Itens"])
+        t.eq(book.sheets[0].rows[1], [1001, "Padaria Pão & Cia", "2026-10-31", 150.75])
+        t.eq(book.sheets[0].rows[2], [1002, "  espaços  ", "2026-11-01 08:30:00", 0])
+        t.eq(book.sheets[1].rows[1], [1001, "", 3])
+        t.eq(book.sheets[1].rows[2], [])
+        t.eq(book.sheets[1].rows[3], [1002, "Café", true])
+        -- the bytes, as an upload
+        local bytes = t.no_error(xlsx.encode([{name = "A", rows = [ ["x", 1] ]}]))
+        t.eq(t.no_error(xlsx.decode(bytes)).sheets[0].rows, [ ["x", 1] ])
+        t.ok(is_error(xlsx.decode("not a zip")))
+        t.ok(is_error(xlsx.write(p, [{name = "a/b", rows = []}])))
+        t.ok(is_error(xlsx.write(p, [{name = "A", rows = []}, {name = "a", rows = []}])))
+    end)
+
+    t.it("converts Excel's date serials", function()
+        t.eq(xlsx.serial_to_date(1), "1899-12-31")
+        t.eq(xlsx.serial_to_date(61), "1900-03-01")
+        t.eq(xlsx.serial_to_date(46326), "2026-10-31")
+        t.eq(xlsx.serial_to_date(46326.5), "2026-10-31 12:00:00")
+        t.eq(xlsx.serial_to_date(0, true), "1904-01-01")
+        t.eq(xlsx.date_to_serial("2026-10-31"), 46326)
+        t.eq(xlsx.date_to_serial("2026-10-31 18:00"), 46326.75)
+        t.is_nil(xlsx.date_to_serial("31/10/2026"))
+    end)
+end)

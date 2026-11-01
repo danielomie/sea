@@ -2326,6 +2326,43 @@ clickhouse/clickhouse-server`).
 
 ---
 
+## `xlsx`
+
+Excel workbooks (`.xlsx`, Office Open XML) in pure Sea, on `libs/compress`
+(the ZIP) and `libs/xml`: read every sheet into rows of values, and write
+workbooks with several sheets.
+
+```sea
+local xlsx = require("xlsx")
+
+local book = xlsx.read("pedidos.xlsx")?            -- or xlsx.decode(bytes)? (an upload)
+for _, sheet in book.sheets do
+    print(sheet.name, len(sheet.rows))             -- rows: arrays of values, from column A
+end
+xlsx.write("saida.xlsx", [
+    {name = "Clientes", rows = [ ["Nome", "Limite", "Desde"], ["Ana", 1500, {date = "2026-10-31"}] ]},
+    {name = "Itens", rows = [ ["Código", "Preço"], ["CAN-01", 2.5] ]},
+])?
+local bytes = xlsx.encode(sheets)?
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `xlsx.read` | `read(path) → {sheets = [{name, rows}]}\|error` | Every sheet, in the workbook's order |
+| `xlsx.decode` | `decode(bytes) → {sheets}\|error` | The same, from the file's bytes |
+| `xlsx.write` | `write(path, sheets) → true\|error` | A workbook of `sheets` (`[{name, rows}]`; a name: 1 to 31 characters, none of `\ / ? * [ ] :`, not repeated) |
+| `xlsx.encode` | `encode(sheets) → string\|error` | The same, as bytes |
+| `xlsx.serial_to_date` | `serial_to_date(n [, date1904]) → string` | An Excel date serial as `"YYYY-MM-DD"` (with `" HH:MM:SS"` when it has a time) |
+| `xlsx.date_to_serial` | `date_to_serial(s) → number\|nil` | The other way |
+
+A row has no holes: an empty cell is `""`, and the trailing empty cells (and
+empty rows at the end) are left out. Values are strings, numbers (`int`
+when whole), booleans and dates as text, recognized by the cell's number
+format (the built-in date formats, or a custom one with `d`, `m`, `y` or
+`h` outside quotes and brackets). A formula's cached value is read; formulas
+are not evaluated. Written strings are inline (no shared-strings table);
+`{date = "YYYY-MM-DD[ HH:MM[:SS]]"}` writes a date cell shown as dd/mm/yyyy.
+
 ## `parser`
 
 The Sea parser is a built-in module now: `require("sea/parser")`, with no
