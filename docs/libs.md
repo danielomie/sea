@@ -2245,7 +2245,7 @@ with AUTH PLAIN, or AUTH LOGIN when that is all the server offers.
 |----------|-------------|
 | `smtp.send(url, mail [, opts]) → result\|error` | Connect, send one message, quit. `result`: `{id, accepted = [address], rejected = [{address, error}]}`; refused recipients go in `rejected`, and only all of them refused is an error |
 | `smtp.dial(url [, opts]) → client\|error` | Connected, TLS on and logged in, for several messages: `client:send(mail)` (same result), `client:close()` (QUIT) |
-| `smtp.message(mail) → string` | The message's bytes (RFC 5322 + MIME): headers with accents as RFC 2047 words, text and HTML as `multipart/alternative`, attachments in base64 under `multipart/mixed`; `bcc` stays out of the headers |
+| `smtp.message(mail) → string` | The message's bytes (RFC 5322 + MIME): headers with accents as RFC 2047 words, text and HTML as `multipart/alternative`, attachments in base64 under `multipart/mixed`; an attachment with a `cid` is an image inline in the HTML (`<img src="cid:...">`, under `multipart/related`; without HTML it goes as a file); `bcc` stays out of the headers |
 | `smtp.parse_url(url) → table\|error` | `{secure, plain, host, port, user, pass}` |
 | `smtp.address(s) → string` | The bare address of `"Name <a@b.com>"` |
 

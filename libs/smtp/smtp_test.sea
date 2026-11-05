@@ -112,6 +112,24 @@ t.describe("smtp", function()
         t.no(string.contains(m, "oculto"))
     end)
 
+    t.it("puts an image inline in the HTML (cid), and the other files as attachments", function()
+        local m = smtp.message({from = "loja@x.com", to = "ana@x.com", subject = "Pix", text = "Pague", html = "<img src=\"cid:qr\">",
+            attachments = [{filename = "qr.png", content = "PNG", type = "image/png", cid = "qr"},
+                {filename = "boleto.pdf", content = "PDF", type = "application/pdf"}]})
+        t.contains(m, "multipart/mixed")
+        t.contains(m, "multipart/related")
+        t.contains(m, "Content-ID: <qr>")
+        t.contains(m, "Content-Disposition: inline; filename=\"qr.png\"")
+        t.contains(m, "Content-Disposition: attachment; filename=\"boleto.pdf\"")
+        -- the related part (the HTML and its image) comes before the files
+        t.ok(string.find(m, "multipart/related") < string.find(m, "boleto.pdf"))
+        -- without HTML, an inline image goes as a file
+        local plain = smtp.message({from = "loja@x.com", to = "ana@x.com", subject = "Pix", text = "Pague",
+            attachments = [{filename = "qr.png", content = "PNG", type = "image/png", cid = "qr"}]})
+        t.no(string.contains(plain, "multipart/related"))
+        t.contains(plain, "Content-Disposition: attachment; filename=\"qr.png\"")
+    end)
+
     t.it("sends: AUTH PLAIN, every recipient, dot-stuffing", function()
         local addr, got = server()
         local r = t.no_error(smtp.send(`smtp://ana%40x.com:segredo@${addr}?tls=none`, {from = "Loja <loja@x.com>",

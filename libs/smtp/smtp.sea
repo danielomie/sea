@@ -89,7 +89,9 @@ end
 
 -- smtp.message(mail) → the message's bytes (RFC 5322 + MIME)
 -- mail: from, to, cc, reply_to, subject, text, html, attachments
--- [{filename, content, type}], headers {name = value}, id (the Message-ID)
+-- [{filename, content, type [, cid]}], headers {name = value}, id (the Message-ID).
+-- An attachment with a cid is an image inline in the HTML (<img src="cid:...">):
+-- with the HTML in a multipart/related; the others go as files (multipart/mixed)
 -- bcc is left out of the headers on purpose
 function M.message(mail)
     local lines = []
@@ -110,7 +112,21 @@ function M.message(mail)
     else
         body = text
     end
-    local files = mail.attachments or []
+    local inline = list.filter(mail.attachments or [], function(a) return a.cid ~= nil end)
+    local files = list.filter(mail.attachments or [], function(a) return a.cid == nil end)
+    if mail.html ~= nil and len(inline) > 0 then
+        local parts = [body]
+        for _, a in inline do
+            local name = encode_header(a.filename or "image")
+            parts[] = `Content-Type: ${a.type or "application/octet-stream"}; name="${name}"\r\n` ..
+                `Content-Disposition: inline; filename="${name}"\r\n` .. `Content-ID: <${a.cid}>\r\n` ..
+                "Content-Transfer-Encoding: base64\r\n\r\n" .. wrap76(encoding.base64_encode(a.content or ""))
+        end
+        body = multipart("related", parts)
+    elseif len(inline) > 0 then
+        -- no HTML to show them in: files
+        files = list.concat(inline, files)
+    end
     if len(files) > 0 then
         local parts = [body]
         for _, a in files do
