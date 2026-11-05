@@ -1872,7 +1872,7 @@ by glyph). Characters go through the font's ToUnicode CMap, else its encoding (W
 | `doc:object`, `doc:resolve`, `doc:get`, `doc:stream_data` | | The parsed objects, for what the rest does not cover |
 
 **Writing** (`libs/pdf/writer.sea`): text in the standard fonts, which need nothing embedded —
-`helvetica`, `helvetica-bold`, `courier`, `courier-bold` — written in WinAnsi (Windows-1252: Portuguese
+`helvetica`, `helvetica-bold`, `helvetica-oblique`, `helvetica-boldoblique`, `courier`, `courier-bold` — written in WinAnsi (Windows-1252: Portuguese
 and the other Western European languages; other characters become `?`), measured with the fonts'
 standard widths so alignment matches what a reader shows; lines, rectangles (stroked, filled or both,
 which also draws barcodes); content streams compressed. Colors are `{r, g, b}` from 0 to 1 or a gray.

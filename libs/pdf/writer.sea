@@ -2,13 +2,14 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 
 -- writer — writing PDF files in pure Sea (pdf.new): pages with text in the
--- standard fonts (Helvetica, Courier, their bold faces: no font to embed),
+-- standard fonts (Helvetica, its bold and oblique faces, Courier and its bold: no font to embed),
 -- lines and rectangles, enough for forms, invoices and barcodes
 --
 --   local doc = pdf.new({title, author})
 --   local p = doc:page({width, height, top_down})   -- points (1/72 in); A4 by default; top_down: y from the top
 --   p:text(x, y, "Ação", {font, size, align, color})    -- y: the baseline; font: helvetica | helvetica-bold |
---                                                       -- courier | courier-bold; align: left | center | right
+--                                                       -- helvetica-oblique | helvetica-boldoblique | courier |
+--                                                       -- courier-bold; align: left | center | right
 --   p:line(x1, y1, x2, y2, {width, color, dash})
 --   p:rect(x, y, w, h, {fill, stroke, width, color, fill_color})   -- (top_down: y is the top edge)
 --   doc:width("text", font, size) → points;  doc:wrap(text, font, size, max_width) → [lines]
@@ -36,8 +37,11 @@ local FONTS = {
     ["helvetica-bold"] = {ref = "F2", base = "Helvetica-Bold", widths = W.helvetica_bold},
     courier = {ref = "F3", base = "Courier"},
     ["courier-bold"] = {ref = "F4", base = "Courier-Bold"},
+    -- the obliques have the uprights' widths
+    ["helvetica-oblique"] = {ref = "F5", base = "Helvetica-Oblique", widths = W.helvetica},
+    ["helvetica-boldoblique"] = {ref = "F6", base = "Helvetica-BoldOblique", widths = W.helvetica_bold},
 }
-local FONT_ORDER = ["helvetica", "helvetica-bold", "courier", "courier-bold"]
+local FONT_ORDER = ["helvetica", "helvetica-bold", "courier", "courier-bold", "helvetica-oblique", "helvetica-boldoblique"]
 
 -- Windows-1252's 128..159
 local CP1252 = {[0x20AC] = 128, [0x201A] = 130, [0x0192] = 131, [0x201E] = 132, [0x2026] = 133, [0x2020] = 134,
