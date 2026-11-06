@@ -165,14 +165,37 @@ static void K(gemm)(const REAL *a, const REAL *b, REAL *c, int64_t M, int64_t Kd
     pool_run(K(gemm_part), &j, nt);
 }
 
-/* t[c×r] = transpose of m[r×c]; NULL when out of memory */
+/* t[c×r] = transpose of m[r×c], rows [i0, i1) of m */
+static void K(transpose_rows)(const REAL *m, REAL *t, int64_t r, int64_t c, int64_t i0, int64_t i1) {
+    for (int64_t b0 = i0; b0 < i1; b0 += 32)
+        for (int64_t j0 = 0; j0 < c; j0 += 32)
+            for (int64_t i = b0; i < i1 && i < b0 + 32; i++)
+                for (int64_t j = j0; j < c && j < j0 + 32; j++) t[j * r + i] = m[i * c + j];
+}
+
+typedef struct { const REAL *m; REAL *t; int64_t r, c; } K(transpose_job);
+
+static void K(transpose_part)(void *arg, int part, int nparts) {
+    K(transpose_job) *j = arg;
+    int64_t blocks = (j->r + 31) / 32;
+    int64_t i0 = blocks * part / nparts * 32, i1 = blocks * (part + 1) / nparts * 32;
+    if (i1 > j->r) i1 = j->r;
+    if (i1 > i0) K(transpose_rows)(j->m, j->t, j->r, j->c, i0, i1);
+}
+
+/* t[c×r] = transpose of m[r×c] (on the thread pool when large); NULL when out of memory */
 static REAL *K(transpose)(const REAL *m, int64_t r, int64_t c) {
     REAL *t = malloc((size_t)(r * c) * sizeof(REAL) + 1);
     if (!t) return NULL;
-    for (int64_t i0 = 0; i0 < r; i0 += 32)
-        for (int64_t j0 = 0; j0 < c; j0 += 32)
-            for (int64_t i = i0; i < r && i < i0 + 32; i++)
-                for (int64_t j = j0; j < c && j < j0 + 32; j++) t[j * r + i] = m[i * c + j];
+    int nt = pool_threads();
+    int64_t blocks = (r + 31) / 32;
+    if (nt > blocks) nt = (int)blocks;
+    if (nt <= 1 || r * c < (1 << 16)) {
+        K(transpose_rows)(m, t, r, c, 0, r);
+    } else {
+        K(transpose_job) j = {m, t, r, c};
+        pool_run(K(transpose_part), &j, nt);
+    }
     return t;
 }
 

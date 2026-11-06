@@ -47,37 +47,64 @@
  * returns when all are done. One call uses the pool at a time: a call from
  * another goroutine that finds it busy runs on its own thread, so goroutines
  * that each call matmul do not oversubscribe the CPUs. The parts write
- * disjoint memory and never touch the VM. */
+ * disjoint memory and never touch the VM.
+ *
+ * Each worker has its own slot. The caller fills the slot of each worker that
+ * takes part, then bumps the slot's gen (release); a worker reads only its
+ * own slot, and only after seeing its gen move, and the caller rewrites a slot
+ * only after that worker has finished its previous part (pool_done). Workers
+ * spin on their gen for a short while before sleeping on a condition
+ * variable, because a training step makes many calls back to back and waking
+ * a sleeping thread costs tens of microseconds. */
 
 typedef void (*pool_fn)(void *arg, int part, int nparts);
 
+#if defined(__x86_64__) || defined(__i386__)
+#define cpu_relax() __builtin_ia32_pause()
+#elif defined(__aarch64__)
+#define cpu_relax() __asm__ __volatile__("yield")
+#else
+#define cpu_relax() ((void)0)
+#endif
+
+#define POOL_MAX 64
+#define POOL_SPIN 4000   /* pauses before a worker sleeps (~100 µs) */
+
+typedef struct {
+    pool_fn fn;
+    void *arg;
+    int part, nparts;
+    unsigned gen;                      /* atomic: bumped when the slot holds a new part */
+    char pad[64 - 2 * sizeof(void *) - 3 * sizeof(int)];
+} PoolSlot;
+
+static PoolSlot pool_slot[POOL_MAX];
 static pthread_mutex_t pool_busy = PTHREAD_MUTEX_INITIALIZER;   /* held by the call using the pool */
 static pthread_mutex_t pool_m = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t pool_start = PTHREAD_COND_INITIALIZER, pool_done = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t pool_wake = PTHREAD_COND_INITIALIZER;
 static pthread_once_t pool_once = PTHREAD_ONCE_INIT;
 static int pool_max = 1;            /* caller + workers */
 static int pool_active = 0;         /* threads taking part (≤ pool_max); 0 = not set yet */
-static unsigned pool_gen = 0;
-static int pool_remaining = 0;
-static pool_fn pool_task;
-static void *pool_arg;
-static int pool_parts;
+static int pool_sleepers = 0;       /* workers waiting on pool_wake (under pool_m) */
+static int pool_done = 0;           /* atomic: parts finished in the current call */
 
 static void *pool_worker(void *p) {
-    int id = (int)(intptr_t)p;
-    unsigned seen = 0;
+    PoolSlot *slot = &pool_slot[(intptr_t)p];
+    unsigned seen = 0;              /* gens start at 0, before any worker exists */
     for (;;) {
-        pthread_mutex_lock(&pool_m);
-        while (pool_gen == seen) pthread_cond_wait(&pool_start, &pool_m);
-        seen = pool_gen;
-        pool_fn fn = pool_task;
-        void *arg = pool_arg;
-        int n = pool_parts;
-        pthread_mutex_unlock(&pool_m);
-        if (id < n) fn(arg, id, n);
-        pthread_mutex_lock(&pool_m);
-        if (--pool_remaining == 0) pthread_cond_signal(&pool_done);
-        pthread_mutex_unlock(&pool_m);
+        int spins = 0;
+        while (__atomic_load_n(&slot->gen, __ATOMIC_ACQUIRE) == seen) {
+            if (++spins < POOL_SPIN) { cpu_relax(); continue; }
+            pthread_mutex_lock(&pool_m);
+            pool_sleepers++;
+            while (__atomic_load_n(&slot->gen, __ATOMIC_ACQUIRE) == seen) pthread_cond_wait(&pool_wake, &pool_m);
+            pool_sleepers--;
+            pthread_mutex_unlock(&pool_m);
+            spins = 0;
+        }
+        seen++;
+        slot->fn(slot->arg, slot->part, slot->nparts);
+        __atomic_fetch_add(&pool_done, 1, __ATOMIC_RELEASE);
     }
     return NULL;
 }
@@ -85,16 +112,17 @@ static void *pool_worker(void *p) {
 static void pool_init(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 1;
-    if (n > 64) n = 64;
+    if (n > POOL_MAX) n = POOL_MAX;
     int started = 1;
     for (int i = 1; i < n; i++) {
         pthread_t t;
         pthread_attr_t at;
         pthread_attr_init(&at);
         pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&t, &at, pool_worker, (void *)(intptr_t)i) == 0) started++;
+        int ok = pthread_create(&t, &at, pool_worker, (void *)(intptr_t)i) == 0;
         pthread_attr_destroy(&at);
-        if (started != i + 1) break;
+        if (!ok) break;
+        started++;
     }
     pool_max = started;
     if (pool_active == 0) {
@@ -113,22 +141,25 @@ static int pool_threads(void) {
 }
 
 static void pool_run(pool_fn fn, void *arg, int n) {
+    if (n > pool_max) n = pool_max;
     if (n <= 1 || pthread_mutex_trylock(&pool_busy) != 0) {
         fn(arg, 0, 1);   /* the pool is busy (another goroutine): do it all here */
         return;
     }
+    __atomic_store_n(&pool_done, 0, __ATOMIC_RELAXED);
+    for (int i = 1; i < n; i++) {
+        PoolSlot *s = &pool_slot[i];
+        s->fn = fn;
+        s->arg = arg;
+        s->part = i;
+        s->nparts = n;
+        __atomic_fetch_add(&s->gen, 1, __ATOMIC_RELEASE);
+    }
     pthread_mutex_lock(&pool_m);
-    pool_task = fn;
-    pool_arg = arg;
-    pool_parts = n;
-    pool_remaining = pool_max - 1;
-    pool_gen++;
-    pthread_cond_broadcast(&pool_start);
+    if (pool_sleepers > 0) pthread_cond_broadcast(&pool_wake);
     pthread_mutex_unlock(&pool_m);
     fn(arg, 0, n);
-    pthread_mutex_lock(&pool_m);
-    while (pool_remaining > 0) pthread_cond_wait(&pool_done, &pool_m);
-    pthread_mutex_unlock(&pool_m);
+    while (__atomic_load_n(&pool_done, __ATOMIC_ACQUIRE) < n - 1) cpu_relax();
     pthread_mutex_unlock(&pool_busy);
 }
 
