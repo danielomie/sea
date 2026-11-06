@@ -106,29 +106,35 @@ static SeaValue t_matvec_back(SeaVM *vm, int argc, SeaValue *args) {
 /* ---- batched products (matmul) ----
  *
  * gemm: C[M×N] (+)= A[M×K] · B[K×N], row-major. Blocked for the cache: K in
- * blocks of GEMM_KB, then panels of 8 columns of B (GEMM_KB×8 doubles stay in
- * L1), then 4 rows of A at a time; the 4×8 tile of C lives in registers. */
+ * blocks of GEMM_KB, then panels of GEMM_NR columns of B (GEMM_KB×16 doubles,
+ * 32 KB, stay in L1), then GEMM_MR rows of A at a time; the 8×16 tile of C
+ * lives in registers. */
 
 #define GEMM_KB 256
+#define GEMM_MR 8
+#define GEMM_NR 16
+
+/* 8 doubles: one AVX-512 register (two AVX2 or four NEON registers elsewhere) */
+typedef double v8d __attribute__((vector_size(64)));
+
+static inline v8d v8_load(const double *p) { v8d v; memcpy(&v, p, sizeof v); return v; }
+static inline void v8_store(double *p, v8d v) { memcpy(p, &v, sizeof v); }
 
 static void gemm_tile(const double *a, int64_t lda, const double *b, int64_t ldb,
                       double *c, int64_t ldc, int64_t kb, int64_t mr, int64_t nr) {
-    if (mr == 4 && nr == 8) {
-        double c0[8], c1[8], c2[8], c3[8];
-        for (int j = 0; j < 8; j++) { c0[j] = c[j]; c1[j] = c[ldc + j]; c2[j] = c[2 * ldc + j]; c3[j] = c[3 * ldc + j]; }
-        const double *a0 = a, *a1 = a + lda, *a2 = a + 2 * lda, *a3 = a + 3 * lda;
+    if (mr == GEMM_MR && nr == GEMM_NR) {
+        /* 8×16 tile of C in 16 vector registers */
+        v8d c0[GEMM_MR], c1[GEMM_MR];
+        for (int m = 0; m < GEMM_MR; m++) { c0[m] = v8_load(c + m * ldc); c1[m] = v8_load(c + m * ldc + 8); }
         for (int64_t k = 0; k < kb; k++) {
-            const double *br = b + k * ldb;
-            double x0 = a0[k], x1 = a1[k], x2 = a2[k], x3 = a3[k];
-            for (int j = 0; j < 8; j++) {
-                double bj = br[j];
-                c0[j] += x0 * bj;
-                c1[j] += x1 * bj;
-                c2[j] += x2 * bj;
-                c3[j] += x3 * bj;
+            v8d b0 = v8_load(b + k * ldb), b1 = v8_load(b + k * ldb + 8);
+            for (int m = 0; m < GEMM_MR; m++) {
+                double x = a[m * lda + k];
+                c0[m] += x * b0;
+                c1[m] += x * b1;
             }
         }
-        for (int j = 0; j < 8; j++) { c[j] = c0[j]; c[ldc + j] = c1[j]; c[2 * ldc + j] = c2[j]; c[3 * ldc + j] = c3[j]; }
+        for (int m = 0; m < GEMM_MR; m++) { v8_store(c + m * ldc, c0[m]); v8_store(c + m * ldc + 8, c1[m]); }
         return;
     }
     for (int64_t m = 0; m < mr; m++) {
@@ -146,10 +152,10 @@ static void gemm(const double *a, const double *b, double *c, int64_t M, int64_t
     if (!accumulate) memset(c, 0, (size_t)(M * N) * sizeof(double));
     for (int64_t k0 = 0; k0 < K; k0 += GEMM_KB) {
         int64_t kb = K - k0 < GEMM_KB ? K - k0 : GEMM_KB;
-        for (int64_t j0 = 0; j0 < N; j0 += 8) {
-            int64_t nr = N - j0 < 8 ? N - j0 : 8;
-            for (int64_t m0 = 0; m0 < M; m0 += 4) {
-                int64_t mr = M - m0 < 4 ? M - m0 : 4;
+        for (int64_t j0 = 0; j0 < N; j0 += GEMM_NR) {
+            int64_t nr = N - j0 < GEMM_NR ? N - j0 : GEMM_NR;
+            for (int64_t m0 = 0; m0 < M; m0 += GEMM_MR) {
+                int64_t mr = M - m0 < GEMM_MR ? M - m0 : GEMM_MR;
                 gemm_tile(a + m0 * K + k0, K, b + k0 * N + j0, N, c + m0 * N + j0, N, kb, mr, nr);
             }
         }
