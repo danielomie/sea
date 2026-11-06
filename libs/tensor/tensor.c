@@ -32,8 +32,105 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <pthread.h>
+#include <unistd.h>
+
 #define GEMM_KB 256
 #define GEMM_MR 8
+#define GEMM_PAR_MIN (1 << 20)   /* multiply-adds below which a product stays on one thread */
+
+/* ---- thread pool for the matrix products ----
+ *
+ * Started on first use with one worker per CPU (SEA_TENSOR_THREADS or
+ * tensor.threads(n) set how many take part; 1 turns it off). pool_run(fn,
+ * arg, n) runs fn(arg, part, n) for part = 0..n-1, part 0 on the caller, and
+ * returns when all are done. One call uses the pool at a time: a call from
+ * another goroutine that finds it busy runs on its own thread, so goroutines
+ * that each call matmul do not oversubscribe the CPUs. The parts write
+ * disjoint memory and never touch the VM. */
+
+typedef void (*pool_fn)(void *arg, int part, int nparts);
+
+static pthread_mutex_t pool_busy = PTHREAD_MUTEX_INITIALIZER;   /* held by the call using the pool */
+static pthread_mutex_t pool_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pool_start = PTHREAD_COND_INITIALIZER, pool_done = PTHREAD_COND_INITIALIZER;
+static pthread_once_t pool_once = PTHREAD_ONCE_INIT;
+static int pool_max = 1;            /* caller + workers */
+static int pool_active = 0;         /* threads taking part (≤ pool_max); 0 = not set yet */
+static unsigned pool_gen = 0;
+static int pool_remaining = 0;
+static pool_fn pool_task;
+static void *pool_arg;
+static int pool_parts;
+
+static void *pool_worker(void *p) {
+    int id = (int)(intptr_t)p;
+    unsigned seen = 0;
+    for (;;) {
+        pthread_mutex_lock(&pool_m);
+        while (pool_gen == seen) pthread_cond_wait(&pool_start, &pool_m);
+        seen = pool_gen;
+        pool_fn fn = pool_task;
+        void *arg = pool_arg;
+        int n = pool_parts;
+        pthread_mutex_unlock(&pool_m);
+        if (id < n) fn(arg, id, n);
+        pthread_mutex_lock(&pool_m);
+        if (--pool_remaining == 0) pthread_cond_signal(&pool_done);
+        pthread_mutex_unlock(&pool_m);
+    }
+    return NULL;
+}
+
+static void pool_init(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    if (n > 64) n = 64;
+    int started = 1;
+    for (int i = 1; i < n; i++) {
+        pthread_t t;
+        pthread_attr_t at;
+        pthread_attr_init(&at);
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&t, &at, pool_worker, (void *)(intptr_t)i) == 0) started++;
+        pthread_attr_destroy(&at);
+        if (started != i + 1) break;
+    }
+    pool_max = started;
+    if (pool_active == 0) {
+        const char *env = getenv("SEA_TENSOR_THREADS");
+        int want = env ? atoi(env) : pool_max;
+        pool_active = want < 1 ? 1 : want > pool_max ? pool_max : want;
+    } else if (pool_active > pool_max) {
+        pool_active = pool_max;
+    }
+}
+
+static int pool_threads(void) {
+    if (pool_active == 1) return 1;   /* turned off: do not start the workers */
+    pthread_once(&pool_once, pool_init);
+    return pool_active;
+}
+
+static void pool_run(pool_fn fn, void *arg, int n) {
+    if (n <= 1 || pthread_mutex_trylock(&pool_busy) != 0) {
+        fn(arg, 0, 1);   /* the pool is busy (another goroutine): do it all here */
+        return;
+    }
+    pthread_mutex_lock(&pool_m);
+    pool_task = fn;
+    pool_arg = arg;
+    pool_parts = n;
+    pool_remaining = pool_max - 1;
+    pool_gen++;
+    pthread_cond_broadcast(&pool_start);
+    pthread_mutex_unlock(&pool_m);
+    fn(arg, 0, n);
+    pthread_mutex_lock(&pool_m);
+    while (pool_remaining > 0) pthread_cond_wait(&pool_done, &pool_m);
+    pthread_mutex_unlock(&pool_m);
+    pthread_mutex_unlock(&pool_busy);
+}
 
 #define REAL double
 #define SFX _f64
@@ -412,6 +509,25 @@ static SeaValue t_load(SeaVM *vm, int argc, SeaValue *args) {
     return sea_int_val(off + (int64_t)(r * (size_t)kd));
 }
 
+/* threads([n]) → n: how many threads the matrix products use (default: one
+ * per CPU, or SEA_TENSOR_THREADS); with n, sets it (1 = only the caller). */
+static SeaValue t_threads(SeaVM *vm, int argc, SeaValue *args) {
+    (void)vm;
+    if (argc > 0 && !sea_is_nil(args[0])) {
+        int64_t n = iv(args[0]);
+        if (n < 1) n = 1;
+        if (n == 1) {
+            pool_active = 1;
+        } else {
+            if (pool_active == 1) pool_active = (int)n;   /* let pool_init start the workers */
+            pthread_once(&pool_once, pool_init);
+            pool_active = n > pool_max ? pool_max : (int)n;
+        }
+    }
+    if (pool_active == 0) pthread_once(&pool_once, pool_init);
+    return sea_int_val(pool_active);
+}
+
 /* ---- module ---- */
 
 SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
@@ -437,5 +553,6 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     sea_mod_set(mod, "adam",             t_adam);
     sea_mod_set(mod, "save",             t_save);
     sea_mod_set(mod, "load",             t_load);
+    sea_mod_set(mod, "threads",          t_threads);
     return sea_obj_val(&mod->obj);
 }
