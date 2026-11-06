@@ -15,6 +15,7 @@
  *
  *   local tensor = require("../../libs/tensor/tensor")
  *   tensor.matvec(x, xo, w, nin, nout, out, oo)   -- out[oo+j] = Σ_i x[xo+i]·w[i·nout+j]
+ *   tensor.matmul(x, xo, w, T, nin, nout, out, oo) -- the same for T rows at once
  *
  * Matrices are row-major: w[i*nout + j] links input i to output j.
  * Arguments are borrowed; nothing is allocated (functions return nil, or a
@@ -98,6 +99,105 @@ static SeaValue t_matvec_back(SeaVM *vm, int argc, SeaValue *args) {
             acc += row[j] * g[j];
         }
         dx[i] += acc;
+    }
+    return SEA_NIL_VAL;
+}
+
+/* ---- batched products (matmul) ----
+ *
+ * gemm: C[M×N] (+)= A[M×K] · B[K×N], row-major. Blocked for the cache: K in
+ * blocks of GEMM_KB, then panels of 8 columns of B (GEMM_KB×8 doubles stay in
+ * L1), then 4 rows of A at a time; the 4×8 tile of C lives in registers. */
+
+#define GEMM_KB 256
+
+static void gemm_tile(const double *a, int64_t lda, const double *b, int64_t ldb,
+                      double *c, int64_t ldc, int64_t kb, int64_t mr, int64_t nr) {
+    if (mr == 4 && nr == 8) {
+        double c0[8], c1[8], c2[8], c3[8];
+        for (int j = 0; j < 8; j++) { c0[j] = c[j]; c1[j] = c[ldc + j]; c2[j] = c[2 * ldc + j]; c3[j] = c[3 * ldc + j]; }
+        const double *a0 = a, *a1 = a + lda, *a2 = a + 2 * lda, *a3 = a + 3 * lda;
+        for (int64_t k = 0; k < kb; k++) {
+            const double *br = b + k * ldb;
+            double x0 = a0[k], x1 = a1[k], x2 = a2[k], x3 = a3[k];
+            for (int j = 0; j < 8; j++) {
+                double bj = br[j];
+                c0[j] += x0 * bj;
+                c1[j] += x1 * bj;
+                c2[j] += x2 * bj;
+                c3[j] += x3 * bj;
+            }
+        }
+        for (int j = 0; j < 8; j++) { c[j] = c0[j]; c[ldc + j] = c1[j]; c[2 * ldc + j] = c2[j]; c[3 * ldc + j] = c3[j]; }
+        return;
+    }
+    for (int64_t m = 0; m < mr; m++) {
+        double *cr = c + m * ldc;
+        const double *ar = a + m * lda;
+        for (int64_t k = 0; k < kb; k++) {
+            double x = ar[k];
+            const double *br = b + k * ldb;
+            for (int64_t j = 0; j < nr; j++) cr[j] += x * br[j];
+        }
+    }
+}
+
+static void gemm(const double *a, const double *b, double *c, int64_t M, int64_t K, int64_t N, int accumulate) {
+    if (!accumulate) memset(c, 0, (size_t)(M * N) * sizeof(double));
+    for (int64_t k0 = 0; k0 < K; k0 += GEMM_KB) {
+        int64_t kb = K - k0 < GEMM_KB ? K - k0 : GEMM_KB;
+        for (int64_t j0 = 0; j0 < N; j0 += 8) {
+            int64_t nr = N - j0 < 8 ? N - j0 : 8;
+            for (int64_t m0 = 0; m0 < M; m0 += 4) {
+                int64_t mr = M - m0 < 4 ? M - m0 : 4;
+                gemm_tile(a + m0 * K + k0, K, b + k0 * N + j0, N, c + m0 * N + j0, N, kb, mr, nr);
+            }
+        }
+    }
+}
+
+/* t[c×r] = transpose of m[r×c] */
+static double *transpose(SeaVM *vm, const double *m, int64_t r, int64_t c, const char *fn) {
+    double *t = malloc((size_t)(r * c) * sizeof(double) + 1);
+    if (!t) sea_vm_error_noreturn(vm, "tensor.%s: out of memory", fn);
+    for (int64_t i0 = 0; i0 < r; i0 += 32)
+        for (int64_t j0 = 0; j0 < c; j0 += 32)
+            for (int64_t i = i0; i < r && i < i0 + 32; i++)
+                for (int64_t j = j0; j < c && j < j0 + 32; j++) t[j * r + i] = m[i * c + j];
+    return t;
+}
+
+/* matmul(x, xo, w, T, nin, nout, out, oo): T rows at once —
+ * out[oo + t·nout + j] = Σ_i x[xo + t·nin + i]·w[i·nout + j] */
+static SeaValue t_matmul(SeaVM *vm, int argc, SeaValue *args) {
+    need(vm, argc, 8, "matmul");
+    int64_t xo = iv(args[1]), T = iv(args[3]), nin = iv(args[4]), nout = iv(args[5]), oo = iv(args[7]);
+    const double *x = fa(vm, args[0], xo, T * nin, "matmul");
+    const double *w = fa(vm, args[2], 0, nin * nout, "matmul");
+    double *out = fa(vm, args[6], oo, T * nout, "matmul");
+    gemm(x, w, out, T, nin, nout, 0);
+    return SEA_NIL_VAL;
+}
+
+/* matmul_back(dout, doo, x, xo, w, dw, T, nin, nout, dx, dxo):
+ * dw += xᵀ · dout, dx += dout · wᵀ (dw or dx may be nil to skip it) */
+static SeaValue t_matmul_back(SeaVM *vm, int argc, SeaValue *args) {
+    need(vm, argc, 11, "matmul_back");
+    int64_t doo = iv(args[1]), xo = iv(args[3]), T = iv(args[6]), nin = iv(args[7]), nout = iv(args[8]), dxo = iv(args[10]);
+    const double *g = fa(vm, args[0], doo, T * nout, "matmul_back");
+    if (!sea_is_nil(args[5])) {
+        const double *x = fa(vm, args[2], xo, T * nin, "matmul_back");
+        double *dw = fa(vm, args[5], 0, nin * nout, "matmul_back");
+        double *xt = transpose(vm, x, T, nin, "matmul_back");
+        gemm(xt, g, dw, nin, T, nout, 1);
+        free(xt);
+    }
+    if (!sea_is_nil(args[9])) {
+        const double *w = fa(vm, args[4], 0, nin * nout, "matmul_back");
+        double *dx = fa(vm, args[9], dxo, T * nin, "matmul_back");
+        double *wt = transpose(vm, w, nin, nout, "matmul_back");
+        gemm(g, wt, dx, T, nout, nin, 1);
+        free(wt);
     }
     return SEA_NIL_VAL;
 }
@@ -339,6 +439,16 @@ static SeaValue t_copy(SeaVM *vm, int argc, SeaValue *args) {
     return SEA_NIL_VAL;
 }
 
+/* scale(a, off, n, k): a[off+i] *= k */
+static SeaValue t_scale(SeaVM *vm, int argc, SeaValue *args) {
+    need(vm, argc, 4, "scale");
+    int64_t off = iv(args[1]), n = iv(args[2]);
+    double k = dv(args[3]);
+    double *a = fa(vm, args[0], off, n, "scale");
+    for (int64_t i = 0; i < n; i++) a[i] *= k;
+    return SEA_NIL_VAL;
+}
+
 /* adam(w, g, m, v, n, lr, beta1, beta2, c1, c2, eps): one Adam step, with
  * the bias corrections c1 = 1 − beta1^t, c2 = 1 − beta2^t */
 static SeaValue t_adam(SeaVM *vm, int argc, SeaValue *args) {
@@ -401,6 +511,8 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     SeaTable *mod = sea_mod_new();
     sea_mod_set(mod, "matvec",           t_matvec);
     sea_mod_set(mod, "matvec_back",      t_matvec_back);
+    sea_mod_set(mod, "matmul",           t_matmul);
+    sea_mod_set(mod, "matmul_back",      t_matmul_back);
     sea_mod_set(mod, "matvec_cols",      t_matvec_cols);
     sea_mod_set(mod, "matvec_cols_back", t_matvec_cols_back);
     sea_mod_set(mod, "rmsnorm",          t_rmsnorm);
@@ -413,6 +525,7 @@ SEA_EXPORT SeaValue sea_open(SeaVM *vm) {
     sea_mod_set(mod, "zero",             t_zero);
     sea_mod_set(mod, "add",              t_add);
     sea_mod_set(mod, "copy",             t_copy);
+    sea_mod_set(mod, "scale",            t_scale);
     sea_mod_set(mod, "adam",             t_adam);
     sea_mod_set(mod, "save",             t_save);
     sea_mod_set(mod, "load",             t_load);
